@@ -1,0 +1,40 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs and diagnostics
+*.log
+*.tmp
+*.trace
+Diagnostics/
+logs/
+
+# Flutter and Dart generated files
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+
+# Android and Gradle generated files
+.gradle/
+captures/
+local.properties
+key.properties
+*.jks
+*.keystore
+*.aab
+*.apk
+
+# Web generated output
+dist/
+out/
+.wrangler/
+
+# Local secrets and machine state
+.env
+.env.*
+secrets/
+Juicr Signature/

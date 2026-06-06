@@ -1,0 +1,144 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+def hasReleaseSigningConfig =
+    keystoreProperties["storeFile"] &&
+    keystoreProperties["storePassword"] &&
+    keystoreProperties["keyAlias"] &&
+    keystoreProperties["keyPassword"]
+def playIntegrityCloudProjectNumber =
+    project.findProperty("PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER")
+        ?: System.getenv("PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER")
+        ?: "0"
+def expectedSigningCertSha256 =
+    project.findProperty("JUICR_EXPECTED_SIGNING_CERT_SHA256")
+        ?: System.getenv("JUICR_EXPECTED_SIGNING_CERT_SHA256")
+        ?: ""
+def blockUntrustedApp =
+    project.findProperty("JUICR_BLOCK_UNTRUSTED_APP")
+        ?: System.getenv("JUICR_BLOCK_UNTRUSTED_APP")
+        ?: "false"
+def releaseExpectedSigningCertSha256 =
+    project.findProperty("JUICR_RELEASE_EXPECTED_SIGNING_CERT_SHA256")
+        ?: System.getenv("JUICR_RELEASE_EXPECTED_SIGNING_CERT_SHA256")
+        ?: expectedSigningCertSha256
+        ?: ""
+def releaseBlockUntrustedApp =
+    project.findProperty("JUICR_RELEASE_BLOCK_UNTRUSTED_APP")
+        ?: System.getenv("JUICR_RELEASE_BLOCK_UNTRUSTED_APP")
+        ?: "false"
+def enableP2pRuntime =
+    project.findProperty("JUICR_ENABLE_P2P_RUNTIME")
+        ?: System.getenv("JUICR_ENABLE_P2P_RUNTIME")
+        ?: project.findProperty("JUICR_ENABLE_DEV_P2P_RUNTIME")
+        ?: System.getenv("JUICR_ENABLE_DEV_P2P_RUNTIME")
+        ?: "true"
+def adMobProductionApplicationId = "ca-app-pub-3319548483346434~9972946132"
+def adMobTestApplicationId = "ca-app-pub-3940256099942544~3347511713"
+def escapedExpectedSigningCertSha256 = expectedSigningCertSha256
+    .toString()
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+def escapedReleaseExpectedSigningCertSha256 = releaseExpectedSigningCertSha256
+    .toString()
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
+android {
+    namespace = "app.juicr.flutter"
+    compileSdk = flutter.compileSdkVersion
+    ndkVersion = flutter.ndkVersion
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    defaultConfig {
+        applicationId = "app.juicr.flutter"
+        minSdkVersion = flutter.minSdkVersion
+        targetSdk = flutter.targetSdkVersion
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+        manifestPlaceholders += [
+            playIntegrityCloudProjectNumber: playIntegrityCloudProjectNumber.toString(),
+            adMobApplicationId: adMobProductionApplicationId
+        ]
+        buildConfigField "String", "JUICR_EXPECTED_SIGNING_CERT_SHA256", "\"${escapedExpectedSigningCertSha256}\""
+        buildConfigField "boolean", "JUICR_BLOCK_UNTRUSTED_APP", blockUntrustedApp.toString().toBoolean().toString()
+        buildConfigField "boolean", "JUICR_ENABLE_P2P_RUNTIME", enableP2pRuntime.toString().toBoolean().toString()
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs += file("../../native_16kb_overrides/release")
+        }
+    }
+
+    packagingOptions {
+        pickFirst "lib/**/libc++_shared.so"
+        pickFirst "lib/**/libjlibtorrent-1.2.0.18.so"
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseSigningConfig) {
+                keyAlias = keystoreProperties["keyAlias"]
+                keyPassword = keystoreProperties["keyPassword"]
+                storeFile = file(keystoreProperties["storeFile"])
+                storePassword = keystoreProperties["storePassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            manifestPlaceholders.adMobApplicationId = adMobTestApplicationId
+        }
+        profile {
+            initWith debug
+            manifestPlaceholders.adMobApplicationId = adMobTestApplicationId
+        }
+        release {
+            signingConfig = hasReleaseSigningConfig ? signingConfigs.release : signingConfigs.debug
+            manifestPlaceholders.adMobApplicationId = adMobProductionApplicationId
+            buildConfigField "String", "JUICR_EXPECTED_SIGNING_CERT_SHA256", "\"${escapedReleaseExpectedSigningCertSha256}\""
+            buildConfigField "boolean", "JUICR_BLOCK_UNTRUSTED_APP", releaseBlockUntrustedApp.toString().toBoolean().toString()
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+    implementation "com.google.android.play:integrity:1.6.0"
+    implementation "androidx.media3:media3-exoplayer:1.10.1"
+    implementation "androidx.media3:media3-exoplayer-dash:1.10.1"
+    implementation "androidx.media3:media3-exoplayer-hls:1.10.1"
+    implementation "androidx.media3:media3-ui:1.10.1"
+    implementation "com.frostwire:jlibtorrent:1.2.0.18"
+    implementation "com.frostwire:jlibtorrent-android-arm:1.2.0.18"
+    implementation "com.frostwire:jlibtorrent-android-arm64:1.2.0.18"
+    implementation "com.frostwire:jlibtorrent-android-x86_64:1.2.0.18"
+}

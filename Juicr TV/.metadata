@@ -1,0 +1,20 @@
+# This file tracks properties of this Flutter project.
+# Used by Flutter tooling to assess capabilities and perform upgrades.
+
+version:
+  revision: "local"
+  channel: "stable"
+
+project_type: app
+
+migration:
+  platforms:
+    - platform: root
+      create_revision: local
+      base_revision: local
+    - platform: android
+      create_revision: local
+      base_revision: local
+
+  unmanaged_files:
+    - 'lib/main.dart'

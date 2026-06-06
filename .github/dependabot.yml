@@ -1,0 +1,56 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pub"
+    directory: "/Juicr Android"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      juicr-android-dart:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pub"
+    directory: "/Juicr TV"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      juicr-tv-dart:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "gradle"
+    directory: "/Juicr Android/android"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      juicr-android-gradle:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "gradle"
+    directory: "/Juicr TV/android"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      juicr-tv-gradle:
+        patterns:
+          - "*"

@@ -1,0 +1,234 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to rebuild or publish"
+        required: true
+        default: v1.0.1
+      publish_release:
+        description: "Attach APKs and update the GitHub release"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build Android release APKs
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Juicr Android
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.release_tag }}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+(\.[0-9]+)*([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag must start with v and include a version, for example v1.0.1."
+            exit 1
+          fi
+
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Prepare release signing
+        shell: bash
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          for name in RELEASE_KEYSTORE_BASE64 RELEASE_STORE_PASSWORD RELEASE_KEY_ALIAS RELEASE_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is missing. Add release signing secrets before rebuilding a release."
+              exit 1
+            fi
+          done
+
+          mkdir -p android/app
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 -d > android/app/release-keystore.jks
+          cat > android/key.properties <<EOF
+          storeFile=release-keystore.jks
+          storePassword=$RELEASE_STORE_PASSWORD
+          keyAlias=$RELEASE_KEY_ALIAS
+          keyPassword=$RELEASE_KEY_PASSWORD
+          EOF
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build universal APK
+        env:
+          JUICR_BLOCK_UNTRUSTED_APP: "false"
+          JUICR_RELEASE_BLOCK_UNTRUSTED_APP: "false"
+        run: flutter build apk --release
+
+      - name: Build ABI APKs
+        env:
+          JUICR_BLOCK_UNTRUSTED_APP: "false"
+          JUICR_RELEASE_BLOCK_UNTRUSTED_APP: "false"
+        run: flutter build apk --release --split-per-abi --obfuscate --split-debug-info=build/symbols/juicr
+
+      - name: Collect release APKs
+        shell: bash
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          assets="$GITHUB_WORKSPACE/release-assets/$tag"
+          mkdir -p "$assets"
+
+          cp build/app/outputs/flutter-apk/app-release.apk "$assets/juicr-${tag}-universal.apk"
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "$assets/juicr-${tag}-armeabi-v7a.apk"
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "$assets/juicr-${tag}-arm64-v8a.apk"
+          cp build/app/outputs/flutter-apk/app-x86_64-release.apk "$assets/juicr-${tag}-x86_64.apk"
+
+          ls -lh "$assets"
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          version="${{ steps.release.outputs.version }}"
+          repo_root="$(git rev-parse --show-toplevel)"
+          changelog="$repo_root/CHANGELOG.md"
+          notes="$GITHUB_WORKSPACE/release-notes.md"
+          previous_tag="$(git -C "$repo_root" describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+
+          extract_section() {
+            local section="$1"
+            awk -v version="$version" -v wanted="$section" '
+              BEGIN { in_version=0; in_section=0 }
+              $0 ~ "^## \\[" version "\\]" { in_version=1; next }
+              in_version && $0 ~ "^## \\[" { exit }
+              in_version && $0 ~ "^### " {
+                current = substr($0, 5)
+                if (current == wanted) {
+                  in_section = 1
+                  next
+                }
+                if (in_section) exit
+                next
+              }
+              in_section {
+                if ($0 ~ "^### " || $0 ~ "^## \\[") exit
+                print
+              }
+            ' "$changelog" | sed '/^[[:space:]]*$/d'
+          }
+
+          validate_section() {
+            local section="$1"
+            local body
+            body="$(extract_section "$section")"
+            if [ -z "$body" ]; then
+              echo "::error::CHANGELOG.md is missing a populated '$section' section for $version."
+              exit 1
+            fi
+            if printf '%s\n' "$body" | grep -Eiq '^- (None|Nothing queued|TBD|TODO)'; then
+              echo "::error::CHANGELOG.md contains placeholder text in '$section' for $version."
+              exit 1
+            fi
+          }
+
+          write_section() {
+            local section="$1"
+            echo "## $section"
+            echo
+            extract_section "$section"
+            echo
+          }
+
+          release_contributors() {
+            local range
+            if [ -n "$previous_tag" ]; then
+              range="${previous_tag}..${tag}"
+            else
+              range="$tag"
+            fi
+
+            local contributors
+            contributors="$(git -C "$repo_root" shortlog -s --no-merges "$range" | awk '{ $1=""; sub(/^ /, ""); print "- " $0 }')"
+            if [ -n "$contributors" ]; then
+              printf '%s\n' "$contributors"
+            else
+              echo "- Team Juicr"
+            fi
+          }
+
+          validate_section Added
+          validate_section Changed
+          validate_section Fixed
+          validate_section "Recent work"
+
+          {
+            write_section Added
+            write_section Changed
+            write_section Fixed
+            write_section "Recent work"
+            echo "## Contributors"
+            echo
+            release_contributors
+          } > "$notes"
+
+          cat "$notes"
+
+      - name: Upload APK workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: juicr-${{ steps.release.outputs.tag }}-release-apks
+          path: release-assets/${{ steps.release.outputs.tag }}/*.apk
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_release
+        shell: bash
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "Juicr $TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" --title "Juicr $TAG" --notes-file release-notes.md
+          fi
+
+          gh release upload "$TAG" \
+            "release-assets/$TAG/juicr-${TAG}-universal.apk" \
+            "release-assets/$TAG/juicr-${TAG}-armeabi-v7a.apk" \
+            "release-assets/$TAG/juicr-${TAG}-arm64-v8a.apk" \
+            "release-assets/$TAG/juicr-${TAG}-x86_64.apk" \
+            --clobber

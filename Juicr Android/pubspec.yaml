@@ -1,0 +1,37 @@
+name: juicr
+description: Juicr app with curated catalogs and selectable playback options.
+publish_to: "none"
+version: 1.0.1+2
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dynamic_color: ^1.7.0
+  flutter_inappwebview: ^6.2.0-beta.3
+  flutter_vlc_player: ^7.4.4
+  google_mobile_ads: ^8.0.0
+  flutter_secure_storage: ^10.3.1
+  http: ^1.2.2
+  shared_preferences: ^2.5.3
+  video_player: ^2.9.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+dependency_overrides:
+  flutter_vlc_player:
+    path: local_plugins/flutter_vlc_player
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/splash/juicr_splash.gif
+  fonts:
+    - family: BebasNeue
+      fonts:
+        - asset: assets/fonts/BebasNeue-Regular.ttf
