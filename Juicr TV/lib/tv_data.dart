@@ -22,16 +22,18 @@ class _TvApi {
   Future<List<_TvItem>> catalog({
     required String type,
     required String sort,
+    int page = 1,
     String genre = '',
     String search = '',
     bool deepSearch = false,
     bool preferDefaultCatalog = false,
   }) async {
+    final safePage = page < 1 ? 1 : page;
     final uri = Uri.parse('$_apiBase/catalog').replace(
       queryParameters: {
         'type': type,
         'sort': sort,
-        'page': '1',
+        'page': safePage.toString(),
         if (genre.trim().isNotEmpty &&
             genre.trim().toLowerCase() != 'all genres')
           'genre': genre.trim(),

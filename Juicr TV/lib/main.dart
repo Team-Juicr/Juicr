@@ -146,12 +146,14 @@ class _TvCatalogLaneRequest {
     required this.sort,
     required this.type,
     required this.catalogSort,
+    this.pages = 3,
   });
 
   final _TvDiscoveryKind kind;
   final _TvDiscoverySort sort;
   final String type;
   final String catalogSort;
+  final int pages;
 }
 
 class TvHomePage extends StatefulWidget {
@@ -374,43 +376,53 @@ class _TvHomePageState extends State<TvHomePage> {
           sort: _TvDiscoverySort.popular,
           type: 'live_tv',
           catalogSort: _TvDiscoverySort.popular.catalogSortId,
+          pages: 2,
         ),
         _TvCatalogLaneRequest(
           kind: _TvDiscoveryKind.liveTv,
           sort: _TvDiscoverySort.newest,
           type: 'live_tv',
           catalogSort: _TvDiscoverySort.newest.catalogSortId,
+          pages: 2,
         ),
         _TvCatalogLaneRequest(
           kind: _TvDiscoveryKind.liveTv,
           sort: _TvDiscoverySort.featured,
           type: 'live_tv',
           catalogSort: _TvDiscoverySort.featured.catalogSortId,
+          pages: 2,
         ),
         const _TvCatalogLaneRequest(
           kind: _TvDiscoveryKind.liveTv,
           sort: _TvDiscoverySort.popular,
           type: 'livetv',
           catalogSort: 'top',
+          pages: 1,
         ),
         const _TvCatalogLaneRequest(
           kind: _TvDiscoveryKind.liveTv,
           sort: _TvDiscoverySort.popular,
           type: 'channel',
           catalogSort: 'top',
+          pages: 1,
         ),
         const _TvCatalogLaneRequest(
           kind: _TvDiscoveryKind.liveTv,
           sort: _TvDiscoverySort.popular,
           type: 'channels',
           catalogSort: 'top',
+          pages: 1,
         ),
       ];
       final results = await Future.wait<Object?>([
         for (final request in catalogRequests)
-          _safeCatalog(type: request.type, sort: request.catalogSort),
+          _safeCatalog(
+            type: request.type,
+            sort: request.catalogSort,
+            pages: request.pages,
+          ),
         _api.homeEditorial(),
-      ]).timeout(const Duration(seconds: 22));
+      ]).timeout(const Duration(seconds: 35));
       final editorialResult = results[catalogRequests.length];
       final editorial = editorialResult is _TvHomeEditorialEdition
           ? editorialResult
@@ -497,18 +509,29 @@ class _TvHomePageState extends State<TvHomePage> {
   Future<List<_TvItem>> _safeCatalog({
     required String type,
     required String sort,
+    int pages = 1,
   }) async {
-    try {
-      return await _api
-          .catalog(type: type, sort: sort)
-          .timeout(const Duration(seconds: 8));
-    } catch (error) {
-      debugPrint(
-        'Juicr TV catalog lane skipped '
-        'lane=$type bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
-      );
-      return const <_TvItem>[];
+    final merged = <String, _TvItem>{};
+    final safePages = pages.clamp(1, 4).toInt();
+    for (var page = 1; page <= safePages; page += 1) {
+      try {
+        final items = await _api
+            .catalog(type: type, sort: sort, page: page)
+            .timeout(const Duration(seconds: 6));
+        if (items.isEmpty) break;
+        for (final item in items) {
+          merged['${item.type}:${item.id}'] = item;
+        }
+      } catch (error) {
+        debugPrint(
+          'Juicr TV catalog page skipped '
+          'lane=$type page=$page bucket=${_apiErrorBucket(error)} '
+          'errorType=${error.runtimeType}',
+        );
+        break;
+      }
     }
+    return merged.values.toList(growable: false);
   }
 
   Future<_TvHydratedHomeSignals> _hydrateHomeSignalRails(
