@@ -1170,8 +1170,11 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
       builder: (context) =>
           _TvGenreMenuDialog(selected: _genre, genres: widget.genres),
     );
-    if (selected == null || !mounted) return;
-    setState(() => _genre = selected);
+    if (!mounted) return;
+    if (selected != null) {
+      setState(() => _genre = selected);
+    }
+    _focusMenuNode(_genreFocusNode);
   }
 
   @override
@@ -1367,31 +1370,57 @@ class _TvGenreMenuDialog extends StatefulWidget {
 }
 
 class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
-  final FocusNode _firstGenreFocusNode = FocusNode(
-    debugLabel: 'tv-genre-menu-first',
-  );
+  final Map<String, FocusNode> _genreFocusNodes = <String, FocusNode>{};
 
   @override
   void initState() {
     super.initState();
+    _syncGenreFocusNodes();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _firstGenreFocusNode.requestFocus();
+      _genreNode(widget.selected).requestFocus();
     });
+  }
+
+  List<String> get _choices => <String>[
+    'All genres',
+    ...widget.genres.where((genre) => genre != 'All genres'),
+  ];
+
+  void _syncGenreFocusNodes() {
+    final choices = _choices.toSet();
+    for (final key in _genreFocusNodes.keys.toList()) {
+      if (!choices.contains(key)) {
+        _genreFocusNodes.remove(key)?.dispose();
+      }
+    }
+    for (final genre in choices) {
+      _genreFocusNodes.putIfAbsent(
+        genre,
+        () => FocusNode(debugLabel: 'tv-genre-menu-$genre'),
+      );
+    }
+  }
+
+  FocusNode _genreNode(String genre) {
+    return _genreFocusNodes.putIfAbsent(
+      genre,
+      () => FocusNode(debugLabel: 'tv-genre-menu-$genre'),
+    );
   }
 
   @override
   void dispose() {
-    _firstGenreFocusNode.dispose();
+    for (final node in _genreFocusNodes.values) {
+      node.dispose();
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final choices = <String>[
-      'All genres',
-      ...widget.genres.where((genre) => genre != 'All genres'),
-    ];
+    _syncGenreFocusNodes();
+    final choices = _choices;
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 170, vertical: 50),
@@ -1442,9 +1471,7 @@ class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
                               label: genre,
                               selected: genre == widget.selected,
                               autofocus: genre == choices.first,
-                              focusNode: genre == choices.first
-                                  ? _firstGenreFocusNode
-                                  : null,
+                              focusNode: _genreNode(genre),
                               onPressed: () => Navigator.of(context).pop(genre),
                             ),
                         ],
@@ -1756,6 +1783,7 @@ class _TvChoicePill extends StatelessWidget {
     return _TvFocusable(
       autofocus: autofocus,
       focusNode: focusNode,
+      autoReveal: true,
       onPressed: onPressed,
       builder: (focused) {
         return AnimatedContainer(

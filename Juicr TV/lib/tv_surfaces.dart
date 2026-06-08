@@ -926,6 +926,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     debugLabel: 'tv-settings-dialog-first',
   );
   final List<FocusNode> _actionFocusNodes = <FocusNode>[];
+  FocusNode? _lastActionFocusNode;
 
   late _TvSettingsState _current = widget.settings;
 
@@ -968,6 +969,27 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     return _actionFocusNodes[index - 1];
   }
 
+  void _rememberActionFocus(FocusNode node) {
+    _lastActionFocusNode = node;
+  }
+
+  void _restoreLastActionFocus() {
+    final node = _lastActionFocusNode ?? _firstActionFocusNode;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !node.canRequestFocus) return;
+      node.requestFocus();
+      final context = node.context;
+      if (context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: _tvDuration(160),
+        curve: Curves.easeOutCubic,
+        alignment: 0.42,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+      );
+    });
+  }
+
   void _update(_TvSettingsState next) {
     setState(() => _current = next);
     widget.onSettingsChanged(next);
@@ -978,8 +1000,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     required String title,
     required String selected,
     required List<String> options,
-  }) {
-    return showDialog<String>(
+  }) async {
+    final result = await showDialog<String>(
       context: context,
       builder: (dialogContext) => _TvSettingsOptionDialog(
         title: title,
@@ -987,6 +1009,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         options: options,
       ),
     );
+    _restoreLastActionFocus();
+    return result;
   }
 
   Future<void> _showStatusDialog(
@@ -994,8 +1018,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     required String title,
     required String message,
     IconData icon = Icons.info_outline_rounded,
-  }) {
-    return showDialog<void>(
+  }) async {
+    await showDialog<void>(
       context: context,
       builder: (dialogContext) => Dialog(
         backgroundColor: Colors.transparent,
@@ -1047,6 +1071,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         ),
       ),
     );
+    _restoreLastActionFocus();
   }
 
   Future<bool> _confirmBuiltInConsent(
@@ -1077,6 +1102,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         ],
       ),
     );
+    _restoreLastActionFocus();
     return accepted == true;
   }
 
@@ -1108,6 +1134,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         ],
       ),
     );
+    _restoreLastActionFocus();
     return accepted == true;
   }
 
@@ -1127,6 +1154,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         onSettingsChanged: update,
       ),
     );
+    _restoreLastActionFocus();
   }
 
   Future<void> _openUserAddOn(
@@ -1175,6 +1203,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         },
       ),
     );
+    _restoreLastActionFocus();
   }
 
   Future<void> _addUserAddOn(
@@ -1191,6 +1220,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
       context: context,
       builder: (dialogContext) => const _TvAddOnEntryDialog(),
     );
+    _restoreLastActionFocus();
     if (added == null) return;
     update(consented.copyWith(userAddOns: [...consented.userAddOns, added]));
   }
@@ -1655,6 +1685,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                                 action: actions[index],
                                 autofocus: index == 0,
                                 focusNode: _actionNode(index),
+                                onFocus: () =>
+                                    _rememberActionFocus(_actionNode(index)),
                                 onArrowUp: index == 0
                                     ? _firstActionFocusNode.requestFocus
                                     : () =>
@@ -1684,6 +1716,7 @@ class _TvSettingsLineCard extends StatelessWidget {
     required this.action,
     this.autofocus = false,
     this.focusNode,
+    this.onFocus,
     this.onArrowUp,
     this.onArrowDown,
   });
@@ -1691,6 +1724,7 @@ class _TvSettingsLineCard extends StatelessWidget {
   final _TvSettingsAction action;
   final bool autofocus;
   final FocusNode? focusNode;
+  final VoidCallback? onFocus;
   final VoidCallback? onArrowUp;
   final VoidCallback? onArrowDown;
 
@@ -1700,6 +1734,7 @@ class _TvSettingsLineCard extends StatelessWidget {
       autofocus: autofocus,
       focusNode: focusNode,
       autoReveal: true,
+      onFocus: onFocus,
       onPressed: action.onPressed,
       onArrowUp: onArrowUp,
       onArrowDown: onArrowDown,
@@ -3190,6 +3225,8 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
         );
       },
     );
+    if (!mounted) return;
+    _trailerFocusNode.requestFocus();
   }
 
   Future<void> _openTrailer(BuildContext context, _TvTrailer trailer) async {
@@ -3389,6 +3426,8 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
         );
       },
     );
+    if (!mounted) return;
+    _episodesFocusNode.requestFocus();
   }
 
   List<Widget> _detailActions(BuildContext context) {

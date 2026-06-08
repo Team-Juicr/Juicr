@@ -1165,6 +1165,9 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         );
       },
     );
+    if (!mounted) return;
+    _showControls();
+    _sourcesFocusNode.requestFocus();
   }
 
   Future<void> _setPlaybackSpeed(double speed) async {
@@ -1425,6 +1428,9 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         );
       },
     );
+    if (!mounted) return;
+    _showControls();
+    _settingsFocusNode.requestFocus();
   }
 
   KeyEventResult _focusPlaybackControl(TraversalDirection direction) {
