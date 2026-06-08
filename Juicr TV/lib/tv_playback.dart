@@ -213,18 +213,17 @@ class _TvNativePlaybackController extends ChangeNotifier {
   _TvNativePlaybackController.textureExoplayer(
     _PlaybackSession session, {
     LibVlcHlsRelay? relay,
-  })
-    : engine = _TvPlaybackEngine.textureExoplayer,
-      _video = VideoPlayerController.networkUrl(
-        Uri.parse(session.tvMediaUrl),
-        formatHint: session.videoFormatHint,
-        httpHeaders: session.httpHeaders,
-        viewType: VideoViewType.textureView,
-      ),
-      _media3 = null,
-      _vlc = null,
-      _relay = relay,
-      _relayProof = null {
+  }) : engine = _TvPlaybackEngine.textureExoplayer,
+       _video = VideoPlayerController.networkUrl(
+         Uri.parse(session.tvMediaUrl),
+         formatHint: session.videoFormatHint,
+         httpHeaders: session.httpHeaders,
+         viewType: VideoViewType.textureView,
+       ),
+       _media3 = null,
+       _vlc = null,
+       _relay = relay,
+       _relayProof = null {
     _video!.addListener(notifyListeners);
   }
 
@@ -232,19 +231,18 @@ class _TvNativePlaybackController extends ChangeNotifier {
     _PlaybackSession session, {
     LibVlcHlsRelay? relay,
     _TvRelayStartupProof? relayProof,
-  })
-    : engine = _TvPlaybackEngine.libvlc,
-      _video = null,
-      _media3 = null,
-      _relay = relay,
-      _relayProof = relayProof,
-      _vlc = VlcPlayerController.network(
-        session.tvMediaUrl,
-        hwAcc: HwAcc.auto,
-        autoInitialize: false,
-        autoPlay: false,
-        options: _tvVlcPlayerOptions(session.httpHeaders),
-      ) {
+  }) : engine = _TvPlaybackEngine.libvlc,
+       _video = null,
+       _media3 = null,
+       _relay = relay,
+       _relayProof = relayProof,
+       _vlc = VlcPlayerController.network(
+         session.tvMediaUrl,
+         hwAcc: HwAcc.auto,
+         autoInitialize: false,
+         autoPlay: false,
+         options: _tvVlcPlayerOptions(session.httpHeaders),
+       ) {
     _vlc!.addListener(notifyListeners);
     _relayProof?.addListener(notifyListeners);
   }
@@ -310,7 +308,9 @@ class _TvNativePlaybackController extends ChangeNotifier {
     );
   }
 
-  Future<void> initialize({Duration timeout = const Duration(seconds: 22)}) async {
+  Future<void> initialize({
+    Duration timeout = const Duration(seconds: 22),
+  }) async {
     final video = _video;
     if (video != null) return video.initialize().timeout(timeout);
     final media3 = _media3;
@@ -753,9 +753,9 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     }
     if (shouldRelay) {
       relayProof = _TvRelayStartupProof();
-      final continuousTsMode = session.tvMediaUrl
-          .toLowerCase()
-          .contains('/web/playback/session/');
+      final continuousTsMode = session.tvMediaUrl.toLowerCase().contains(
+        '/web/playback/session/',
+      );
       relay = await LibVlcHlsRelay.start(
         upstreamUri: Uri.parse(session.tvMediaUrl),
         headers: session.httpHeaders,
@@ -824,10 +824,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     }
   }
 
-  bool _shouldRelaySession(
-    _PlaybackSession session,
-    _TvPlaybackEngine engine,
-  ) {
+  bool _shouldRelaySession(_PlaybackSession session, _TvPlaybackEngine engine) {
     if (_isNativeHlsSession(session)) return true;
     return engine == _TvPlaybackEngine.libvlc &&
         session.tvMediaUrl.toLowerCase().contains('/web/playback/session/');
@@ -902,11 +899,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   Future<_PlaybackSession?> _freshPlaybackSessionForCurrentEpisode() async {
     try {
       final sessions = await _api
-          .playbackSessions(
-            widget.item,
-            season: _season,
-            episode: _episode,
-          )
+          .playbackSessions(widget.item, season: _season, episode: _episode)
           .timeout(const Duration(seconds: 45));
       return sessions.isEmpty ? null : sessions.first;
     } catch (_) {
@@ -943,9 +936,11 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       var selectedIndex = index;
       _TvNativePlaybackController? preparedController;
       Object? lastError;
-      for (var candidateIndex = index;
-          candidateIndex < _sessions.length;
-          candidateIndex += 1) {
+      for (
+        var candidateIndex = index;
+        candidateIndex < _sessions.length;
+        candidateIndex += 1
+      ) {
         try {
           preparedController = await _prepareWithLadder(
             _sessions[candidateIndex],
@@ -1645,9 +1640,8 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                               _TvPlaybackTopBar(
                                 title: widget.item.title,
                                 showNextEpisode:
-                                    widget.settings.nextEpisode &&
                                     (widget.item.type == 'series' ||
-                                        widget.item.type == 'animation'),
+                                    widget.item.type == 'animation'),
                                 nextEpisodeLabel: 'Next episode',
                                 backFocusNode: _backFocusNode,
                                 nextEpisodeFocusNode: _nextEpisodeFocusNode,

@@ -1599,7 +1599,7 @@ String _friendlyPlaybackError(Object error) {
       'media_timeout' => 'Playback took too long to start.',
       'media_network' => 'Playback could not reach the video right now.',
       'media_format' => 'Playback format is not ready for this TV yet.',
-      _ => 'Playback is unavailable right now. (${error.bucket})',
+      _ => 'Playback is unavailable right now.',
     };
   }
   if (error is _TvApiException) {

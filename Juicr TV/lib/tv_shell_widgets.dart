@@ -27,6 +27,10 @@ class _TvMainSurface extends StatelessWidget {
     required this.accountSignedIn,
     required this.accountLabel,
     required this.accountSyncLabel,
+    required this.recentCount,
+    required this.savedCount,
+    required this.completedCount,
+    required this.activeWatchLabel,
     required this.tvSettings,
     required this.onTvSettingsChanged,
     required this.onAccountSignIn,
@@ -76,6 +80,10 @@ class _TvMainSurface extends StatelessWidget {
   final bool accountSignedIn;
   final String accountLabel;
   final String accountSyncLabel;
+  final int recentCount;
+  final int savedCount;
+  final int completedCount;
+  final String activeWatchLabel;
   final _TvSettingsState tvSettings;
   final ValueChanged<_TvSettingsState> onTvSettingsChanged;
   final VoidCallback onAccountSignIn;
@@ -228,6 +236,10 @@ class _TvMainSurface extends StatelessWidget {
           accountSignedIn: accountSignedIn,
           accountLabel: accountLabel,
           accountSyncLabel: accountSyncLabel,
+          recentCount: recentCount,
+          savedCount: savedCount,
+          completedCount: completedCount,
+          activeWatchLabel: activeWatchLabel,
           settings: tvSettings,
           onSettingsChanged: onTvSettingsChanged,
           onAccountSignIn: onAccountSignIn,
@@ -1093,7 +1105,8 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
         context,
         duration: _tvDuration(140),
         curve: Curves.easeOutCubic,
-        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+        alignment: 0.45,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
       );
     });
   }
@@ -1458,9 +1471,11 @@ class _TvLibraryMenuDialog extends StatefulWidget {
 }
 
 class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
-  final FocusNode _firstLibraryFocusNode = FocusNode(
-    debugLabel: 'tv-library-menu-first',
-  );
+  late final Map<_TvLibraryFilter, FocusNode> _filterNodes = {
+    for (final filter in _TvLibraryFilter.values)
+      filter: FocusNode(debugLabel: 'tv-library-menu-${filter.name}'),
+  };
+  final FocusNode _applyFocusNode = FocusNode(debugLabel: 'tv-library-apply');
 
   late _TvLibraryFilter _filter = widget.filter;
 
@@ -1469,14 +1484,34 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _firstLibraryFocusNode.requestFocus();
+      _filterNodes[_filter]?.requestFocus();
     });
   }
 
   @override
   void dispose() {
-    _firstLibraryFocusNode.dispose();
+    for (final node in _filterNodes.values) {
+      node.dispose();
+    }
+    _applyFocusNode.dispose();
     super.dispose();
+  }
+
+  void _focusFilter(_TvLibraryFilter filter) {
+    final node = _filterNodes[filter];
+    if (node == null) return;
+    node.requestFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = node.context;
+      if (!mounted || context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: _tvDuration(140),
+        curve: Curves.easeOutCubic,
+        alignment: 0.45,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+      );
+    });
   }
 
   @override
@@ -1531,17 +1566,33 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
                       _TvChoiceListSection(
                         title: 'Library',
                         children: [
-                          for (final filter in _TvLibraryFilter.values)
+                          for (
+                            var index = 0;
+                            index < _TvLibraryFilter.values.length;
+                            index++
+                          )
                             _TvChoiceRow(
-                              icon: filter.icon,
-                              label: filter.label,
-                              selected: _filter == filter,
-                              autofocus:
-                                  filter == _TvLibraryFilter.values.first,
-                              focusNode: filter == _TvLibraryFilter.values.first
-                                  ? _firstLibraryFocusNode
-                                  : null,
-                              onPressed: () => setState(() => _filter = filter),
+                              icon: _TvLibraryFilter.values[index].icon,
+                              label: _TvLibraryFilter.values[index].label,
+                              selected:
+                                  _filter == _TvLibraryFilter.values[index],
+                              autofocus: index == 0,
+                              focusNode:
+                                  _filterNodes[_TvLibraryFilter.values[index]],
+                              onPressed: () => setState(
+                                () => _filter = _TvLibraryFilter.values[index],
+                              ),
+                              onArrowUp: index == 0
+                                  ? null
+                                  : () => _focusFilter(
+                                      _TvLibraryFilter.values[index - 1],
+                                    ),
+                              onArrowDown:
+                                  index == _TvLibraryFilter.values.length - 1
+                                  ? () => _applyFocusNode.requestFocus()
+                                  : () => _focusFilter(
+                                      _TvLibraryFilter.values[index + 1],
+                                    ),
                             ),
                         ],
                       ),
@@ -1549,6 +1600,9 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
                       _TvTextButton(
                         icon: Icons.check_rounded,
                         label: 'Apply',
+                        focusNode: _applyFocusNode,
+                        onArrowUp: () =>
+                            _focusFilter(_TvLibraryFilter.values.last),
                         onPressed: () => Navigator.of(context).pop(_filter),
                       ),
                     ],

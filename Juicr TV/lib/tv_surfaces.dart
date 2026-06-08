@@ -427,6 +427,10 @@ class _TvSettingsSurface extends StatelessWidget {
     required this.accountSignedIn,
     required this.accountLabel,
     required this.accountSyncLabel,
+    required this.recentCount,
+    required this.savedCount,
+    required this.completedCount,
+    required this.activeWatchLabel,
     required this.settings,
     required this.onSettingsChanged,
     required this.onAccountSignIn,
@@ -446,6 +450,10 @@ class _TvSettingsSurface extends StatelessWidget {
   final bool accountSignedIn;
   final String accountLabel;
   final String accountSyncLabel;
+  final int recentCount;
+  final int savedCount;
+  final int completedCount;
+  final String activeWatchLabel;
   final _TvSettingsState settings;
   final ValueChanged<_TvSettingsState> onSettingsChanged;
   final VoidCallback onAccountSignIn;
@@ -461,16 +469,12 @@ class _TvSettingsSurface extends StatelessWidget {
     final sections = [
       const _TvSettingsSection(
         'General',
-        'Theme, display, language, and TV home preferences.',
+        'Theme, accent, text size, motion, and TV home preferences.',
         Icons.settings_rounded,
         [
           _TvSettingsLine(
             'Appearance',
             'Use the TV visual style tuned for large screens and remote viewing.',
-          ),
-          _TvSettingsLine(
-            'Language',
-            'App language follows the device until TV language controls are enabled.',
           ),
           _TvSettingsLine(
             'Text size',
@@ -520,7 +524,7 @@ class _TvSettingsSurface extends StatelessWidget {
           ),
           _TvSettingsLine(
             'Add-ons',
-            'User-added source links stay visible as safe labels only.',
+            'Saved add-on links stay manageable by safe labels only.',
           ),
           _TvSettingsLine(
             'Personal servers',
@@ -550,16 +554,16 @@ class _TvSettingsSurface extends StatelessWidget {
             'Timing and recovery controls stay grouped away from everyday settings.',
           ),
           _TvSettingsLine(
-            'Storage',
-            'TV storage tools will use safe counts and clear actions.',
+            'Advanced P2P',
+            'Advanced P2P stays locked until TV runtime support is proven.',
           ),
         ],
       ),
       _TvSettingsSection(
-        'Account',
+        'Account & Library',
         accountSignedIn
             ? '$accountLabel - $accountSyncLabel'
-            : 'Sign in, sync status, and account data.',
+            : 'Sign in, library sync, saved titles, and watch time.',
         Icons.account_circle_rounded,
         [
           _TvSettingsLine(
@@ -572,7 +576,11 @@ class _TvSettingsSurface extends StatelessWidget {
             'Library sync',
             'Saved titles and watch progress can follow your account.',
           ),
-          _TvSettingsLine('Sync status', accountSyncLabel),
+          _TvSettingsLine(
+            'Local library',
+            '$savedCount saved, $recentCount recent, $completedCount completed.',
+          ),
+          _TvSettingsLine('Active watch time', activeWatchLabel),
           const _TvSettingsLine(
             'Privacy',
             'Your account session stays in secure TV storage.',
@@ -606,7 +614,8 @@ class _TvSettingsSurface extends StatelessWidget {
       sections: sections,
       entryFocusNode: entryFocusNode,
       onFocusNavigation: onFocusNavigation,
-      onOpenSection: (section) => _showTvSettingsSection(context, section),
+      onOpenSection: (section, originFocusNode) =>
+          _showTvSettingsSection(context, section, originFocusNode),
       onRememberFocus: onRememberFocus,
     );
   }
@@ -614,8 +623,9 @@ class _TvSettingsSurface extends StatelessWidget {
   Future<void> _showTvSettingsSection(
     BuildContext context,
     _TvSettingsSection section,
-  ) {
-    return showDialog<void>(
+    FocusNode originFocusNode,
+  ) async {
+    await showDialog<void>(
       context: context,
       builder: (dialogContext) => _TvSettingsSectionDialog(
         section: section,
@@ -623,12 +633,21 @@ class _TvSettingsSurface extends StatelessWidget {
         accountSignedIn: accountSignedIn,
         accountLabel: accountLabel,
         accountSyncLabel: accountSyncLabel,
+        recentCount: recentCount,
+        savedCount: savedCount,
+        completedCount: completedCount,
+        activeWatchLabel: activeWatchLabel,
         onAccountSignIn: onAccountSignIn,
         onAccountSignOut: onAccountSignOut,
         onAccountSync: onAccountSync,
         onSettingsChanged: onSettingsChanged,
       ),
     );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (originFocusNode.canRequestFocus) {
+        originFocusNode.requestFocus();
+      }
+    });
   }
 }
 
@@ -644,7 +663,8 @@ class _TvSettingsGrid extends StatefulWidget {
   final List<_TvSettingsSection> sections;
   final FocusNode entryFocusNode;
   final VoidCallback onFocusNavigation;
-  final ValueChanged<_TvSettingsSection> onOpenSection;
+  final void Function(_TvSettingsSection section, FocusNode originFocusNode)
+  onOpenSection;
   final ValueChanged<FocusNode> onRememberFocus;
 
   @override
@@ -749,7 +769,10 @@ class _TvSettingsGridState extends State<_TvSettingsGrid> {
                 onArrowDown: index + _columnCount < widget.sections.length
                     ? () => _focusIndex(index + _columnCount, alignment: 0.56)
                     : null,
-                onPressed: () => widget.onOpenSection(widget.sections[index]),
+                onPressed: () => widget.onOpenSection(
+                  widget.sections[index],
+                  _nodeFor(index),
+                ),
               ),
           ],
         );
@@ -869,6 +892,10 @@ class _TvSettingsSectionDialog extends StatefulWidget {
     required this.accountSignedIn,
     required this.accountLabel,
     required this.accountSyncLabel,
+    required this.recentCount,
+    required this.savedCount,
+    required this.completedCount,
+    required this.activeWatchLabel,
     required this.onAccountSignIn,
     required this.onAccountSignOut,
     required this.onAccountSync,
@@ -880,6 +907,10 @@ class _TvSettingsSectionDialog extends StatefulWidget {
   final bool accountSignedIn;
   final String accountLabel;
   final String accountSyncLabel;
+  final int recentCount;
+  final int savedCount;
+  final int completedCount;
+  final String activeWatchLabel;
   final VoidCallback onAccountSignIn;
   final VoidCallback onAccountSignOut;
   final VoidCallback onAccountSync;
@@ -894,6 +925,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
   final FocusNode _firstActionFocusNode = FocusNode(
     debugLabel: 'tv-settings-dialog-first',
   );
+  final List<FocusNode> _actionFocusNodes = <FocusNode>[];
 
   late _TvSettingsState _current = widget.settings;
 
@@ -914,7 +946,26 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
   @override
   void dispose() {
     _firstActionFocusNode.dispose();
+    for (final node in _actionFocusNodes) {
+      node.dispose();
+    }
     super.dispose();
+  }
+
+  void _syncActionFocusNodes(int count) {
+    final extraCount = math.max(0, count - 1);
+    while (_actionFocusNodes.length > extraCount) {
+      _actionFocusNodes.removeLast().dispose();
+    }
+    while (_actionFocusNodes.length < extraCount) {
+      final index = _actionFocusNodes.length + 1;
+      _actionFocusNodes.add(FocusNode(debugLabel: 'tv-settings-action-$index'));
+    }
+  }
+
+  FocusNode _actionNode(int index) {
+    if (index == 0) return _firstActionFocusNode;
+    return _actionFocusNodes[index - 1];
   }
 
   void _update(_TvSettingsState next) {
@@ -1311,7 +1362,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
           _TvSettingsAction(
             title: 'Add add-on',
             subtitle:
-                'Name a trusted add-on link. TV diagnostics keep private details hidden.',
+                'Name a trusted add-on link for TV-side management. Diagnostics keep private details hidden.',
             value: current.userAddOns.isEmpty
                 ? 'None'
                 : '${current.userAddOns.length} saved',
@@ -1322,7 +1373,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
             _TvSettingsAction(
               title: addon.displayName,
               subtitle:
-                  'Saved add-on. Open to enable, disable, or remove this source.',
+                  'Saved add-on. Open to enable, disable, or remove this TV entry.',
               value: addon.enabled ? 'On' : 'Off',
               icon: Icons.extension_rounded,
               onPressed: () =>
@@ -1341,22 +1392,6 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 message:
                     'TV personal server setup will stay in its own source lane. Server addresses, access keys, and media links will stay out of diagnostics.',
                 icon: Icons.dns_rounded,
-              ),
-            ),
-          ),
-          _TvSettingsAction(
-            title: 'Advanced P2P',
-            subtitle:
-                'Unavailable on this TV build until TV-specific runtime support is proven.',
-            value: 'Locked',
-            icon: Icons.lock_outline_rounded,
-            onPressed: () => unawaited(
-              _showStatusDialog(
-                context,
-                title: 'Advanced P2P',
-                message:
-                    'Advanced P2P stays locked on TV unless a TV-specific runtime is present, consent is granted, and diagnostics remain safe.',
-                icon: Icons.lock_outline_rounded,
               ),
             ),
           ),
@@ -1398,8 +1433,24 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
               ),
             ),
           ),
+          _TvSettingsAction(
+            title: 'Advanced P2P',
+            subtitle:
+                'Unavailable on this TV build until TV-specific runtime support is proven.',
+            value: 'Locked',
+            icon: Icons.lock_outline_rounded,
+            onPressed: () => unawaited(
+              _showStatusDialog(
+                context,
+                title: 'Advanced P2P',
+                message:
+                    'Advanced P2P stays locked on TV unless a TV-specific runtime is present, consent is granted, and diagnostics remain safe.',
+                icon: Icons.lock_outline_rounded,
+              ),
+            ),
+          ),
         ];
-      case 'Account':
+      case 'Account & Library':
         return [
           _TvSettingsAction(
             title: widget.accountSignedIn
@@ -1428,6 +1479,38 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 : widget.onAccountSignIn,
           ),
           _TvSettingsAction(
+            title: 'Saved titles',
+            subtitle:
+                'Titles saved on this TV stay available in Library and can sync after sign-in.',
+            value: '${widget.savedCount}',
+            icon: Icons.favorite_rounded,
+            onPressed: () => unawaited(
+              _showStatusDialog(
+                context,
+                title: 'Saved titles',
+                message:
+                    'This TV has ${widget.savedCount} saved titles. Account sync can carry saved titles when you sign in.',
+                icon: Icons.favorite_rounded,
+              ),
+            ),
+          ),
+          _TvSettingsAction(
+            title: 'Continue watching',
+            subtitle:
+                'Recent titles and progress stay local first, then sync through the account adapter when available.',
+            value: '${widget.recentCount} recent',
+            icon: Icons.playlist_play_rounded,
+            onPressed: () => unawaited(
+              _showStatusDialog(
+                context,
+                title: 'Continue watching',
+                message:
+                    'This TV has ${widget.recentCount} recent titles and ${widget.completedCount} completed entries. Active watch time is ${widget.activeWatchLabel}.',
+                icon: Icons.playlist_play_rounded,
+              ),
+            ),
+          ),
+          _TvSettingsAction(
             title: widget.accountSignedIn ? 'Sign out' : 'Continue as guest',
             subtitle: widget.accountSignedIn
                 ? 'Clear the account session from this TV. Local app settings stay on this device.'
@@ -1441,7 +1524,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 : () => Navigator.of(context).pop(),
           ),
         ];
-      default:
+      case 'About & Diagnostics':
         return [
           _TvSettingsAction(
             title: 'Juicr connection',
@@ -1476,20 +1559,6 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
             ),
           ),
           _TvSettingsAction(
-            title: 'Subtitles',
-            subtitle:
-                'Caption support is enabled when subtitle data is available for the selected title.',
-            value: current.builtInSubtitles && current.subtitles ? 'On' : 'Off',
-            icon: Icons.closed_caption_rounded,
-            onPressed: () => update(
-              current.copyWith(
-                subtitles: !(current.builtInSubtitles && current.subtitles),
-                builtInSubtitles:
-                    !(current.builtInSubtitles && current.subtitles),
-              ),
-            ),
-          ),
-          _TvSettingsAction(
             title: 'Diagnostics',
             subtitle:
                 'Reports stay redacted and do not show private playback or source details.',
@@ -1505,12 +1574,15 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
             ),
           ),
         ];
+      default:
+        return const <_TvSettingsAction>[];
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final actions = _actions(context, _current, _update);
+    _syncActionFocusNodes(actions.length);
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 64, vertical: 34),
@@ -1582,15 +1654,15 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                               child: _TvSettingsLineCard(
                                 action: actions[index],
                                 autofocus: index == 0,
-                                focusNode: index == 0
-                                    ? _firstActionFocusNode
-                                    : null,
+                                focusNode: _actionNode(index),
                                 onArrowUp: index == 0
                                     ? _firstActionFocusNode.requestFocus
-                                    : null,
+                                    : () =>
+                                          _actionNode(index - 1).requestFocus(),
                                 onArrowDown: index == actions.length - 1
                                     ? _firstActionFocusNode.requestFocus
-                                    : null,
+                                    : () =>
+                                          _actionNode(index + 1).requestFocus(),
                               ),
                             ),
                         ],

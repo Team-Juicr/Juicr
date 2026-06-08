@@ -1134,6 +1134,23 @@ class _TvHomePageState extends State<TvHomePage> {
     };
   }
 
+  int get _savedLibraryCount => _likedItemKeys.length;
+
+  int get _recentLibraryCount => _recentItems.length;
+
+  int get _completedLibraryCount =>
+      _libraryStore?.state.completedKeys.length ?? 0;
+
+  String get _activeWatchLabel {
+    final seconds = _libraryStore?.state.activeWatchSeconds ?? 0;
+    if (seconds <= 0) return '0m';
+    final minutes = (seconds / 60).round();
+    if (minutes < 60) return '${minutes}m';
+    final hours = minutes ~/ 60;
+    final remainder = minutes % 60;
+    return remainder == 0 ? '${hours}h' : '${hours}h ${remainder}m';
+  }
+
   List<_TvRail> get _rails {
     final editorial = _homeEditorial;
     final rails = <_TvRail>[];
@@ -2074,11 +2091,17 @@ class _TvHomePageState extends State<TvHomePage> {
         genres: _availableDiscoveryGenres,
       ),
     );
-    if (!mounted || selection == null) return;
-    setState(() {
-      _discoveryKind = selection.kind;
-      _discoverySort = selection.sort;
-      _discoveryGenre = selection.genre;
+    if (!mounted) return;
+    if (selection != null) {
+      setState(() {
+        _discoveryKind = selection.kind;
+        _discoverySort = selection.sort;
+        _discoveryGenre = selection.genre;
+      });
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _focusRememberedPageNode()) return;
+      _focusPageEntry();
     });
   }
 
@@ -2099,8 +2122,14 @@ class _TvHomePageState extends State<TvHomePage> {
       context: context,
       builder: (context) => _TvLibraryMenuDialog(filter: _libraryFilter),
     );
-    if (!mounted || selection == null) return;
-    setState(() => _libraryFilter = selection);
+    if (!mounted) return;
+    if (selection != null) {
+      setState(() => _libraryFilter = selection);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _focusRememberedPageNode()) return;
+      _focusPageEntry();
+    });
   }
 
   void _focusPageEntry() {
@@ -2668,6 +2697,10 @@ class _TvHomePageState extends State<TvHomePage> {
                                 accountSignedIn: _accountSignedIn,
                                 accountLabel: _accountLabel,
                                 accountSyncLabel: _accountSyncLabel,
+                                recentCount: _recentLibraryCount,
+                                savedCount: _savedLibraryCount,
+                                completedCount: _completedLibraryCount,
+                                activeWatchLabel: _activeWatchLabel,
                                 tvSettings: _tvSettings,
                                 onTvSettingsChanged: _updateTvSettings,
                                 onAccountSignIn: () =>
