@@ -190,6 +190,9 @@ class _TvHomePageState extends State<TvHomePage> {
   final _animation = <_TvItem>[];
   final _liveTv = <_TvItem>[];
   final _discoveryLaneItems = <String, List<_TvItem>>{};
+  final _discoveryLanePages = <String, int>{};
+  final _discoveryLaneLoading = <String>{};
+  final _discoveryLaneExhausted = <String>{};
   final _upcomingPicks = <_TvItem>[];
   List<_TvItem> _heroEditorialItems = const <_TvItem>[];
   List<_TvItem> _topSignalRemoteItems = const <_TvItem>[];
@@ -285,6 +288,9 @@ class _TvHomePageState extends State<TvHomePage> {
         _animation.clear();
         _liveTv.clear();
         _discoveryLaneItems.clear();
+        _discoveryLanePages.clear();
+        _discoveryLaneLoading.clear();
+        _discoveryLaneExhausted.clear();
         _upcomingPicks.clear();
         _heroEditorialItems = const <_TvItem>[];
         _topSignalRemoteItems = const <_TvItem>[];
@@ -429,11 +435,16 @@ class _TvHomePageState extends State<TvHomePage> {
           : null;
       final merged = <String, _TvItem>{};
       final discoveryLaneMaps = <String, Map<String, _TvItem>>{};
+      final discoveryLanePages = <String, int>{};
       for (var index = 0; index < catalogRequests.length; index++) {
         final list = results[index];
         if (list is! List<_TvItem>) continue;
         final request = catalogRequests[index];
         final laneKey = _tvDiscoveryLaneKey(request.kind, request.sort);
+        discoveryLanePages[laneKey] = math.max(
+          discoveryLanePages[laneKey] ?? 0,
+          request.pages,
+        );
         final laneMap = discoveryLaneMaps.putIfAbsent(
           laneKey,
           () => <String, _TvItem>{},
@@ -454,9 +465,11 @@ class _TvHomePageState extends State<TvHomePage> {
       final all = merged.values.where((item) => item.poster != null).toList();
       final upcomingPicks =
           discoveryLanes[_tvDiscoveryLaneKey(
-            _TvDiscoveryKind.movie,
-            _TvDiscoverySort.upcoming,
-          )]?.where((item) => item.type == 'movie').toList(growable: false) ??
+                _TvDiscoveryKind.movie,
+                _TvDiscoverySort.upcoming,
+              )]
+              ?.where((item) => item.type == 'movie')
+              .toList(growable: false) ??
           const <_TvItem>[];
       final heroEditorial = _editorialOrFallback(
         editorial?.hero,
@@ -482,6 +495,11 @@ class _TvHomePageState extends State<TvHomePage> {
         _discoveryLaneItems
           ..clear()
           ..addAll(discoveryLanes);
+        _discoveryLanePages
+          ..clear()
+          ..addAll(discoveryLanePages);
+        _discoveryLaneLoading.clear();
+        _discoveryLaneExhausted.clear();
         _upcomingPicks
           ..clear()
           ..addAll(upcomingPicks);
@@ -532,6 +550,65 @@ class _TvHomePageState extends State<TvHomePage> {
       }
     }
     return merged.values.toList(growable: false);
+  }
+
+  Future<void> _loadMoreDiscoveryLane() async {
+    if (!_tvSettings.hasCatalogSource) return;
+    final laneKey = _tvDiscoveryLaneKey(_discoveryKind, _discoverySort);
+    if (_discoveryLaneLoading.contains(laneKey) ||
+        _discoveryLaneExhausted.contains(laneKey)) {
+      return;
+    }
+    final type = switch (_discoveryKind) {
+      _TvDiscoveryKind.movie => 'movie',
+      _TvDiscoveryKind.series => 'series',
+      _TvDiscoveryKind.animation => 'animation',
+      _TvDiscoveryKind.liveTv => 'live_tv',
+    };
+    final nextPage = (_discoveryLanePages[laneKey] ?? 1) + 1;
+    _discoveryLaneLoading.add(laneKey);
+    try {
+      final items = await _api
+          .catalog(
+            type: type,
+            sort: _discoverySort.catalogSortId,
+            page: nextPage,
+          )
+          .timeout(const Duration(seconds: 7));
+      if (!mounted) return;
+      if (items.isEmpty) {
+        setState(() {
+          _discoveryLaneExhausted.add(laneKey);
+        });
+        return;
+      }
+      final existing = <String, _TvItem>{
+        for (final item in _discoveryLaneItems[laneKey] ?? const <_TvItem>[])
+          '${item.type}:${item.id}': item,
+      };
+      var added = 0;
+      for (final item in items) {
+        final normalized = _normalizeCatalogLane(item);
+        if (normalized.poster == null) continue;
+        final itemKey = '${normalized.type}:${normalized.id}';
+        if (existing.containsKey(itemKey)) continue;
+        existing[itemKey] = normalized;
+        added += 1;
+      }
+      setState(() {
+        _discoveryLanePages[laneKey] = nextPage;
+        if (added == 0) _discoveryLaneExhausted.add(laneKey);
+        _discoveryLaneItems[laneKey] = existing.values.toList(growable: false);
+      });
+    } catch (error) {
+      debugPrint(
+        'Juicr TV discovery load more skipped '
+        'lane=$laneKey page=$nextPage bucket=${_apiErrorBucket(error)} '
+        'errorType=${error.runtimeType}',
+      );
+    } finally {
+      _discoveryLaneLoading.remove(laneKey);
+    }
   }
 
   Future<_TvHydratedHomeSignals> _hydrateHomeSignalRails(
@@ -741,8 +818,11 @@ class _TvHomePageState extends State<TvHomePage> {
   }
 
   bool _isLiveTvItem(_TvItem item) {
-    if (item.type == 'live' || item.type == 'livetv' || item.type == 'channel')
+    if (item.type == 'live' ||
+        item.type == 'livetv' ||
+        item.type == 'channel') {
       return true;
+    }
     final haystack = [
       item.title,
       item.description ?? '',
@@ -956,8 +1036,9 @@ class _TvHomePageState extends State<TvHomePage> {
 
   String _redactedEmailLabel(String email) {
     final parts = email.trim().split('@');
-    if (parts.length != 2 || parts.first.isEmpty || parts.last.isEmpty)
+    if (parts.length != 2 || parts.first.isEmpty || parts.last.isEmpty) {
       return 'Signed in';
+    }
     final name = parts.first;
     final visible = name.length <= 2 ? name : name.substring(0, 2);
     return '$visible***@${parts.last}';
@@ -1358,8 +1439,9 @@ class _TvHomePageState extends State<TvHomePage> {
     ];
     final genreMatches = scoped
         .where((item) {
-          if (_itemMatchesAnyEditorialGenre(item, editorial.genres))
+          if (_itemMatchesAnyEditorialGenre(item, editorial.genres)) {
             return true;
+          }
           return allowUnknownGenre && item.genres.isEmpty;
         })
         .toList(growable: false);
@@ -1927,6 +2009,8 @@ class _TvHomePageState extends State<TvHomePage> {
       if (!mounted) return;
       if (focusNavigation) {
         _navigationRailKey.currentState?.focusSelected();
+      } else if (_focusRememberedPageNode()) {
+        return;
       } else {
         _focusPageEntry();
       }
@@ -2116,8 +2200,9 @@ class _TvHomePageState extends State<TvHomePage> {
   void _rememberPageFocus(FocusNode node) {
     if (!mounted ||
         _selectedTab < 0 ||
-        _selectedTab >= _lastPageFocusNodes.length)
+        _selectedTab >= _lastPageFocusNodes.length) {
       return;
+    }
     _lastPageFocusNodes[_selectedTab] = node;
   }
 
@@ -2592,6 +2677,8 @@ class _TvHomePageState extends State<TvHomePage> {
                                 onAccountSync: () =>
                                     unawaited(_syncAccountNow()),
                                 onDiscoveryMenu: _openDiscoveryMenu,
+                                onDiscoveryLoadMore: () =>
+                                    unawaited(_loadMoreDiscoveryLane()),
                                 onLibraryMenu: _openLibraryMenu,
                                 onOpenItem: _openItem,
                                 onPlayItem: (item) => _play(item),
@@ -2641,7 +2728,7 @@ class _TvHomePageState extends State<TvHomePage> {
                       if (_searchOpen)
                         _TvSearchOverlay(
                           items: _items,
-                          onClose: () => _closeOverlay(focusNavigation: true),
+                          onClose: _closeOverlay,
                           onOpenItem: _openItem,
                         ),
                     ],

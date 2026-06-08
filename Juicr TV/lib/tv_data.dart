@@ -1133,19 +1133,6 @@ extension _TvDiscoverySortInfo on _TvDiscoverySort {
     };
   }
 
-  String get subtitle {
-    return switch (this) {
-      _TvDiscoverySort.popular => 'Popular in all genres',
-      _TvDiscoverySort.nowPlaying => 'Now playing in all genres',
-      _TvDiscoverySort.topRated => 'Top rated in all genres',
-      _TvDiscoverySort.upcoming => 'Upcoming in all genres',
-      _TvDiscoverySort.airingToday => 'Airing today in all genres',
-      _TvDiscoverySort.onTv => 'On TV in all genres',
-      _TvDiscoverySort.newest => 'Newest in all genres',
-      _TvDiscoverySort.featured => 'Featured in all genres',
-    };
-  }
-
   String subtitleFor(_TvDiscoveryKind kind, String genre) {
     final label = labelFor(kind);
     if (genre == 'All genres') {
@@ -1322,6 +1309,18 @@ class _TvSettingsState {
   final bool safeDiagnostics;
   final List<_TvUserAddOn> userAddOns;
 
+  static const int builtInSourceCount = 5;
+
+  int get enabledBuiltInSourceCount {
+    return [
+      builtInCatalog,
+      builtInSubtitles,
+      builtInTrailers,
+      builtInLiveTv,
+      builtInPlayback,
+    ].where((enabled) => enabled).length;
+  }
+
   bool get hasUserAddOns => userAddOns.any((addon) => addon.enabled);
   bool get hasCatalogSource => builtInCatalog || builtInLiveTv;
   bool get hasPlaybackSource => builtInPlayback;
@@ -1441,6 +1440,18 @@ class _TvUserAddOn {
   final String name;
   final String manifest;
   final bool enabled;
+
+  String get displayName {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty ||
+        trimmed.contains('://') ||
+        trimmed.contains('@') ||
+        trimmed.length > 48) {
+      return 'Saved add-on';
+    }
+    final safe = trimmed.replaceAll(RegExp(r'[^A-Za-z0-9 ._\-]'), '').trim();
+    return safe.isEmpty ? 'Saved add-on' : safe;
+  }
 
   factory _TvUserAddOn.fromJson(Map<String, dynamic> json) {
     return _TvUserAddOn(

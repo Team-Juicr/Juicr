@@ -36,6 +36,7 @@ class _TvDiscoverySurface extends StatelessWidget {
     required this.entryFocusNode,
     required this.onFocusHeader,
     required this.onRememberFocus,
+    required this.onLoadMore,
   });
 
   final List<_TvItem> allItems;
@@ -52,6 +53,7 @@ class _TvDiscoverySurface extends StatelessWidget {
   final FocusNode entryFocusNode;
   final VoidCallback onFocusHeader;
   final ValueChanged<FocusNode> onRememberFocus;
+  final VoidCallback onLoadMore;
 
   @override
   Widget build(BuildContext context) {
@@ -102,6 +104,7 @@ class _TvDiscoverySurface extends StatelessWidget {
       onFocusNavigation: onFocusNavigation,
       onTopRowArrowUp: onFocusHeader,
       onRememberFocus: onRememberFocus,
+      onLoadMore: onLoadMore,
     );
   }
 
@@ -507,21 +510,21 @@ class _TvSettingsSurface extends StatelessWidget {
         ],
       ),
       const _TvSettingsSection(
-        'Add-ons',
-        'Catalog and playback add-ons you choose to manage.',
+        'Sources',
+        'Built-in tools, add-ons, and source choices you control.',
         Icons.extension_rounded,
         [
           _TvSettingsLine(
-            'Manage add-ons',
-            'TV add-on management is being prepared for remote-first controls.',
+            'Default',
+            'Built-in catalog, subtitles, trailers, Live TV, and playback stay grouped.',
           ),
           _TvSettingsLine(
-            'Built-in tools',
-            'Browsing, subtitle, trailer, and playback controls stay separated.',
+            'Add-ons',
+            'User-added source links stay visible as safe labels only.',
           ),
           _TvSettingsLine(
-            'Import and export',
-            'Add-on transfer will stay user-controlled and redacted.',
+            'Personal servers',
+            'Personal library sources stay separate from built-in and add-on choices.',
           ),
           _TvSettingsLine(
             'Safety',
@@ -1057,32 +1060,68 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     return accepted == true;
   }
 
-  Future<void> _toggleBuiltIn(
-    BuildContext context,
-    _TvSettingsState current,
-    ValueChanged<_TvSettingsState> update,
-    _TvSettingsState Function(_TvSettingsState source) enabledState,
-    _TvSettingsState Function(_TvSettingsState source) disabledState,
-    bool enabled,
-  ) async {
-    if (!enabled) {
-      update(disabledState(current));
-      return;
-    }
-    if (!await _confirmBuiltInConsent(context, current)) return;
-    update(enabledState(current.copyWith(defaultSourceConsentAccepted: true)));
-  }
-
   Future<void> _openDefaultSources(
     BuildContext context,
     _TvSettingsState current,
     ValueChanged<_TvSettingsState> update,
   ) async {
     if (!await _confirmBuiltInConsent(context, current)) return;
-    update(
-      current.copyWith(
-        defaultSourceConsentAccepted: true,
-        showDefaultSourceSettings: true,
+    final consented = current.copyWith(defaultSourceConsentAccepted: true);
+    update(consented);
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => _TvDefaultSourceDialog(
+        settings: consented,
+        onSettingsChanged: update,
+      ),
+    );
+  }
+
+  Future<void> _openUserAddOn(
+    BuildContext context,
+    _TvSettingsState current,
+    ValueChanged<_TvSettingsState> update,
+    _TvUserAddOn addon,
+  ) async {
+    var dialogState = current;
+    bool sameAddon(_TvUserAddOn candidate) {
+      return candidate.name == addon.name &&
+          candidate.manifest == addon.manifest;
+    }
+
+    void updateDialogState(_TvSettingsState next) {
+      dialogState = next;
+      update(next);
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => _TvUserAddOnDialog(
+        addon: addon,
+        onEnabledChanged: (enabled) {
+          updateDialogState(
+            dialogState.copyWith(
+              userAddOns: [
+                for (final candidate in dialogState.userAddOns)
+                  sameAddon(candidate)
+                      ? candidate.copyWith(enabled: enabled)
+                      : candidate,
+              ],
+            ),
+          );
+        },
+        onRemove: () {
+          Navigator.of(dialogContext).pop();
+          updateDialogState(
+            dialogState.copyWith(
+              userAddOns: [
+                for (final candidate in dialogState.userAddOns)
+                  if (!sameAddon(candidate)) candidate,
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -1162,8 +1201,9 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                   'Maximum',
                 ],
               );
-              if (selected != null)
+              if (selected != null) {
                 update(current.copyWith(textSize: selected));
+              }
             }()),
           ),
           _TvSettingsAction(
@@ -1179,8 +1219,9 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 selected: current.motion ? 'Full' : 'Reduced',
                 options: const ['Full', 'Reduced'],
               );
-              if (selected != null)
+              if (selected != null) {
                 update(current.copyWith(motion: selected == 'Full'));
+              }
             }()),
           ),
         ];
@@ -1198,8 +1239,9 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 selected: current.playbackEngine,
                 options: const ['Auto', 'Native'],
               );
-              if (selected != null)
+              if (selected != null) {
                 update(current.copyWith(playbackEngine: selected));
+              }
             }()),
           ),
           _TvSettingsAction(
@@ -1215,8 +1257,9 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 selected: current.preferredQuality,
                 options: const ['Balanced', 'Best available', 'Data saver'],
               );
-              if (selected != null)
+              if (selected != null) {
                 update(current.copyWith(preferredQuality: selected));
+              }
             }()),
           ),
           _TvSettingsAction(
@@ -1247,115 +1290,76 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 update(current.copyWith(nextEpisode: !current.nextEpisode)),
           ),
         ];
-      case 'Add-ons':
+      case 'Sources':
+        final builtInCount = current.enabledBuiltInSourceCount;
         return [
           _TvSettingsAction(
-            title: 'Add your own add-on',
+            title: 'Default',
             subtitle:
-                'Add a link you trust. The saved settings only show safe labels here.',
+                'Open built-in catalog, subtitles, trailers, Live TV, and playback controls.',
+            value: !current.defaultSourceConsentAccepted
+                ? 'Consent'
+                : builtInCount == 0
+                ? 'Off'
+                : builtInCount == _TvSettingsState.builtInSourceCount
+                ? 'Active'
+                : 'Partial',
+            icon: Icons.inventory_2_outlined,
+            onPressed: () =>
+                unawaited(_openDefaultSources(context, current, update)),
+          ),
+          _TvSettingsAction(
+            title: 'Add add-on',
+            subtitle:
+                'Name a trusted add-on link. TV diagnostics keep private details hidden.',
             value: current.userAddOns.isEmpty
                 ? 'None'
                 : '${current.userAddOns.length} saved',
             icon: Icons.add_link_rounded,
             onPressed: () => unawaited(_addUserAddOn(context, current, update)),
           ),
+          for (final addon in current.userAddOns)
+            _TvSettingsAction(
+              title: addon.displayName,
+              subtitle:
+                  'Saved add-on. Open to enable, disable, or remove this source.',
+              value: addon.enabled ? 'On' : 'Off',
+              icon: Icons.extension_rounded,
+              onPressed: () =>
+                  unawaited(_openUserAddOn(context, current, update, addon)),
+            ),
           _TvSettingsAction(
-            title: 'Default',
-            subtitle: current.defaultSourceConsentAccepted
-                ? 'Manage optional Built-in catalog, subtitles, trailers, Live TV, and playback.'
-                : 'Review consent before showing optional built-in tools.',
-            value: current.defaultSourceConsentAccepted ? 'Ready' : 'Consent',
-            icon: Icons.inventory_2_outlined,
-            onPressed: () =>
-                unawaited(_openDefaultSources(context, current, update)),
+            title: 'Personal servers',
+            subtitle:
+                'Personal library source setup stays separate from built-in and add-on choices.',
+            value: 'Planned',
+            icon: Icons.dns_rounded,
+            onPressed: () => unawaited(
+              _showStatusDialog(
+                context,
+                title: 'Personal servers',
+                message:
+                    'TV personal server setup will stay in its own source lane. Server addresses, access keys, and media links will stay out of diagnostics.',
+                icon: Icons.dns_rounded,
+              ),
+            ),
           ),
-          if (current.showDefaultSourceSettings) ...[
-            _TvSettingsAction(
-              title: 'Built-in catalog',
-              subtitle:
-                  'Use optional Juicr catalog results on Home and Discovery.',
-              value: current.builtInCatalog ? 'On' : 'Off',
-              icon: Icons.grid_view_rounded,
-              onPressed: () => unawaited(
-                _toggleBuiltIn(
-                  context,
-                  current,
-                  update,
-                  (source) => source.copyWith(builtInCatalog: true),
-                  (source) => source.copyWith(builtInCatalog: false),
-                  !current.builtInCatalog,
-                ),
+          _TvSettingsAction(
+            title: 'Advanced P2P',
+            subtitle:
+                'Unavailable on this TV build until TV-specific runtime support is proven.',
+            value: 'Locked',
+            icon: Icons.lock_outline_rounded,
+            onPressed: () => unawaited(
+              _showStatusDialog(
+                context,
+                title: 'Advanced P2P',
+                message:
+                    'Advanced P2P stays locked on TV unless a TV-specific runtime is present, consent is granted, and diagnostics remain safe.',
+                icon: Icons.lock_outline_rounded,
               ),
             ),
-            _TvSettingsAction(
-              title: 'Built-in subtitles',
-              subtitle:
-                  'Look up optional default subtitles in the native TV player.',
-              value: current.builtInSubtitles ? 'On' : 'Off',
-              icon: Icons.closed_caption_outlined,
-              onPressed: () => unawaited(
-                _toggleBuiltIn(
-                  context,
-                  current,
-                  update,
-                  (source) =>
-                      source.copyWith(builtInSubtitles: true, subtitles: true),
-                  (source) => source.copyWith(builtInSubtitles: false),
-                  !current.builtInSubtitles,
-                ),
-              ),
-            ),
-            _TvSettingsAction(
-              title: 'Built-in trailers',
-              subtitle: 'Show optional trailer choices on details pages.',
-              value: current.builtInTrailers ? 'On' : 'Off',
-              icon: Icons.movie_filter_outlined,
-              onPressed: () => unawaited(
-                _toggleBuiltIn(
-                  context,
-                  current,
-                  update,
-                  (source) => source.copyWith(builtInTrailers: true),
-                  (source) => source.copyWith(builtInTrailers: false),
-                  !current.builtInTrailers,
-                ),
-              ),
-            ),
-            _TvSettingsAction(
-              title: 'Built-in Live TV',
-              subtitle:
-                  'Show optional public live TV channels when this lane is enabled.',
-              value: current.builtInLiveTv ? 'On' : 'Off',
-              icon: Icons.live_tv_rounded,
-              onPressed: () => unawaited(
-                _toggleBuiltIn(
-                  context,
-                  current,
-                  update,
-                  (source) => source.copyWith(builtInLiveTv: true),
-                  (source) => source.copyWith(builtInLiveTv: false),
-                  !current.builtInLiveTv,
-                ),
-              ),
-            ),
-            _TvSettingsAction(
-              title: 'Built-in playback',
-              subtitle:
-                  'Allow optional built-in TV playback after safe app checks.',
-              value: current.builtInPlayback ? 'On' : 'Off',
-              icon: Icons.play_circle_outline_rounded,
-              onPressed: () => unawaited(
-                _toggleBuiltIn(
-                  context,
-                  current,
-                  update,
-                  (source) => source.copyWith(builtInPlayback: true),
-                  (source) => source.copyWith(builtInPlayback: false),
-                  !current.builtInPlayback,
-                ),
-              ),
-            ),
-          ],
+          ),
         ];
       case 'Advanced':
         return [
@@ -1623,7 +1627,7 @@ class _TvSettingsLineCard extends StatelessWidget {
     return _TvFocusable(
       autofocus: autofocus,
       focusNode: focusNode,
-      autoReveal: false,
+      autoReveal: true,
       onPressed: action.onPressed,
       onArrowUp: onArrowUp,
       onArrowDown: onArrowDown,
@@ -1727,6 +1731,301 @@ class _TvSettingsAction {
   final String value;
   final IconData icon;
   final VoidCallback onPressed;
+}
+
+class _TvDefaultSourceDialog extends StatefulWidget {
+  const _TvDefaultSourceDialog({
+    required this.settings,
+    required this.onSettingsChanged,
+  });
+
+  final _TvSettingsState settings;
+  final ValueChanged<_TvSettingsState> onSettingsChanged;
+
+  @override
+  State<_TvDefaultSourceDialog> createState() => _TvDefaultSourceDialogState();
+}
+
+class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
+  final _firstFocusNode = FocusNode(debugLabel: 'tv-default-source-first');
+  late _TvSettingsState _current = widget.settings;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _firstFocusNode.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _firstFocusNode.dispose();
+    super.dispose();
+  }
+
+  void _update(_TvSettingsState next) {
+    setState(() => _current = next);
+    widget.onSettingsChanged(next);
+  }
+
+  List<_TvSettingsAction> _actions(BuildContext context) {
+    return [
+      _TvSettingsAction(
+        title: 'Built-in catalog',
+        subtitle: 'Use optional Juicr catalog results on Home and Discovery.',
+        value: _current.builtInCatalog ? 'On' : 'Off',
+        icon: Icons.grid_view_rounded,
+        onPressed: () => _update(
+          _current.copyWith(builtInCatalog: !_current.builtInCatalog),
+        ),
+      ),
+      _TvSettingsAction(
+        title: 'Built-in subtitles',
+        subtitle: 'Look up optional default subtitles in the native TV player.',
+        value: _current.builtInSubtitles ? 'On' : 'Off',
+        icon: Icons.closed_caption_outlined,
+        onPressed: () {
+          final enabled = !_current.builtInSubtitles;
+          _update(
+            _current.copyWith(
+              builtInSubtitles: enabled,
+              subtitles: enabled ? true : _current.subtitles,
+            ),
+          );
+        },
+      ),
+      _TvSettingsAction(
+        title: 'Built-in trailers',
+        subtitle: 'Show optional trailer choices on details pages.',
+        value: _current.builtInTrailers ? 'On' : 'Off',
+        icon: Icons.movie_filter_outlined,
+        onPressed: () => _update(
+          _current.copyWith(builtInTrailers: !_current.builtInTrailers),
+        ),
+      ),
+      _TvSettingsAction(
+        title: 'Built-in Live TV',
+        subtitle:
+            'Show optional public live TV channels when this lane is enabled.',
+        value: _current.builtInLiveTv ? 'On' : 'Off',
+        icon: Icons.live_tv_rounded,
+        onPressed: () =>
+            _update(_current.copyWith(builtInLiveTv: !_current.builtInLiveTv)),
+      ),
+      _TvSettingsAction(
+        title: 'Built-in playback',
+        subtitle: 'Allow optional built-in TV playback after safe app checks.',
+        value: _current.builtInPlayback ? 'On' : 'Off',
+        icon: Icons.play_circle_outline_rounded,
+        onPressed: () => _update(
+          _current.copyWith(builtInPlayback: !_current.builtInPlayback),
+        ),
+      ),
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final actions = _actions(context);
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 128, vertical: 46),
+      child: Container(
+        width: 760,
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: const Color(0xF215151E),
+          borderRadius: BorderRadius.circular(28),
+          border: Border.all(color: const Color(0x22FFFFFF)),
+        ),
+        child: Stack(
+          children: [
+            Positioned(
+              top: 0,
+              right: 0,
+              child: _TvCircleIconButton(
+                icon: Icons.close_rounded,
+                size: 48,
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 4, right: 58),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Default',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Enable only the built-in tools you want on this TV.',
+                    style: TextStyle(
+                      color: Color(0xFFAAA6BD),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  for (var index = 0; index < actions.length; index++)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: _TvSettingsLineCard(
+                        action: actions[index],
+                        autofocus: index == 0,
+                        focusNode: index == 0 ? _firstFocusNode : null,
+                        onArrowUp: index == 0
+                            ? _firstFocusNode.requestFocus
+                            : null,
+                        onArrowDown: index == actions.length - 1
+                            ? _firstFocusNode.requestFocus
+                            : null,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TvUserAddOnDialog extends StatefulWidget {
+  const _TvUserAddOnDialog({
+    required this.addon,
+    required this.onEnabledChanged,
+    required this.onRemove,
+  });
+
+  final _TvUserAddOn addon;
+  final ValueChanged<bool> onEnabledChanged;
+  final VoidCallback onRemove;
+
+  @override
+  State<_TvUserAddOnDialog> createState() => _TvUserAddOnDialogState();
+}
+
+class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
+  final _firstFocusNode = FocusNode(debugLabel: 'tv-user-addon-first');
+  late bool _enabled = widget.addon.enabled;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _firstFocusNode.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _firstFocusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final actions = [
+      _TvSettingsAction(
+        title: 'Enabled',
+        subtitle:
+            'Allow this saved add-on to participate in TV source choices.',
+        value: _enabled ? 'On' : 'Off',
+        icon: Icons.power_settings_new_rounded,
+        onPressed: () {
+          final next = !_enabled;
+          setState(() => _enabled = next);
+          widget.onEnabledChanged(next);
+        },
+      ),
+      _TvSettingsAction(
+        title: 'Remove add-on',
+        subtitle: 'Remove this saved source from this TV.',
+        value: 'Remove',
+        icon: Icons.delete_outline_rounded,
+        onPressed: widget.onRemove,
+      ),
+    ];
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 160, vertical: 70),
+      child: Container(
+        width: 680,
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: const Color(0xF215151E),
+          borderRadius: BorderRadius.circular(28),
+          border: Border.all(color: const Color(0x22FFFFFF)),
+        ),
+        child: Stack(
+          children: [
+            Positioned(
+              top: 0,
+              right: 0,
+              child: _TvCircleIconButton(
+                icon: Icons.close_rounded,
+                size: 48,
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 4, right: 58),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.addon.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Manage this source by safe label. Private links stay hidden.',
+                    style: TextStyle(
+                      color: Color(0xFFAAA6BD),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  for (var index = 0; index < actions.length; index++)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: _TvSettingsLineCard(
+                        action: actions[index],
+                        autofocus: index == 0,
+                        focusNode: index == 0 ? _firstFocusNode : null,
+                        onArrowUp: index == 0
+                            ? _firstFocusNode.requestFocus
+                            : null,
+                        onArrowDown: index == actions.length - 1
+                            ? _firstFocusNode.requestFocus
+                            : null,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _TvSettingsOptionDialog extends StatelessWidget {

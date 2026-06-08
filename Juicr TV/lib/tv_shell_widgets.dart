@@ -33,6 +33,7 @@ class _TvMainSurface extends StatelessWidget {
     required this.onAccountSignOut,
     required this.onAccountSync,
     required this.onDiscoveryMenu,
+    required this.onDiscoveryLoadMore,
     required this.onLibraryMenu,
     required this.onOpenItem,
     required this.onPlayItem,
@@ -81,6 +82,7 @@ class _TvMainSurface extends StatelessWidget {
   final VoidCallback onAccountSignOut;
   final VoidCallback onAccountSync;
   final VoidCallback onDiscoveryMenu;
+  final VoidCallback onDiscoveryLoadMore;
   final VoidCallback onLibraryMenu;
   final ValueChanged<_TvItem> onOpenItem;
   final ValueChanged<_TvItem> onPlayItem;
@@ -197,6 +199,7 @@ class _TvMainSurface extends StatelessWidget {
           entryFocusNode: pageContentFocusNode,
           onFocusHeader: onFocusPageEntry,
           onRememberFocus: onRememberPageFocus,
+          onLoadMore: onDiscoveryLoadMore,
         ),
       );
     }
@@ -238,12 +241,15 @@ class _TvMainSurface extends StatelessWidget {
       );
     }
     if (!tvSettings.hasCatalogSource) {
-      return const SliverFillRemaining(
+      return SliverFillRemaining(
         hasScrollBody: false,
         child: _TvEmptyCatalogState(
           title: 'Juicr TV is ready for your sources.',
           subtitle: 'Open Settings and enable built-in browsing to start.',
           verticalOffset: -42,
+          focusNode: pageContentFocusNode,
+          onFocusNavigation: onFocusNavigation,
+          onFocusHeader: onFocusPageEntry,
         ),
       );
     }
@@ -1598,7 +1604,6 @@ class _TvChoiceRow extends StatelessWidget {
     required this.selected,
     required this.onPressed,
     this.autofocus = false,
-    this.autoReveal = true,
     this.focusNode,
     this.onArrowLeft,
     this.onArrowRight,
@@ -1611,7 +1616,6 @@ class _TvChoiceRow extends StatelessWidget {
   final bool selected;
   final VoidCallback onPressed;
   final bool autofocus;
-  final bool autoReveal;
   final FocusNode? focusNode;
   final VoidCallback? onArrowLeft;
   final VoidCallback? onArrowRight;
@@ -1622,7 +1626,6 @@ class _TvChoiceRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return _TvFocusable(
       autofocus: autofocus,
-      autoReveal: autoReveal,
       focusNode: focusNode,
       onPressed: onPressed,
       onArrowLeft: onArrowLeft,
@@ -1851,15 +1854,17 @@ class _TvContentRailState extends State<_TvContentRail> {
     final viewportContext = _horizontalViewportKey.currentContext;
     if (cardContext == null ||
         viewportContext == null ||
-        !_horizontalController.hasClients)
+        !_horizontalController.hasClients) {
       return;
+    }
     final cardBox = cardContext.findRenderObject() as RenderBox?;
     final viewportBox = viewportContext.findRenderObject() as RenderBox?;
     if (cardBox == null ||
         viewportBox == null ||
         !cardBox.attached ||
-        !viewportBox.attached)
+        !viewportBox.attached) {
       return;
+    }
     final cardOffset = cardBox.localToGlobal(
       Offset.zero,
       ancestor: viewportBox,
@@ -2059,6 +2064,7 @@ class _TvPosterGrid extends StatefulWidget {
     this.firstItemFocusNode,
     this.onTopRowArrowUp,
     this.onRememberFocus,
+    this.onLoadMore,
   });
 
   final String title;
@@ -2073,6 +2079,7 @@ class _TvPosterGrid extends StatefulWidget {
   final FocusNode? firstItemFocusNode;
   final VoidCallback? onTopRowArrowUp;
   final ValueChanged<FocusNode>? onRememberFocus;
+  final VoidCallback? onLoadMore;
 
   @override
   State<_TvPosterGrid> createState() => _TvPosterGridState();
@@ -2119,6 +2126,13 @@ class _TvPosterGridState extends State<_TvPosterGrid> {
     widget.onRememberFocus?.call(node);
     node.requestFocus();
     _revealIndex(index, alignment: alignment);
+  }
+
+  void _prefetchNearEnd(int index, int columnCount) {
+    if (widget.onLoadMore == null || widget.items.isEmpty) return;
+    if (index >= widget.items.length - columnCount) {
+      widget.onLoadMore!.call();
+    }
   }
 
   void _revealIndex(int index, {double alignment = 0.38}) {
@@ -2190,6 +2204,7 @@ class _TvPosterGridState extends State<_TvPosterGrid> {
                     autoReveal: false,
                     onFocus: () {
                       widget.onRememberFocus?.call(_nodeFor(index));
+                      _prefetchNearEnd(index, columnCount);
                       _revealIndex(index);
                     },
                     onPressed: () => widget.onOpenItem(widget.items[index]),
@@ -2198,14 +2213,20 @@ class _TvPosterGridState extends State<_TvPosterGrid> {
                         : () => _focusIndex(index - 1),
                     onArrowRight: index + 1 < widget.items.length
                         ? () => _focusIndex(index + 1)
-                        : () => _focusIndex(index),
+                        : () {
+                            widget.onLoadMore?.call();
+                            _focusIndex(index);
+                          },
                     onArrowUp: index - columnCount >= 0
                         ? () => _focusIndex(index - columnCount, alignment: 0.2)
                         : widget.onTopRowArrowUp,
                     onArrowDown: index + columnCount < widget.items.length
                         ? () =>
                               _focusIndex(index + columnCount, alignment: 0.58)
-                        : () => _focusIndex(index, alignment: 0.58),
+                        : () {
+                            widget.onLoadMore?.call();
+                            _focusIndex(index, alignment: 0.58);
+                          },
                   ),
               ],
             );
