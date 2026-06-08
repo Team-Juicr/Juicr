@@ -1,14 +1,15 @@
-﻿part of 'main.dart';
+part of 'main.dart';
 
-const MethodChannel _tvTrailerChannel = MethodChannel('app.juicr.flutter/trailer');
+const MethodChannel _tvTrailerChannel = MethodChannel(
+  'app.juicr.flutter/trailer',
+);
 
 Future<bool> _openTvExternalTrailer(_TvTrailer trailer) async {
   if (!trailer.isExternalLaunchable) return false;
   try {
-    return await _tvTrailerChannel.invokeMethod<bool>(
-          'openTrailer',
-          {'url': trailer.url},
-        ) ??
+    return await _tvTrailerChannel.invokeMethod<bool>('openTrailer', {
+          'url': trailer.url,
+        }) ??
         false;
   } catch (error) {
     debugPrint(
@@ -26,6 +27,7 @@ class _TvDiscoverySurface extends StatelessWidget {
     required this.series,
     required this.animation,
     required this.liveTv,
+    required this.discoveryLaneItems,
     required this.kind,
     required this.sort,
     required this.genre,
@@ -41,6 +43,7 @@ class _TvDiscoverySurface extends StatelessWidget {
   final List<_TvItem> series;
   final List<_TvItem> animation;
   final List<_TvItem> liveTv;
+  final Map<String, List<_TvItem>> discoveryLaneItems;
   final _TvDiscoveryKind kind;
   final _TvDiscoverySort sort;
   final String genre;
@@ -52,19 +55,26 @@ class _TvDiscoverySurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final fallbackItems = switch (kind) {
+      _TvDiscoveryKind.movie => movies,
+      _TvDiscoveryKind.series => series,
+      _TvDiscoveryKind.animation => animation,
+      _TvDiscoveryKind.liveTv => liveTv,
+    };
+    final laneItems =
+        discoveryLaneItems[_tvDiscoveryLaneKey(kind, sort)] ??
+        const <_TvItem>[];
     final items = _sortedCatalogItems(
-      switch (kind) {
-        _TvDiscoveryKind.movie => movies,
-        _TvDiscoveryKind.series => series,
-        _TvDiscoveryKind.animation => animation,
-        _TvDiscoveryKind.liveTv => liveTv,
-      },
+      laneItems.isEmpty ? fallbackItems : laneItems,
       sort,
+      preserveLaneOrder: laneItems.isNotEmpty,
     );
     final visibleItems = genre == 'All genres'
         ? items
         : items.where((item) {
-            return item.genres.any((itemGenre) => itemGenre.toLowerCase() == genre.toLowerCase());
+            return item.genres.any(
+              (itemGenre) => itemGenre.toLowerCase() == genre.toLowerCase(),
+            );
           }).toList();
 
     if (visibleItems.isEmpty) {
@@ -83,7 +93,7 @@ class _TvDiscoverySurface extends StatelessWidget {
 
     return _TvPosterGrid(
       title: '${kind.label} catalog',
-      subtitle: sort.subtitle,
+      subtitle: sort.subtitleFor(kind, genre),
       items: visibleItems,
       showRank: false,
       showHeader: false,
@@ -95,13 +105,28 @@ class _TvDiscoverySurface extends StatelessWidget {
     );
   }
 
-  List<_TvItem> _sortedCatalogItems(List<_TvItem> source, _TvDiscoverySort sort) {
+  List<_TvItem> _sortedCatalogItems(
+    List<_TvItem> source,
+    _TvDiscoverySort sort, {
+    required bool preserveLaneOrder,
+  }) {
     final items = source.where((item) => item.poster != null).toList();
+    if (preserveLaneOrder) return items;
     switch (sort) {
+      case _TvDiscoverySort.nowPlaying:
+      case _TvDiscoverySort.airingToday:
+      case _TvDiscoverySort.onTv:
       case _TvDiscoverySort.newest:
         items.sort((a, b) => (_yearInt(b.year)).compareTo(_yearInt(a.year)));
+      case _TvDiscoverySort.topRated:
       case _TvDiscoverySort.featured:
-        items.sort((a, b) => (_ratingDouble(b.imdbRating)).compareTo(_ratingDouble(a.imdbRating)));
+        items.sort(
+          (a, b) => (_ratingDouble(
+            b.imdbRating,
+          )).compareTo(_ratingDouble(a.imdbRating)),
+        );
+      case _TvDiscoverySort.upcoming:
+        items.sort((a, b) => (_yearInt(a.year)).compareTo(_yearInt(b.year)));
       case _TvDiscoverySort.popular:
         break;
     }
@@ -165,14 +190,26 @@ class _TvLibrarySurface extends StatelessWidget {
       case _TvLibraryFilter.continueWatching:
         return recentItems.where((item) => item.poster != null).toList();
       case _TvLibraryFilter.movies:
-        return likedItems.where((item) => item.type == 'movie' && item.poster != null).toList();
+        return likedItems
+            .where((item) => item.type == 'movie' && item.poster != null)
+            .toList();
       case _TvLibraryFilter.series:
-        return likedItems.where((item) => item.type == 'series' && item.poster != null).toList();
+        return likedItems
+            .where((item) => item.type == 'series' && item.poster != null)
+            .toList();
       case _TvLibraryFilter.animation:
-        return likedItems.where((item) => item.type == 'animation' && item.poster != null).toList();
+        return likedItems
+            .where((item) => item.type == 'animation' && item.poster != null)
+            .toList();
       case _TvLibraryFilter.liveTv:
         return likedItems
-            .where((item) => (item.type == 'live' || item.type == 'livetv' || item.type == 'channel') && item.poster != null)
+            .where(
+              (item) =>
+                  (item.type == 'live' ||
+                      item.type == 'livetv' ||
+                      item.type == 'channel') &&
+                  item.poster != null,
+            )
             .toList();
     }
   }
@@ -189,7 +226,8 @@ class _TvLibrarySurface extends StatelessWidget {
 
   String get _subtitle {
     return switch (filter) {
-      _TvLibraryFilter.continueWatching => 'Recently opened titles from this TV session.',
+      _TvLibraryFilter.continueWatching =>
+        'Recently opened titles from this TV session.',
       _TvLibraryFilter.movies => 'Movies you hearted on this TV.',
       _TvLibraryFilter.series => 'Series you hearted on this TV.',
       _TvLibraryFilter.animation => 'Animation you hearted on this TV.',
@@ -209,11 +247,16 @@ class _TvLibrarySurface extends StatelessWidget {
 
   String get _emptySubtitle {
     return switch (filter) {
-      _TvLibraryFilter.continueWatching => 'Open or play a title and it will appear here for this session.',
-      _TvLibraryFilter.movies => 'Heart a movie from Home, Discovery, or Details to show it here.',
-      _TvLibraryFilter.series => 'Heart a series from Home, Discovery, or Details to show it here.',
-      _TvLibraryFilter.animation => 'Heart an animation title from Home, Discovery, or Details to show it here.',
-      _TvLibraryFilter.liveTv => 'Heart Live TV items when they are available on this TV.',
+      _TvLibraryFilter.continueWatching =>
+        'Open or play a title and it will appear here for this session.',
+      _TvLibraryFilter.movies =>
+        'Heart a movie from Home, Discovery, or Details to show it here.',
+      _TvLibraryFilter.series =>
+        'Heart a series from Home, Discovery, or Details to show it here.',
+      _TvLibraryFilter.animation =>
+        'Heart an animation title from Home, Discovery, or Details to show it here.',
+      _TvLibraryFilter.liveTv =>
+        'Heart Live TV items when they are available on this TV.',
     };
   }
 }
@@ -247,7 +290,11 @@ class _TvEmptyCatalogState extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.explore_off_rounded, color: Color(0xFFAAA6BD), size: 52),
+              const Icon(
+                Icons.explore_off_rounded,
+                color: Color(0xFFAAA6BD),
+                size: 52,
+              ),
               const SizedBox(height: 14),
               Text(
                 title,
@@ -414,10 +461,22 @@ class _TvSettingsSurface extends StatelessWidget {
         'Theme, display, language, and TV home preferences.',
         Icons.settings_rounded,
         [
-          _TvSettingsLine('Appearance', 'Use the TV visual style tuned for large screens and remote viewing.'),
-          _TvSettingsLine('Language', 'App language follows the device until TV language controls are enabled.'),
-          _TvSettingsLine('Text size', 'Large readable labels stay enabled for living-room distance.'),
-          _TvSettingsLine('Home experience', 'Home uses shared editorial curation with TV-safe fallbacks.'),
+          _TvSettingsLine(
+            'Appearance',
+            'Use the TV visual style tuned for large screens and remote viewing.',
+          ),
+          _TvSettingsLine(
+            'Language',
+            'App language follows the device until TV language controls are enabled.',
+          ),
+          _TvSettingsLine(
+            'Text size',
+            'Large readable labels stay enabled for living-room distance.',
+          ),
+          _TvSettingsLine(
+            'Home experience',
+            'Home uses shared editorial curation with TV-safe fallbacks.',
+          ),
         ],
       ),
       const _TvSettingsSection(
@@ -425,11 +484,26 @@ class _TvSettingsSurface extends StatelessWidget {
         'Player defaults, captions, quality, and watch behavior.',
         Icons.play_circle_fill_rounded,
         [
-          _TvSettingsLine('Playback engine', 'Auto chooses the safest available TV playback choice.'),
-          _TvSettingsLine('Preferred quality', 'TV playback starts with a balanced quality target.'),
-          _TvSettingsLine('Subtitles', 'Captions stay readable and can be refined in playback settings.'),
-          _TvSettingsLine('Continue watching', 'Progress is kept for the current TV session.'),
-          _TvSettingsLine('Next episode', 'Series playback can continue from the playback HUD.'),
+          _TvSettingsLine(
+            'Playback engine',
+            'Auto chooses the safest available TV playback choice.',
+          ),
+          _TvSettingsLine(
+            'Preferred quality',
+            'TV playback starts with a balanced quality target.',
+          ),
+          _TvSettingsLine(
+            'Subtitles',
+            'Captions stay readable and can be refined in playback settings.',
+          ),
+          _TvSettingsLine(
+            'Continue watching',
+            'Progress is kept for the current TV session.',
+          ),
+          _TvSettingsLine(
+            'Next episode',
+            'Series playback can continue from the playback HUD.',
+          ),
         ],
       ),
       const _TvSettingsSection(
@@ -437,10 +511,22 @@ class _TvSettingsSurface extends StatelessWidget {
         'Catalog and playback add-ons you choose to manage.',
         Icons.extension_rounded,
         [
-          _TvSettingsLine('Manage add-ons', 'TV add-on management is being prepared for remote-first controls.'),
-          _TvSettingsLine('Built-in tools', 'Browsing, subtitle, trailer, and playback controls stay separated.'),
-          _TvSettingsLine('Import and export', 'Add-on transfer will stay user-controlled and redacted.'),
-          _TvSettingsLine('Safety', 'Only add links you trust; Juicr does not review third-party services.'),
+          _TvSettingsLine(
+            'Manage add-ons',
+            'TV add-on management is being prepared for remote-first controls.',
+          ),
+          _TvSettingsLine(
+            'Built-in tools',
+            'Browsing, subtitle, trailer, and playback controls stay separated.',
+          ),
+          _TvSettingsLine(
+            'Import and export',
+            'Add-on transfer will stay user-controlled and redacted.',
+          ),
+          _TvSettingsLine(
+            'Safety',
+            'Only add links you trust; Juicr does not review third-party services.',
+          ),
         ],
       ),
       const _TvSettingsSection(
@@ -448,15 +534,29 @@ class _TvSettingsSurface extends StatelessWidget {
         'History, storage, and power-user TV controls.',
         Icons.admin_panel_settings_outlined,
         [
-          _TvSettingsLine('Runtime controls', 'Advanced playback controls stay guarded until ready for this TV build.'),
-          _TvSettingsLine('History tools', 'Session history can be reviewed without exposing private playback details.'),
-          _TvSettingsLine('Playback tuning', 'Timing and recovery controls stay grouped away from everyday settings.'),
-          _TvSettingsLine('Storage', 'TV storage tools will use safe counts and clear actions.'),
+          _TvSettingsLine(
+            'Runtime controls',
+            'Advanced playback controls stay guarded until ready for this TV build.',
+          ),
+          _TvSettingsLine(
+            'History tools',
+            'Session history can be reviewed without exposing private playback details.',
+          ),
+          _TvSettingsLine(
+            'Playback tuning',
+            'Timing and recovery controls stay grouped away from everyday settings.',
+          ),
+          _TvSettingsLine(
+            'Storage',
+            'TV storage tools will use safe counts and clear actions.',
+          ),
         ],
       ),
       _TvSettingsSection(
         'Account',
-        accountSignedIn ? '$accountLabel - $accountSyncLabel' : 'Sign in, sync status, and account data.',
+        accountSignedIn
+            ? '$accountLabel - $accountSyncLabel'
+            : 'Sign in, sync status, and account data.',
         Icons.account_circle_rounded,
         [
           _TvSettingsLine(
@@ -465,9 +565,15 @@ class _TvSettingsSurface extends StatelessWidget {
                 ? 'Library sync is available for this TV.'
                 : 'Use email sign-in when you want account features.',
           ),
-          const _TvSettingsLine('Library sync', 'Saved titles and watch progress can follow your account.'),
+          const _TvSettingsLine(
+            'Library sync',
+            'Saved titles and watch progress can follow your account.',
+          ),
           _TvSettingsLine('Sync status', accountSyncLabel),
-          const _TvSettingsLine('Privacy', 'Your account session stays in secure TV storage.'),
+          const _TvSettingsLine(
+            'Privacy',
+            'Your account session stays in secure TV storage.',
+          ),
         ],
       ),
       _TvSettingsSection(
@@ -482,8 +588,14 @@ class _TvSettingsSurface extends StatelessWidget {
                 ? '$totalCount titles loaded: $movieCount movies, $seriesCount series, $animationCount animation.'
                 : 'Catalog is ready to refresh when your connection is available.',
           ),
-          const _TvSettingsLine('Diagnostics', 'Reports use safe counts and status buckets only.'),
-          const _TvSettingsLine('Privacy boundary', 'Private playback details are not shown in TV diagnostics.'),
+          const _TvSettingsLine(
+            'Diagnostics',
+            'Reports use safe counts and status buckets only.',
+          ),
+          const _TvSettingsLine(
+            'Privacy boundary',
+            'Private playback details are not shown in TV diagnostics.',
+          ),
         ],
       ),
     ];
@@ -496,7 +608,10 @@ class _TvSettingsSurface extends StatelessWidget {
     );
   }
 
-  Future<void> _showTvSettingsSection(BuildContext context, _TvSettingsSection section) {
+  Future<void> _showTvSettingsSection(
+    BuildContext context,
+    _TvSettingsSection section,
+  ) {
     return showDialog<void>(
       context: context,
       builder: (dialogContext) => _TvSettingsSectionDialog(
@@ -617,8 +732,12 @@ class _TvSettingsGridState extends State<_TvSettingsGrid> {
                   widget.onRememberFocus(_nodeFor(index));
                   _revealIndex(index);
                 },
-                onArrowLeft: index % _columnCount == 0 ? widget.onFocusNavigation : () => _focusIndex(index - 1),
-                onArrowRight: index + 1 < widget.sections.length && index % _columnCount != _columnCount - 1
+                onArrowLeft: index % _columnCount == 0
+                    ? widget.onFocusNavigation
+                    : () => _focusIndex(index - 1),
+                onArrowRight:
+                    index + 1 < widget.sections.length &&
+                        index % _columnCount != _columnCount - 1
                     ? () => _focusIndex(index + 1)
                     : null,
                 onArrowUp: index - _columnCount >= 0
@@ -680,7 +799,7 @@ class _TvSettingsHomeCard extends StatelessWidget {
             height: 150,
             padding: const EdgeInsets.all(18),
             decoration: BoxDecoration(
-            color: focused ? _tvAccentColor : const Color(0x1AFFFFFF),
+              color: focused ? _tvAccentColor : const Color(0x1AFFFFFF),
               borderRadius: BorderRadius.circular(24),
               border: Border.all(
                 color: focused ? _tvFocusBorder : const Color(0x1FFFFFFF),
@@ -690,7 +809,11 @@ class _TvSettingsHomeCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(section.icon, color: focused ? Colors.black : _tvAccentColor, size: 28),
+                Icon(
+                  section.icon,
+                  color: focused ? Colors.black : _tvAccentColor,
+                  size: 28,
+                ),
                 const SizedBox(height: 14),
                 Row(
                   children: [
@@ -719,7 +842,9 @@ class _TvSettingsHomeCard extends StatelessWidget {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: focused ? Colors.black.withValues(alpha: 0.72) : const Color(0xFFAAA6BD),
+                    color: focused
+                        ? Colors.black.withValues(alpha: 0.72)
+                        : const Color(0xFFAAA6BD),
                     fontSize: 13,
                     height: 1.25,
                     fontWeight: FontWeight.w700,
@@ -758,11 +883,14 @@ class _TvSettingsSectionDialog extends StatefulWidget {
   final ValueChanged<_TvSettingsState> onSettingsChanged;
 
   @override
-  State<_TvSettingsSectionDialog> createState() => _TvSettingsSectionDialogState();
+  State<_TvSettingsSectionDialog> createState() =>
+      _TvSettingsSectionDialogState();
 }
 
 class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
-  final FocusNode _firstActionFocusNode = FocusNode(debugLabel: 'tv-settings-dialog-first');
+  final FocusNode _firstActionFocusNode = FocusNode(
+    debugLabel: 'tv-settings-dialog-first',
+  );
 
   late _TvSettingsState _current = widget.settings;
 
@@ -867,7 +995,10 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     );
   }
 
-  Future<bool> _confirmBuiltInConsent(BuildContext context, _TvSettingsState current) async {
+  Future<bool> _confirmBuiltInConsent(
+    BuildContext context,
+    _TvSettingsState current,
+  ) async {
     if (current.defaultSourceConsentAccepted) return true;
     final accepted = await showDialog<bool>(
       context: context,
@@ -895,7 +1026,10 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     return accepted == true;
   }
 
-  Future<bool> _confirmAddOnConsent(BuildContext context, _TvSettingsState current) async {
+  Future<bool> _confirmAddOnConsent(
+    BuildContext context,
+    _TvSettingsState current,
+  ) async {
     if (current.addOnConsentAccepted) return true;
     final accepted = await showDialog<bool>(
       context: context,
@@ -968,11 +1102,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
       builder: (dialogContext) => const _TvAddOnEntryDialog(),
     );
     if (added == null) return;
-    update(
-      consented.copyWith(
-        userAddOns: [...consented.userAddOns, added],
-      ),
-    );
+    update(consented.copyWith(userAddOns: [...consented.userAddOns, added]));
   }
 
   List<_TvSettingsAction> _actions(
@@ -1000,7 +1130,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
           ),
           _TvSettingsAction(
             title: 'App color accent',
-            subtitle: 'Choose the highlight color used for focus and selected controls.',
+            subtitle:
+                'Choose the highlight color used for focus and selected controls.',
             value: current.accent,
             icon: Icons.palette_rounded,
             onPressed: () => unawaited(() async {
@@ -1023,14 +1154,22 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 context,
                 title: 'Text size',
                 selected: current.textSize,
-                options: const ['Smaller', 'Small', 'Large', 'Larger', 'Maximum'],
+                options: const [
+                  'Smaller',
+                  'Small',
+                  'Large',
+                  'Larger',
+                  'Maximum',
+                ],
               );
-              if (selected != null) update(current.copyWith(textSize: selected));
+              if (selected != null)
+                update(current.copyWith(textSize: selected));
             }()),
           ),
           _TvSettingsAction(
             title: 'Motion',
-            subtitle: 'Keep TV transitions smooth without making navigation noisy.',
+            subtitle:
+                'Keep TV transitions smooth without making navigation noisy.',
             value: current.motion ? 'Full' : 'Reduced',
             icon: Icons.animation_rounded,
             onPressed: () => unawaited(() async {
@@ -1040,7 +1179,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 selected: current.motion ? 'Full' : 'Reduced',
                 options: const ['Full', 'Reduced'],
               );
-              if (selected != null) update(current.copyWith(motion: selected == 'Full'));
+              if (selected != null)
+                update(current.copyWith(motion: selected == 'Full'));
             }()),
           ),
         ];
@@ -1058,12 +1198,14 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 selected: current.playbackEngine,
                 options: const ['Auto', 'Native'],
               );
-              if (selected != null) update(current.copyWith(playbackEngine: selected));
+              if (selected != null)
+                update(current.copyWith(playbackEngine: selected));
             }()),
           ),
           _TvSettingsAction(
             title: 'Preferred quality',
-            subtitle: 'Choose the default quality target before playback starts.',
+            subtitle:
+                'Choose the default quality target before playback starts.',
             value: current.preferredQuality,
             icon: Icons.high_quality_rounded,
             onPressed: () => unawaited(() async {
@@ -1073,37 +1215,47 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 selected: current.preferredQuality,
                 options: const ['Balanced', 'Best available', 'Data saver'],
               );
-              if (selected != null) update(current.copyWith(preferredQuality: selected));
+              if (selected != null)
+                update(current.copyWith(preferredQuality: selected));
             }()),
           ),
           _TvSettingsAction(
             title: 'Resume prompt',
-            subtitle: 'Ask whether to continue or start over when progress is saved.',
+            subtitle:
+                'Ask whether to continue or start over when progress is saved.',
             value: current.resumePrompt ? 'Ask' : 'Start over',
             icon: Icons.restore_rounded,
-            onPressed: () => update(current.copyWith(resumePrompt: !current.resumePrompt)),
+            onPressed: () =>
+                update(current.copyWith(resumePrompt: !current.resumePrompt)),
           ),
           _TvSettingsAction(
             title: 'Subtitles',
-            subtitle: 'Show TV-readable captions when subtitle data is available.',
+            subtitle:
+                'Show TV-readable captions when subtitle data is available.',
             value: current.subtitles ? 'On' : 'Off',
             icon: Icons.closed_caption_rounded,
-            onPressed: () => update(current.copyWith(subtitles: !current.subtitles)),
+            onPressed: () =>
+                update(current.copyWith(subtitles: !current.subtitles)),
           ),
           _TvSettingsAction(
             title: 'Next episode',
-            subtitle: 'Keep series continuation controls available in the playback HUD.',
+            subtitle:
+                'Keep series continuation controls available in the playback HUD.',
             value: current.nextEpisode ? 'On' : 'Off',
             icon: Icons.skip_next_rounded,
-            onPressed: () => update(current.copyWith(nextEpisode: !current.nextEpisode)),
+            onPressed: () =>
+                update(current.copyWith(nextEpisode: !current.nextEpisode)),
           ),
         ];
       case 'Add-ons':
         return [
           _TvSettingsAction(
             title: 'Add your own add-on',
-            subtitle: 'Add a link you trust. The saved settings only show safe labels here.',
-            value: current.userAddOns.isEmpty ? 'None' : '${current.userAddOns.length} saved',
+            subtitle:
+                'Add a link you trust. The saved settings only show safe labels here.',
+            value: current.userAddOns.isEmpty
+                ? 'None'
+                : '${current.userAddOns.length} saved',
             icon: Icons.add_link_rounded,
             onPressed: () => unawaited(_addUserAddOn(context, current, update)),
           ),
@@ -1114,110 +1266,122 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 : 'Review consent before showing optional built-in tools.',
             value: current.defaultSourceConsentAccepted ? 'Ready' : 'Consent',
             icon: Icons.inventory_2_outlined,
-            onPressed: () => unawaited(_openDefaultSources(context, current, update)),
+            onPressed: () =>
+                unawaited(_openDefaultSources(context, current, update)),
           ),
           if (current.showDefaultSourceSettings) ...[
-          _TvSettingsAction(
-            title: 'Built-in catalog',
-            subtitle: 'Use optional Juicr catalog results on Home and Discovery.',
-            value: current.builtInCatalog ? 'On' : 'Off',
-            icon: Icons.grid_view_rounded,
-            onPressed: () => unawaited(
-              _toggleBuiltIn(
-                context,
-                current,
-                update,
-                (source) => source.copyWith(builtInCatalog: true),
-                (source) => source.copyWith(builtInCatalog: false),
-                !current.builtInCatalog,
+            _TvSettingsAction(
+              title: 'Built-in catalog',
+              subtitle:
+                  'Use optional Juicr catalog results on Home and Discovery.',
+              value: current.builtInCatalog ? 'On' : 'Off',
+              icon: Icons.grid_view_rounded,
+              onPressed: () => unawaited(
+                _toggleBuiltIn(
+                  context,
+                  current,
+                  update,
+                  (source) => source.copyWith(builtInCatalog: true),
+                  (source) => source.copyWith(builtInCatalog: false),
+                  !current.builtInCatalog,
+                ),
               ),
             ),
-          ),
-          _TvSettingsAction(
-            title: 'Built-in subtitles',
-            subtitle: 'Look up optional default subtitles in the native TV player.',
-            value: current.builtInSubtitles ? 'On' : 'Off',
-            icon: Icons.closed_caption_outlined,
-            onPressed: () => unawaited(
-              _toggleBuiltIn(
-                context,
-                current,
-                update,
-                (source) => source.copyWith(builtInSubtitles: true, subtitles: true),
-                (source) => source.copyWith(builtInSubtitles: false),
-                !current.builtInSubtitles,
+            _TvSettingsAction(
+              title: 'Built-in subtitles',
+              subtitle:
+                  'Look up optional default subtitles in the native TV player.',
+              value: current.builtInSubtitles ? 'On' : 'Off',
+              icon: Icons.closed_caption_outlined,
+              onPressed: () => unawaited(
+                _toggleBuiltIn(
+                  context,
+                  current,
+                  update,
+                  (source) =>
+                      source.copyWith(builtInSubtitles: true, subtitles: true),
+                  (source) => source.copyWith(builtInSubtitles: false),
+                  !current.builtInSubtitles,
+                ),
               ),
             ),
-          ),
-          _TvSettingsAction(
-            title: 'Built-in trailers',
-            subtitle: 'Show optional trailer choices on details pages.',
-            value: current.builtInTrailers ? 'On' : 'Off',
-            icon: Icons.movie_filter_outlined,
-            onPressed: () => unawaited(
-              _toggleBuiltIn(
-                context,
-                current,
-                update,
-                (source) => source.copyWith(builtInTrailers: true),
-                (source) => source.copyWith(builtInTrailers: false),
-                !current.builtInTrailers,
+            _TvSettingsAction(
+              title: 'Built-in trailers',
+              subtitle: 'Show optional trailer choices on details pages.',
+              value: current.builtInTrailers ? 'On' : 'Off',
+              icon: Icons.movie_filter_outlined,
+              onPressed: () => unawaited(
+                _toggleBuiltIn(
+                  context,
+                  current,
+                  update,
+                  (source) => source.copyWith(builtInTrailers: true),
+                  (source) => source.copyWith(builtInTrailers: false),
+                  !current.builtInTrailers,
+                ),
               ),
             ),
-          ),
-          _TvSettingsAction(
-            title: 'Built-in Live TV',
-            subtitle: 'Show optional public live TV channels when this lane is enabled.',
-            value: current.builtInLiveTv ? 'On' : 'Off',
-            icon: Icons.live_tv_rounded,
-            onPressed: () => unawaited(
-              _toggleBuiltIn(
-                context,
-                current,
-                update,
-                (source) => source.copyWith(builtInLiveTv: true),
-                (source) => source.copyWith(builtInLiveTv: false),
-                !current.builtInLiveTv,
+            _TvSettingsAction(
+              title: 'Built-in Live TV',
+              subtitle:
+                  'Show optional public live TV channels when this lane is enabled.',
+              value: current.builtInLiveTv ? 'On' : 'Off',
+              icon: Icons.live_tv_rounded,
+              onPressed: () => unawaited(
+                _toggleBuiltIn(
+                  context,
+                  current,
+                  update,
+                  (source) => source.copyWith(builtInLiveTv: true),
+                  (source) => source.copyWith(builtInLiveTv: false),
+                  !current.builtInLiveTv,
+                ),
               ),
             ),
-          ),
-          _TvSettingsAction(
-            title: 'Built-in playback',
-            subtitle: 'Allow optional built-in TV playback after safe app checks.',
-            value: current.builtInPlayback ? 'On' : 'Off',
-            icon: Icons.play_circle_outline_rounded,
-            onPressed: () => unawaited(
-              _toggleBuiltIn(
-                context,
-                current,
-                update,
-                (source) => source.copyWith(builtInPlayback: true),
-                (source) => source.copyWith(builtInPlayback: false),
-                !current.builtInPlayback,
+            _TvSettingsAction(
+              title: 'Built-in playback',
+              subtitle:
+                  'Allow optional built-in TV playback after safe app checks.',
+              value: current.builtInPlayback ? 'On' : 'Off',
+              icon: Icons.play_circle_outline_rounded,
+              onPressed: () => unawaited(
+                _toggleBuiltIn(
+                  context,
+                  current,
+                  update,
+                  (source) => source.copyWith(builtInPlayback: true),
+                  (source) => source.copyWith(builtInPlayback: false),
+                  !current.builtInPlayback,
+                ),
               ),
             ),
-          ),
           ],
         ];
       case 'Advanced':
         return [
           _TvSettingsAction(
             title: 'Advanced controls',
-            subtitle: 'Show guarded power-user playback controls when they are ready for TV.',
+            subtitle:
+                'Show guarded power-user playback controls when they are ready for TV.',
             value: current.advancedControls ? 'On' : 'Off',
             icon: Icons.admin_panel_settings_outlined,
-            onPressed: () => update(current.copyWith(advancedControls: !current.advancedControls)),
+            onPressed: () => update(
+              current.copyWith(advancedControls: !current.advancedControls),
+            ),
           ),
           _TvSettingsAction(
             title: 'History tools',
-            subtitle: 'Keep local session history controls available for this TV.',
+            subtitle:
+                'Keep local session history controls available for this TV.',
             value: current.history ? 'On' : 'Off',
             icon: Icons.history_rounded,
-            onPressed: () => update(current.copyWith(history: !current.history)),
+            onPressed: () =>
+                update(current.copyWith(history: !current.history)),
           ),
           _TvSettingsAction(
             title: 'Safe diagnostics',
-            subtitle: 'Keep diagnostics limited to safe counts and status buckets.',
+            subtitle:
+                'Keep diagnostics limited to safe counts and status buckets.',
             value: current.safeDiagnostics ? 'On' : 'Required',
             icon: Icons.privacy_tip_rounded,
             onPressed: () => unawaited(
@@ -1234,13 +1398,19 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
       case 'Account':
         return [
           _TvSettingsAction(
-            title: widget.accountSignedIn ? 'Signed in to Juicr' : 'Sign in to Juicr',
+            title: widget.accountSignedIn
+                ? 'Signed in to Juicr'
+                : 'Sign in to Juicr',
             subtitle: widget.accountSignedIn
                 ? 'Saved titles and watch progress can sync with your account.'
                 : 'Use email sign-in when you want account features. Guest mode stays available.',
             value: widget.accountSignedIn ? widget.accountLabel : 'Guest',
-            icon: widget.accountSignedIn ? Icons.account_circle_rounded : Icons.account_circle_outlined,
-            onPressed: widget.accountSignedIn ? widget.onAccountSync : widget.onAccountSignIn,
+            icon: widget.accountSignedIn
+                ? Icons.account_circle_rounded
+                : Icons.account_circle_outlined,
+            onPressed: widget.accountSignedIn
+                ? widget.onAccountSync
+                : widget.onAccountSignIn,
           ),
           _TvSettingsAction(
             title: 'Library sync',
@@ -1249,7 +1419,9 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 : 'Library sync starts after sign-in.',
             value: widget.accountSignedIn ? widget.accountSyncLabel : 'Sign in',
             icon: Icons.sync_rounded,
-            onPressed: widget.accountSignedIn ? widget.onAccountSync : widget.onAccountSignIn,
+            onPressed: widget.accountSignedIn
+                ? widget.onAccountSync
+                : widget.onAccountSignIn,
           ),
           _TvSettingsAction(
             title: widget.accountSignedIn ? 'Sign out' : 'Continue as guest',
@@ -1257,7 +1429,9 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 ? 'Clear the account session from this TV. Local app settings stay on this device.'
                 : 'Use this TV without account sync.',
             value: widget.accountSignedIn ? 'Ready' : 'Guest',
-            icon: widget.accountSignedIn ? Icons.logout_rounded : Icons.person_outline_rounded,
+            icon: widget.accountSignedIn
+                ? Icons.logout_rounded
+                : Icons.person_outline_rounded,
             onPressed: widget.accountSignedIn
                 ? widget.onAccountSignOut
                 : () => Navigator.of(context).pop(),
@@ -1267,7 +1441,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         return [
           _TvSettingsAction(
             title: 'Juicr connection',
-            subtitle: 'Catalog, metadata, editorial, trailers, and guarded playback use Juicr app services.',
+            subtitle:
+                'Catalog, metadata, editorial, trailers, and guarded playback use Juicr app services.',
             value: 'Connected',
             icon: Icons.cloud_done_rounded,
             onPressed: () => unawaited(
@@ -1282,7 +1457,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
           ),
           _TvSettingsAction(
             title: 'Playback',
-            subtitle: 'TV playback uses protected app routes and keeps private playback details hidden.',
+            subtitle:
+                'TV playback uses protected app routes and keeps private playback details hidden.',
             value: 'Guarded',
             icon: Icons.play_circle_fill_rounded,
             onPressed: () => unawaited(
@@ -1297,19 +1473,22 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
           ),
           _TvSettingsAction(
             title: 'Subtitles',
-            subtitle: 'Caption support is enabled when subtitle data is available for the selected title.',
+            subtitle:
+                'Caption support is enabled when subtitle data is available for the selected title.',
             value: current.builtInSubtitles && current.subtitles ? 'On' : 'Off',
             icon: Icons.closed_caption_rounded,
             onPressed: () => update(
               current.copyWith(
                 subtitles: !(current.builtInSubtitles && current.subtitles),
-                builtInSubtitles: !(current.builtInSubtitles && current.subtitles),
+                builtInSubtitles:
+                    !(current.builtInSubtitles && current.subtitles),
               ),
             ),
           ),
           _TvSettingsAction(
             title: 'Diagnostics',
-            subtitle: 'Reports stay redacted and do not show private playback or source details.',
+            subtitle:
+                'Reports stay redacted and do not show private playback or source details.',
             value: 'Safe',
             icon: Icons.info_outline_rounded,
             onPressed: () => unawaited(
@@ -1359,7 +1538,11 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                 children: [
                   Row(
                     children: [
-                          Icon(widget.section.icon, color: _tvAccentColor, size: 30),
+                      Icon(
+                        widget.section.icon,
+                        color: _tvAccentColor,
+                        size: 30,
+                      ),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Text(
@@ -1395,9 +1578,15 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                               child: _TvSettingsLineCard(
                                 action: actions[index],
                                 autofocus: index == 0,
-                                focusNode: index == 0 ? _firstActionFocusNode : null,
-                                onArrowUp: index == 0 ? _firstActionFocusNode.requestFocus : null,
-                                onArrowDown: index == actions.length - 1 ? _firstActionFocusNode.requestFocus : null,
+                                focusNode: index == 0
+                                    ? _firstActionFocusNode
+                                    : null,
+                                onArrowUp: index == 0
+                                    ? _firstActionFocusNode.requestFocus
+                                    : null,
+                                onArrowDown: index == actions.length - 1
+                                    ? _firstActionFocusNode.requestFocus
+                                    : null,
                               ),
                             ),
                         ],
@@ -1453,7 +1642,11 @@ class _TvSettingsLineCard extends StatelessWidget {
           ),
           child: Row(
             children: [
-              Icon(action.icon, color: focused ? Colors.black : _tvAccentColor, size: 26),
+              Icon(
+                action.icon,
+                color: focused ? Colors.black : _tvAccentColor,
+                size: 26,
+              ),
               const SizedBox(width: 14),
               Expanded(
                 child: Column(
@@ -1471,7 +1664,9 @@ class _TvSettingsLineCard extends StatelessWidget {
                     Text(
                       action.subtitle,
                       style: TextStyle(
-                        color: focused ? Colors.black.withValues(alpha: 0.72) : const Color(0xFFAAA6BD),
+                        color: focused
+                            ? Colors.black.withValues(alpha: 0.72)
+                            : const Color(0xFFAAA6BD),
                         fontSize: 13,
                         height: 1.28,
                         fontWeight: FontWeight.w600,
@@ -1483,11 +1678,20 @@ class _TvSettingsLineCard extends StatelessWidget {
               const SizedBox(width: 14),
               Container(
                 constraints: const BoxConstraints(minWidth: 86),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
-                  color: focused ? Colors.black.withValues(alpha: 0.14) : const Color(0x1FFFFFFF),
+                  color: focused
+                      ? Colors.black.withValues(alpha: 0.14)
+                      : const Color(0x1FFFFFFF),
                   borderRadius: BorderRadius.circular(999),
-                  border: Border.all(color: focused ? Colors.black.withValues(alpha: 0.18) : const Color(0x22FFFFFF)),
+                  border: Border.all(
+                    color: focused
+                        ? Colors.black.withValues(alpha: 0.18)
+                        : const Color(0x22FFFFFF),
+                  ),
                 ),
                 child: Text(
                   action.value,
@@ -1628,7 +1832,11 @@ class _TvSettingsOptionRow extends StatelessWidget {
             color: fill,
             borderRadius: BorderRadius.circular(18),
             border: Border.all(
-              color: focused && selected ? _tvFocusBorder : active ? _tvAccentColor : const Color(0x22FFFFFF),
+              color: focused && selected
+                  ? _tvFocusBorder
+                  : active
+                  ? _tvAccentColor
+                  : const Color(0x22FFFFFF),
               width: focused ? 2 : 1,
             ),
           ),
@@ -1684,7 +1892,8 @@ class _TvConsentDialogState extends State<_TvConsentDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final allAccepted = _acceptedIndexes.length == widget.acknowledgements.length;
+    final allAccepted =
+        _acceptedIndexes.length == widget.acknowledgements.length;
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 140, vertical: 40),
@@ -1723,7 +1932,11 @@ class _TvConsentDialogState extends State<_TvConsentDialog> {
               child: SingleChildScrollView(
                 child: Column(
                   children: [
-                    for (var index = 0; index < widget.acknowledgements.length; index++)
+                    for (
+                      var index = 0;
+                      index < widget.acknowledgements.length;
+                      index++
+                    )
                       Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: _TvConsentRow(
@@ -1751,7 +1964,9 @@ class _TvConsentDialogState extends State<_TvConsentDialog> {
                         ? 'Thanks. These tools can be enabled now.'
                         : 'Check every acknowledgement to continue.',
                     style: TextStyle(
-                      color: allAccepted ? _tvAccentColor : const Color(0xFFAAA6BD),
+                      color: allAccepted
+                          ? _tvAccentColor
+                          : const Color(0xFFAAA6BD),
                       fontSize: 13,
                       fontWeight: FontWeight.w800,
                     ),
@@ -1806,15 +2021,17 @@ class _TvConsentRow extends StatelessWidget {
               color: focused && checked
                   ? Colors.white
                   : active
-                      ? _tvAccentColor
-                      : const Color(0x1FFFFFFF),
+                  ? _tvAccentColor
+                  : const Color(0x1FFFFFFF),
               width: active ? 2 : 1,
             ),
           ),
           child: Row(
             children: [
               Icon(
-                checked ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+                checked
+                    ? Icons.check_circle_rounded
+                    : Icons.radio_button_unchecked_rounded,
                 color: active ? Colors.black : const Color(0xFFAAA6BD),
                 size: 25,
               ),
@@ -1835,7 +2052,9 @@ class _TvConsentRow extends StatelessWidget {
                     Text(
                       acknowledgement.text,
                       style: TextStyle(
-                        color: active ? Colors.black.withValues(alpha: 0.72) : const Color(0xFFAAA6BD),
+                        color: active
+                            ? Colors.black.withValues(alpha: 0.72)
+                            : const Color(0xFFAAA6BD),
                         fontSize: 12,
                         height: 1.28,
                         fontWeight: FontWeight.w600,
@@ -1976,10 +2195,7 @@ class _TvAddOnEntryDialogState extends State<_TvAddOnEntryDialog> {
 }
 
 class _TvAccountSignInResult {
-  const _TvAccountSignInResult({
-    required this.profile,
-    required this.session,
-  });
+  const _TvAccountSignInResult({required this.profile, required this.session});
 
   final TvAccountProfile profile;
   final TvAccountSession session;
@@ -2000,7 +2216,9 @@ class _TvAccountSignInDialogState extends State<_TvAccountSignInDialog> {
   final FocusNode _emailFocusNode = FocusNode(debugLabel: 'tv-account-email');
   final FocusNode _codeFocusNode = FocusNode(debugLabel: 'tv-account-code');
   final FocusNode _guestFocusNode = FocusNode(debugLabel: 'tv-account-guest');
-  final FocusNode _primaryFocusNode = FocusNode(debugLabel: 'tv-account-primary');
+  final FocusNode _primaryFocusNode = FocusNode(
+    debugLabel: 'tv-account-primary',
+  );
   bool _codeSent = false;
   bool _busy = false;
   String? _error;
@@ -2130,7 +2348,9 @@ class _TvAccountSignInDialogState extends State<_TvAccountSignInDialog> {
               icon: Icons.email_outlined,
               hintText: 'Email',
               focusNode: _emailFocusNode,
-              onArrowDown: () => _codeSent ? _codeFocusNode.requestFocus() : _primaryFocusNode.requestFocus(),
+              onArrowDown: () => _codeSent
+                  ? _codeFocusNode.requestFocus()
+                  : _primaryFocusNode.requestFocus(),
             ),
             if (_codeSent) ...[
               const SizedBox(height: 12),
@@ -2163,18 +2383,25 @@ class _TvAccountSignInDialogState extends State<_TvAccountSignInDialog> {
                   label: 'Continue as guest',
                   focusNode: _guestFocusNode,
                   onArrowRight: () => _primaryFocusNode.requestFocus(),
-                  onArrowUp: () => _codeSent ? _codeFocusNode.requestFocus() : _emailFocusNode.requestFocus(),
+                  onArrowUp: () => _codeSent
+                      ? _codeFocusNode.requestFocus()
+                      : _emailFocusNode.requestFocus(),
                   onPressed: () => Navigator.of(context).pop(),
                 ),
                 const SizedBox(width: 10),
                 _TvTextButton(
-                  icon: _busy ? Icons.hourglass_top_rounded : Icons.arrow_forward_rounded,
+                  icon: _busy
+                      ? Icons.hourglass_top_rounded
+                      : Icons.arrow_forward_rounded,
                   label: _busy ? 'Please wait' : primaryLabel,
                   enabled: !_busy,
                   focusNode: _primaryFocusNode,
                   onArrowLeft: () => _guestFocusNode.requestFocus(),
-                  onArrowUp: () => _codeSent ? _codeFocusNode.requestFocus() : _emailFocusNode.requestFocus(),
-                  onPressed: () => unawaited(_codeSent ? _verifyCode() : _sendCode()),
+                  onArrowUp: () => _codeSent
+                      ? _codeFocusNode.requestFocus()
+                      : _emailFocusNode.requestFocus(),
+                  onPressed: () =>
+                      unawaited(_codeSent ? _verifyCode() : _sendCode()),
                 ),
               ],
             ),
@@ -2237,7 +2464,9 @@ class _TvEditableDialogField extends StatefulWidget {
 }
 
 class _TvEditableDialogFieldState extends State<_TvEditableDialogField> {
-  late final FocusNode _ownedShellFocusNode = FocusNode(debugLabel: 'tv-dialog-edit-shell');
+  late final FocusNode _ownedShellFocusNode = FocusNode(
+    debugLabel: 'tv-dialog-edit-shell',
+  );
   final FocusNode _textFocusNode = FocusNode(debugLabel: 'tv-dialog-edit-text');
   bool _editing = false;
   FocusNode get _shellFocusNode => widget.focusNode ?? _ownedShellFocusNode;
@@ -2325,11 +2554,20 @@ class _TvEditableDialogFieldState extends State<_TvEditableDialogField> {
                   onTapOutside: (_) => _endEditing(),
                   onEditingComplete: _endEditing,
                   onSubmitted: (_) => _endEditing(),
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                  ),
                   decoration: InputDecoration(
-                    prefixIcon: Icon(widget.icon, color: const Color(0xFFAAA6BD)),
+                    prefixIcon: Icon(
+                      widget.icon,
+                      color: const Color(0xFFAAA6BD),
+                    ),
                     hintText: widget.hintText,
-                    hintStyle: const TextStyle(color: Color(0xFFAAA6BD), fontWeight: FontWeight.w700),
+                    hintStyle: const TextStyle(
+                      color: Color(0xFFAAA6BD),
+                      fontWeight: FontWeight.w700,
+                    ),
                     filled: true,
                     fillColor: const Color(0x18FFFFFF),
                     border: OutlineInputBorder(
@@ -2398,19 +2636,28 @@ class _TvDetailsOverlay extends StatefulWidget {
 
 class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
   final FocusNode _closeFocusNode = FocusNode(debugLabel: 'tv-details-close');
-  final FocusNode _primaryActionFocusNode = FocusNode(debugLabel: 'tv-details-primary');
-  final FocusNode _episodesFocusNode = FocusNode(debugLabel: 'tv-details-episodes');
-  final FocusNode _trailerFocusNode = FocusNode(debugLabel: 'tv-details-trailer');
+  final FocusNode _primaryActionFocusNode = FocusNode(
+    debugLabel: 'tv-details-primary',
+  );
+  final FocusNode _episodesFocusNode = FocusNode(
+    debugLabel: 'tv-details-episodes',
+  );
+  final FocusNode _trailerFocusNode = FocusNode(
+    debugLabel: 'tv-details-trailer',
+  );
   final FocusNode _likeFocusNode = FocusNode(debugLabel: 'tv-details-like');
 
-  bool get _isSeriesLike => widget.item.type == 'series' || widget.item.type == 'animation';
+  bool get _isSeriesLike =>
+      widget.item.type == 'series' || widget.item.type == 'animation';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final initialNode = widget.preparing ? _closeFocusNode : _primaryActionFocusNode;
+      final initialNode = widget.preparing
+          ? _closeFocusNode
+          : _primaryActionFocusNode;
       initialNode.requestFocus();
       Future<void>.delayed(const Duration(milliseconds: 80), () {
         if (mounted && FocusManager.instance.primaryFocus == null) {
@@ -2436,7 +2683,9 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
         ..hideCurrentSnackBar()
         ..showSnackBar(
           const SnackBar(
-            content: Text('Enable trailers in Settings before opening trailer choices.'),
+            content: Text(
+              'Enable trailers in Settings before opening trailer choices.',
+            ),
             duration: Duration(seconds: 3),
           ),
         );
@@ -2445,15 +2694,22 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
-        const SnackBar(content: Text('Loading trailers...'), duration: Duration(seconds: 1)),
+        const SnackBar(
+          content: Text('Loading trailers...'),
+          duration: Duration(seconds: 1),
+        ),
       );
-    final trailers = await _TvApi().trailers(widget.item).catchError((_) => const <_TvTrailer>[]);
+    final trailers = await _TvApi()
+        .trailers(widget.item)
+        .catchError((_) => const <_TvTrailer>[]);
     if (!context.mounted) return;
     if (trailers.isEmpty) {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(content: Text('No TV trailer is available for this title yet.')),
+          const SnackBar(
+            content: Text('No TV trailer is available for this title yet.'),
+          ),
         );
       return;
     }
@@ -2512,26 +2768,40 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              for (var index = 0; index < trailers.take(6).length; index++)
+                              for (
+                                var index = 0;
+                                index < trailers.take(6).length;
+                                index++
+                              )
                                 Padding(
                                   padding: const EdgeInsets.only(bottom: 10),
                                   child: SizedBox(
                                     width: double.infinity,
                                     child: _TvTextButton(
-                                      icon: trailers[index].isTvPlayable ||
-                                              trailers[index].isExternalLaunchable
+                                      icon:
+                                          trailers[index].isTvPlayable ||
+                                              trailers[index]
+                                                  .isExternalLaunchable
                                           ? Icons.movie_filter_rounded
                                           : Icons.lock_clock_rounded,
-                                      label: trailers[index].isTvPlayable ||
-                                              trailers[index].isExternalLaunchable
+                                      label:
+                                          trailers[index].isTvPlayable ||
+                                              trailers[index]
+                                                  .isExternalLaunchable
                                           ? trailers[index].title
                                           : '${trailers[index].title} unavailable',
                                       autofocus: index == 0,
-                                      enabled: trailers[index].isTvPlayable ||
+                                      enabled:
+                                          trailers[index].isTvPlayable ||
                                           trailers[index].isExternalLaunchable,
                                       onPressed: () {
                                         Navigator.of(dialogContext).pop();
-                                        unawaited(_openTrailer(context, trailers[index]));
+                                        unawaited(
+                                          _openTrailer(
+                                            context,
+                                            trailers[index],
+                                          ),
+                                        );
                                       },
                                     ),
                                   ),
@@ -2556,7 +2826,10 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
     messenger
       ..hideCurrentSnackBar()
       ..showSnackBar(
-        const SnackBar(content: Text('Preparing trailer...'), duration: Duration(seconds: 1)),
+        const SnackBar(
+          content: Text('Preparing trailer...'),
+          duration: Duration(seconds: 1),
+        ),
       );
     try {
       if (trailer.isExternalLaunchable) {
@@ -2566,7 +2839,9 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
           messenger
             ..hideCurrentSnackBar()
             ..showSnackBar(
-              const SnackBar(content: Text('No TV app can open this trailer yet.')),
+              const SnackBar(
+                content: Text('No TV app can open this trailer yet.'),
+              ),
             );
         }
         return;
@@ -2605,7 +2880,9 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
       messenger
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(content: Text('This trailer is not ready for TV playback yet.')),
+          const SnackBar(
+            content: Text('This trailer is not ready for TV playback yet.'),
+          ),
         );
     }
   }
@@ -2621,12 +2898,13 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
               title: 'Episode ${index + 1}',
               description: index == 0
                   ? widget.item.description?.trim().isNotEmpty == true
-                      ? widget.item.description!.trim()
-                      : 'Start the season from the first episode.'
+                        ? widget.item.description!.trim()
+                        : 'Start the season from the first episode.'
                   : 'Episode details will appear here when metadata is available.',
             ),
           );
-    final seasons = allEpisodes.map((episode) => episode.season).toSet().toList()..sort();
+    final seasons =
+        allEpisodes.map((episode) => episode.season).toSet().toList()..sort();
     var selectedSeason = seasons.isNotEmpty ? seasons.first : 1;
     await showDialog<void>(
       context: context,
@@ -2635,8 +2913,9 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
           backgroundColor: Colors.transparent,
           child: StatefulBuilder(
             builder: (context, setDialogState) {
-              final episodes =
-                  allEpisodes.where((episode) => episode.season == selectedSeason).toList();
+              final episodes = allEpisodes
+                  .where((episode) => episode.season == selectedSeason)
+                  .toList();
               return Container(
                 width: 800,
                 constraints: const BoxConstraints(maxHeight: 610),
@@ -2709,13 +2988,18 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
                                 children: [
                                   for (final episode in episodes)
                                     Padding(
-                                      padding: const EdgeInsets.only(bottom: 12),
+                                      padding: const EdgeInsets.only(
+                                        bottom: 12,
+                                      ),
                                       child: _TvEpisodeCard(
                                         episode: episode,
                                         autofocus: episode == episodes.first,
                                         onPlay: () {
                                           Navigator.of(dialogContext).pop();
-                                          widget.onPlayEpisode(episode.season, episode.episode);
+                                          widget.onPlayEpisode(
+                                            episode.season,
+                                            episode.episode,
+                                          );
                                         },
                                       ),
                                     ),
@@ -2738,10 +3022,14 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
 
   List<Widget> _detailActions(BuildContext context) {
     final afterPrimary = _isSeriesLike ? _episodesFocusNode : _trailerFocusNode;
-    final beforeTrailer = _isSeriesLike ? _episodesFocusNode : _primaryActionFocusNode;
+    final beforeTrailer = _isSeriesLike
+        ? _episodesFocusNode
+        : _primaryActionFocusNode;
     return [
       _TvTextButton(
-        icon: widget.preparing ? Icons.hourglass_top_rounded : Icons.play_arrow_rounded,
+        icon: widget.preparing
+            ? Icons.hourglass_top_rounded
+            : Icons.play_arrow_rounded,
         label: widget.preparing ? 'Preparing' : 'Watch now',
         autofocus: true,
         focusNode: _primaryActionFocusNode,
@@ -2777,7 +3065,9 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
       ),
       _TvCircleIconButton(
         focusNode: _likeFocusNode,
-        icon: widget.liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+        icon: widget.liked
+            ? Icons.favorite_rounded
+            : Icons.favorite_border_rounded,
         selected: widget.liked,
         size: 48,
         onArrowLeft: _trailerFocusNode.requestFocus,
@@ -2842,11 +3132,18 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
                         ),
                         Row(
                           children: [
-                            _PosterArtwork(item: widget.item, width: 210, height: 300),
+                            _PosterArtwork(
+                              item: widget.item,
+                              width: 210,
+                              height: 300,
+                            ),
                             const SizedBox(width: 28),
                             Expanded(
                               child: Padding(
-                                padding: const EdgeInsets.only(top: 24, right: 70),
+                                padding: const EdgeInsets.only(
+                                  top: 24,
+                                  right: 70,
+                                ),
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -2882,7 +3179,8 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
                                     ),
                                     const SizedBox(height: 18),
                                     Text(
-                                      widget.item.description?.isNotEmpty == true
+                                      widget.item.description?.isNotEmpty ==
+                                              true
                                           ? widget.item.description!
                                           : 'Catalog details are ready. Select playback to start a protected TV session.',
                                       maxLines: 5,
@@ -2963,8 +3261,8 @@ class _TvCircleIconButton extends StatelessWidget {
               color: focused && selected
                   ? Colors.white
                   : active
-                      ? _tvAccentColor
-                      : const Color(0x33FFFFFF),
+                  ? _tvAccentColor
+                  : const Color(0x33FFFFFF),
               width: active ? 2 : 1,
             ),
             boxShadow: active
@@ -3013,15 +3311,15 @@ class _TvSeasonButton extends StatelessWidget {
             color: selected
                 ? _tvAccentColor
                 : focused
-                    ? const Color(0x1F20D66B)
-                    : const Color(0x5531313C),
+                ? const Color(0x1F20D66B)
+                : const Color(0x5531313C),
             borderRadius: BorderRadius.circular(999),
             border: Border.all(
               color: focused && selected
                   ? Colors.white
                   : active
-                      ? _tvAccentColor
-                      : const Color(0x33FFFFFF),
+                  ? _tvAccentColor
+                  : const Color(0x33FFFFFF),
               width: active ? 2 : 1,
             ),
           ),
@@ -3058,7 +3356,7 @@ class _TvEpisodeCard extends StatelessWidget {
       builder: (focused) {
         return AnimatedContainer(
           duration: _tvDuration(140),
-      padding: const EdgeInsets.all(11),
+          padding: const EdgeInsets.all(11),
           decoration: BoxDecoration(
             color: focused ? const Color(0x1F20D66B) : const Color(0x16FFFFFF),
             borderRadius: BorderRadius.circular(18),
@@ -3174,10 +3472,14 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
 
   final TextEditingController _controller = TextEditingController();
   final FocusNode _searchBarFocusNode = FocusNode(debugLabel: 'tv-search-bar');
-  final FocusNode _searchTextFocusNode = FocusNode(debugLabel: 'tv-search-text');
+  final FocusNode _searchTextFocusNode = FocusNode(
+    debugLabel: 'tv-search-text',
+  );
   final FocusNode _voiceFocusNode = FocusNode(debugLabel: 'tv-search-voice');
   final FocusNode _closeFocusNode = FocusNode(debugLabel: 'tv-search-close');
-  final FocusNode _resultsFocusNode = FocusNode(debugLabel: 'tv-search-results-first');
+  final FocusNode _resultsFocusNode = FocusNode(
+    debugLabel: 'tv-search-results-first',
+  );
   String _query = '';
   bool _listening = false;
   bool _editingText = false;
@@ -3211,16 +3513,19 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
   List<_TvItem> get _results {
     final query = _query.toLowerCase();
     if (query.isEmpty) return widget.items.take(24).toList();
-    return widget.items.where((item) {
-      final haystack = [
-        item.title,
-        item.type,
-        item.year,
-        item.genres.join(' '),
-        item.description,
-      ].whereType<String>().join(' ').toLowerCase();
-      return haystack.contains(query);
-    }).take(36).toList();
+    return widget.items
+        .where((item) {
+          final haystack = [
+            item.title,
+            item.type,
+            item.year,
+            item.genres.join(' '),
+            item.description,
+          ].whereType<String>().join(' ').toLowerCase();
+          return haystack.contains(query);
+        })
+        .take(36)
+        .toList();
   }
 
   Future<void> _voiceSearch() async {
@@ -3240,14 +3545,18 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(content: Text('Voice search is unavailable on this TV.')),
+          const SnackBar(
+            content: Text('Voice search is unavailable on this TV.'),
+          ),
         );
     } on TimeoutException {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(content: Text('Voice search did not hear anything yet.')),
+          const SnackBar(
+            content: Text('Voice search did not hear anything yet.'),
+          ),
         );
     } finally {
       if (mounted) setState(() => _listening = false);
@@ -3363,12 +3672,15 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
                                   ),
                                 ),
                                 _TvTextButton(
-                                  icon: _listening ? Icons.hearing_rounded : Icons.mic_rounded,
+                                  icon: _listening
+                                      ? Icons.hearing_rounded
+                                      : Icons.mic_rounded,
                                   label: _listening ? 'Listening' : 'Voice',
                                   enabled: !_listening,
                                   animateIcon: _listening,
                                   focusNode: _voiceFocusNode,
-                                  onArrowRight: () => _closeFocusNode.requestFocus(),
+                                  onArrowRight: () =>
+                                      _closeFocusNode.requestFocus(),
                                   onArrowDown: _focusSearchBar,
                                   onPressed: () => unawaited(_voiceSearch()),
                                 ),
@@ -3384,13 +3696,17 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
                             skipTraversal: _editingText,
                             child: Builder(
                               builder: (context) {
-                                final focused = _searchBarFocusNode.hasFocus || _searchTextFocusNode.hasFocus;
+                                final focused =
+                                    _searchBarFocusNode.hasFocus ||
+                                    _searchTextFocusNode.hasFocus;
                                 return GestureDetector(
                                   onTap: _beginTextEntry,
                                   child: AnimatedContainer(
                                     duration: _tvDuration(130),
                                     height: 54,
-                                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 20,
+                                    ),
                                     decoration: BoxDecoration(
                                       color: focused || _editingText
                                           ? const Color(0x2FFFFFFF)
@@ -3405,13 +3721,18 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
                                     ),
                                     child: Row(
                                       children: [
-                                        const Icon(Icons.search_rounded, color: Color(0xFFBDB9D5), size: 26),
+                                        const Icon(
+                                          Icons.search_rounded,
+                                          color: Color(0xFFBDB9D5),
+                                          size: 26,
+                                        ),
                                         const SizedBox(width: 14),
                                         Expanded(
                                           child: TextField(
                                             controller: _controller,
                                             focusNode: _searchTextFocusNode,
-                                            onTapOutside: (_) => _endTextEntry(),
+                                            onTapOutside: (_) =>
+                                                _endTextEntry(),
                                             readOnly: !_editingText,
                                             autofocus: false,
                                             style: const TextStyle(
@@ -3452,12 +3773,17 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
                               child: _results.isEmpty
                                   ? _TvEmptyCatalogState(
                                       title: 'No TV results yet.',
-                                      subtitle: 'Try another title, channel, or animation name.',
-                                      height: MediaQuery.sizeOf(context).height - 300,
+                                      subtitle:
+                                          'Try another title, channel, or animation name.',
+                                      height:
+                                          MediaQuery.sizeOf(context).height -
+                                          300,
                                       verticalOffset: 0,
                                     )
                                   : _TvPosterGrid(
-                                      title: _query.isEmpty ? 'Suggested' : 'Results',
+                                      title: _query.isEmpty
+                                          ? 'Suggested'
+                                          : 'Results',
                                       subtitle: _query.isEmpty
                                           ? 'Remote-select an item to open details.'
                                           : '${_results.length} matching title(s).',
@@ -3484,5 +3810,3 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
     );
   }
 }
-
-

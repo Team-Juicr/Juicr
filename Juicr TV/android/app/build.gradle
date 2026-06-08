@@ -5,8 +5,9 @@ plugins {
 }
 
 android {
-    namespace = "app.juicr.tv"
+    namespace = "app.juicr.flutter"
     compileSdk = flutter.compileSdkVersion
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -18,7 +19,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "app.juicr.tv"
+        applicationId = "app.juicr.flutter"
         minSdkVersion = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -28,10 +29,18 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.debug
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
 }
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    implementation "androidx.media3:media3-exoplayer:1.9.2"
+    implementation "androidx.media3:media3-exoplayer-dash:1.9.2"
+    implementation "androidx.media3:media3-exoplayer-hls:1.9.2"
+    implementation "androidx.media3:media3-ui:1.9.2"
 }

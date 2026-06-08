@@ -24,6 +24,10 @@ DIAGNOSTICS = ROOT / "Diagnostics"
 SCREENSHOTS = DIAGNOSTICS / "screenshots"
 PACKAGE = "app.juicr.flutter"
 FOCUS_RE = re.compile(r"Juicr TV focus trace label=([^ ]+) tab=([^\r\n]+)")
+SCREENSHOT_FOCUS_LABELS = {
+    "tv-discovery-menu-sort-featured",
+    "tv-discovery-menu-apply",
+}
 SDK_CANDIDATES = (
     Path(os.environ.get("ANDROID_HOME", "")),
     Path(os.environ.get("ANDROID_SDK_ROOT", "")),
@@ -117,6 +121,18 @@ SCENARIOS: dict[str, list[str]] = {
         *["up"] * 6,
         "right",
         "left",
+        "back",
+    ],
+    "discovery_filter_scroll": [
+        "left",
+        "down",
+        "center",
+        "right",
+        "up",
+        "up",
+        "center",
+        *["down"] * 9,
+        *["up"] * 9,
         "back",
     ],
     "library_edges": [
@@ -259,6 +275,10 @@ def audit_key(
         png = SCREENSHOTS / f"tv-control-audit-{scenario}-{stamp}-{index:02d}.png"
         screenshot(adb, device, png)
         lines.append(f"FAIL hard key={action} screenshot={png}")
+    elif label in SCREENSHOT_FOCUS_LABELS:
+        png = SCREENSHOTS / f"tv-control-audit-focus-{scenario}-{stamp}-{index:02d}.png"
+        screenshot(adb, device, png)
+        lines.append(f"SHOT focus={label} screenshot={png}")
     return label, failures
 
 
@@ -414,11 +434,13 @@ def main() -> int:
             continue
         stagnant = 0
         stagnant_keys: list[str] = []
+        seen_labels: set[str] = set()
         for index, action in enumerate(SCENARIOS[scenario], start=1):
             key = KEYS[action]
             code, output = send_key(adb, args.device, key)
             time.sleep(args.delay)
             label, tab = latest_focus(adb, args.device)
+            seen_labels.add(label)
             foreground = is_foreground(adb, args.device)
             changed = label != last_label
             if changed:
@@ -436,6 +458,10 @@ def main() -> int:
                 png = SCREENSHOTS / f"tv-control-audit-{scenario}-{stamp}-{index:02d}.png"
                 screenshot(adb, args.device, png)
                 lines.append(f"FAIL hard key={action} screenshot={png}")
+            elif label in SCREENSHOT_FOCUS_LABELS:
+                png = SCREENSHOTS / f"tv-control-audit-focus-{scenario}-{stamp}-{index:02d}.png"
+                screenshot(adb, args.device, png)
+                lines.append(f"SHOT focus={label} screenshot={png}")
             if stagnant >= 4 and len(set(stagnant_keys[-4:])) > 1:
                 png = SCREENSHOTS / f"tv-control-audit-stall-{scenario}-{stamp}-{index:02d}.png"
                 screenshot(adb, args.device, png)
@@ -446,6 +472,14 @@ def main() -> int:
                 stagnant = 0
                 stagnant_keys.clear()
             last_label = label
+        if scenario == "discovery_filter_scroll" and "tv-discovery-menu-apply" not in seen_labels:
+            failures += 1
+            png = SCREENSHOTS / f"tv-control-audit-missing-{scenario}-{stamp}.png"
+            screenshot(adb, args.device, png)
+            lines.append(
+                "FAIL missing_required_focus "
+                f"required=tv-discovery-menu-apply screenshot={png}"
+            )
         lines.append("")
 
     report.write_text("\n".join(lines), encoding="utf-8")

@@ -311,8 +311,8 @@ class _FocusableIconButton extends StatelessWidget {
               border: Border.all(
                 color: focused
                     ? selected
-                        ? Colors.white
-                        : _tvFocusBorder
+                          ? Colors.white
+                          : _tvFocusBorder
                     : Colors.transparent,
                 width: 2,
               ),
@@ -337,6 +337,7 @@ class _TvTextButton extends StatelessWidget {
     this.autofocus = false,
     this.enabled = true,
     this.animateIcon = false,
+    this.autoReveal = false,
     this.focusNode,
     this.onFocus,
     this.onArrowLeft,
@@ -351,6 +352,7 @@ class _TvTextButton extends StatelessWidget {
   final bool autofocus;
   final bool enabled;
   final bool animateIcon;
+  final bool autoReveal;
   final FocusNode? focusNode;
   final VoidCallback? onFocus;
   final VoidCallback? onArrowLeft;
@@ -363,6 +365,7 @@ class _TvTextButton extends StatelessWidget {
     return _TvFocusable(
       autofocus: autofocus,
       enabled: enabled,
+      autoReveal: autoReveal,
       focusNode: focusNode,
       onFocus: onFocus,
       onPressed: onPressed,
@@ -394,8 +397,8 @@ class _TvTextButton extends StatelessWidget {
                   color: active
                       ? Colors.black
                       : enabled
-                          ? Colors.white
-                          : const Color(0xFFAAA6BD),
+                      ? Colors.white
+                      : const Color(0xFFAAA6BD),
                   fontWeight: FontWeight.w900,
                 ),
               );
@@ -408,20 +411,23 @@ class _TvTextButton extends StatelessWidget {
                           color: active
                               ? Colors.black
                               : enabled
-                                  ? Colors.white
-                                  : const Color(0xFFAAA6BD),
+                              ? Colors.white
+                              : const Color(0xFFAAA6BD),
                         )
                       : Icon(
                           icon,
                           color: active
                               ? Colors.black
                               : enabled
-                                  ? Colors.white
-                                  : const Color(0xFFAAA6BD),
+                              ? Colors.white
+                              : const Color(0xFFAAA6BD),
                           size: 22,
                         ),
                   const SizedBox(width: 8),
-                  if (constraints.hasBoundedWidth) Flexible(child: labelText) else labelText,
+                  if (constraints.hasBoundedWidth)
+                    Flexible(child: labelText)
+                  else
+                    labelText,
                 ],
               );
             },
@@ -433,10 +439,7 @@ class _TvTextButton extends StatelessWidget {
 }
 
 class _LoopingIcon extends StatefulWidget {
-  const _LoopingIcon({
-    required this.icon,
-    required this.color,
-  });
+  const _LoopingIcon({required this.icon, required this.color});
 
   final IconData icon;
   final Color color;
@@ -445,7 +448,8 @@ class _LoopingIcon extends StatefulWidget {
   State<_LoopingIcon> createState() => _LoopingIconState();
 }
 
-class _LoopingIconState extends State<_LoopingIcon> with SingleTickerProviderStateMixin {
+class _LoopingIconState extends State<_LoopingIcon>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 900),
@@ -619,10 +623,7 @@ class _TvLoadingState extends StatelessWidget {
 }
 
 class _TvErrorState extends StatelessWidget {
-  const _TvErrorState({
-    required this.message,
-    required this.onRetry,
-  });
+  const _TvErrorState({required this.message, required this.onRetry});
 
   final String message;
   final VoidCallback onRetry;
@@ -661,7 +662,7 @@ class _Pill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
       decoration: BoxDecoration(
         color: const Color(0xA611131A),
         borderRadius: BorderRadius.circular(999),
@@ -703,21 +704,11 @@ class _TvBackdrop extends StatelessWidget {
           center: Alignment.topRight,
           radius: 1.2,
           colors: light
-              ? const [
-                  Color(0xFFE7FFF0),
-                  Color(0xFFF7F5FF),
-                  Color(0xFFFFFFFF),
-                ]
-              : const [
-                  Color(0xFF172B1D),
-                  Color(0xFF111024),
-                  Color(0xFF07080D),
-                ],
+              ? const [Color(0xFFE7FFF0), Color(0xFFF7F5FF), Color(0xFFFFFFFF)]
+              : const [Color(0xFF172B1D), Color(0xFF111024), Color(0xFF07080D)],
         ),
       ),
       child: const SizedBox.expand(),
     );
   }
 }
-
-

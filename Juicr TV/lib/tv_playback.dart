@@ -1,24 +1,479 @@
-﻿part of 'main.dart';
+part of 'main.dart';
+
+const MethodChannel _tvMedia3PlayerChannel = MethodChannel(
+  'app.juicr.flutter/media3_player',
+);
+
+enum _TvPlaybackEngine { media3, textureExoplayer, libvlc }
+
+class _TvPlaybackValue {
+  const _TvPlaybackValue({
+    this.isInitialized = false,
+    this.isPlaying = false,
+    this.isBuffering = false,
+    this.isEnded = false,
+    this.duration = Duration.zero,
+    this.position = Duration.zero,
+    this.size = Size.zero,
+    this.aspectRatio = 16 / 9,
+    this.errorDescription = '',
+  });
+
+  final bool isInitialized;
+  final bool isPlaying;
+  final bool isBuffering;
+  final bool isEnded;
+  final Duration duration;
+  final Duration position;
+  final Size size;
+  final double aspectRatio;
+  final String errorDescription;
+
+  static const empty = _TvPlaybackValue();
+}
+
+class _TvRelayStartupProof extends ChangeNotifier {
+  var _streamedSegments = 0;
+  var _streamedBytes = 0;
+  var _duration = Duration.zero;
+
+  int get streamedSegments => _streamedSegments;
+  int get streamedBytes => _streamedBytes;
+  Duration get duration => _duration;
+  bool get hasMediaProof => _streamedBytes >= 512 * 1024;
+
+  void updateDuration(Duration duration) {
+    if (duration <= Duration.zero || duration == _duration) return;
+    _duration = duration;
+    notifyListeners();
+  }
+
+  void updateProgress(int streamedSegments) {
+    if (streamedSegments <= _streamedSegments) return;
+    _streamedSegments = streamedSegments;
+    notifyListeners();
+  }
+
+  void updateBytes(int streamedBytes) {
+    if (streamedBytes <= _streamedBytes) return;
+    _streamedBytes = streamedBytes;
+    notifyListeners();
+  }
+}
+
+class _TvMedia3PlaybackController {
+  _TvMedia3PlaybackController(this.session, {required this.subtitles});
+
+  final _PlaybackSession session;
+  final List<_TvSubtitle> subtitles;
+  final Completer<void> _viewReady = Completer<void>();
+  final Set<VoidCallback> _listeners = <VoidCallback>{};
+  Timer? _pollTimer;
+  int? _viewId;
+  bool _disposed = false;
+  _TvPlaybackValue value = _TvPlaybackValue.empty;
+  bool firstFrameRendered = false;
+  String errorBucket = 'none';
+
+  Map<String, Object?> get creationParams => <String, Object?>{
+    'url': session.tvMediaUrl,
+    'headers': session.httpHeaders,
+    'type': session.sourceType,
+    'sourceClass': 'direct',
+    'liveMode': false,
+    'subtitles': subtitles
+        .map(
+          (subtitle) => <String, Object?>{
+            'url': subtitle.url,
+            'language': subtitle.language,
+            'label': subtitle.label,
+            'format': subtitle.format,
+          },
+        )
+        .toList(),
+  };
+
+  void attachView(int viewId) {
+    if (_disposed) return;
+    _viewId = viewId;
+    if (!_viewReady.isCompleted) _viewReady.complete();
+    _startPolling();
+  }
+
+  void addListener(VoidCallback listener) => _listeners.add(listener);
+  void removeListener(VoidCallback listener) => _listeners.remove(listener);
+
+  Future<void> initialize({
+    Duration timeout = const Duration(seconds: 22),
+  }) async {
+    await _viewReady.future.timeout(timeout);
+    _startPolling();
+    final deadline = DateTime.now().add(timeout);
+    while (!_disposed && DateTime.now().isBefore(deadline)) {
+      await _syncState();
+      if (value.errorDescription.isNotEmpty) {
+        throw StateError(value.errorDescription);
+      }
+      if (value.isInitialized) return;
+      await Future<void>.delayed(const Duration(milliseconds: 90));
+    }
+    throw TimeoutException('Media3 initialize timed out', timeout);
+  }
+
+  Future<void> play() => _invoke('play');
+  Future<void> pause() => _invoke('pause');
+  Future<void> seekTo(Duration position) => _invoke('seekTo', <String, Object?>{
+    'positionMs': position.inMilliseconds,
+  });
+  Future<void> setPlaybackSpeed(double speed) =>
+      _invoke('setPlaybackSpeed', <String, Object?>{'speed': speed});
+
+  Future<void> _invoke(String method, [Map<String, Object?> args = const {}]) {
+    final viewId = _viewId;
+    if (viewId == null || _disposed) return Future<void>.value();
+    return _tvMedia3PlayerChannel.invokeMethod<void>(method, <String, Object?>{
+      'viewId': viewId,
+      ...args,
+    });
+  }
+
+  void _startPolling() {
+    if (_pollTimer != null || _disposed) return;
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      unawaited(_syncState());
+    });
+  }
+
+  Future<void> _syncState() async {
+    final viewId = _viewId;
+    if (viewId == null || _disposed) return;
+    final raw = await _tvMedia3PlayerChannel.invokeMapMethod<String, Object?>(
+      'state',
+      <String, Object?>{'viewId': viewId},
+    );
+    if (raw == null || _disposed) return;
+    final hasError = raw['hasError'] == true;
+    final width = (raw['width'] as num?)?.toDouble() ?? 0;
+    final height = (raw['height'] as num?)?.toDouble() ?? 0;
+    final size = width > 0 && height > 0 ? Size(width, height) : Size.zero;
+    firstFrameRendered = raw['firstFrameRendered'] == true;
+    errorBucket = (raw['errorBucket'] as String?) ?? 'none';
+    value = _TvPlaybackValue(
+      isInitialized: raw['initialized'] == true,
+      isPlaying: raw['playing'] == true,
+      isBuffering: raw['buffering'] == true,
+      isEnded: raw['ended'] == true,
+      duration: Duration(
+        milliseconds: (raw['durationMs'] as num?)?.round() ?? 0,
+      ),
+      position: Duration(
+        milliseconds: (raw['positionMs'] as num?)?.round() ?? 0,
+      ),
+      size: size,
+      aspectRatio: size.width > 0 && size.height > 0
+          ? size.width / size.height
+          : 16 / 9,
+      errorDescription: hasError
+          ? ((raw['errorDescription'] as String?) ?? 'media3_error')
+          : '',
+    );
+    for (final listener in List<VoidCallback>.of(_listeners)) {
+      listener();
+    }
+  }
+
+  Future<void> dispose() async {
+    _disposed = true;
+    _pollTimer?.cancel();
+    _listeners.clear();
+    final viewId = _viewId;
+    if (viewId != null) {
+      await _tvMedia3PlayerChannel.invokeMethod<void>(
+        'dispose',
+        <String, Object?>{'viewId': viewId},
+      );
+    }
+  }
+}
+
+class _TvNativePlaybackController extends ChangeNotifier {
+  _TvNativePlaybackController.media3(
+    _PlaybackSession session, {
+    required List<_TvSubtitle> subtitles,
+    LibVlcHlsRelay? relay,
+  }) : engine = _TvPlaybackEngine.media3,
+       _video = null,
+       _media3 = _TvMedia3PlaybackController(session, subtitles: subtitles),
+       _vlc = null,
+       _relay = relay,
+       _relayProof = null {
+    _media3!.addListener(notifyListeners);
+  }
+
+  _TvNativePlaybackController.textureExoplayer(
+    _PlaybackSession session, {
+    LibVlcHlsRelay? relay,
+  })
+    : engine = _TvPlaybackEngine.textureExoplayer,
+      _video = VideoPlayerController.networkUrl(
+        Uri.parse(session.tvMediaUrl),
+        formatHint: session.videoFormatHint,
+        httpHeaders: session.httpHeaders,
+        viewType: VideoViewType.textureView,
+      ),
+      _media3 = null,
+      _vlc = null,
+      _relay = relay,
+      _relayProof = null {
+    _video!.addListener(notifyListeners);
+  }
+
+  _TvNativePlaybackController.libvlc(
+    _PlaybackSession session, {
+    LibVlcHlsRelay? relay,
+    _TvRelayStartupProof? relayProof,
+  })
+    : engine = _TvPlaybackEngine.libvlc,
+      _video = null,
+      _media3 = null,
+      _relay = relay,
+      _relayProof = relayProof,
+      _vlc = VlcPlayerController.network(
+        session.tvMediaUrl,
+        hwAcc: HwAcc.auto,
+        autoInitialize: false,
+        autoPlay: false,
+        options: _tvVlcPlayerOptions(session.httpHeaders),
+      ) {
+    _vlc!.addListener(notifyListeners);
+    _relayProof?.addListener(notifyListeners);
+  }
+
+  final _TvPlaybackEngine engine;
+  final VideoPlayerController? _video;
+  final _TvMedia3PlaybackController? _media3;
+  final VlcPlayerController? _vlc;
+  final LibVlcHlsRelay? _relay;
+  final _TvRelayStartupProof? _relayProof;
+  bool get hasStartupProof {
+    final video = _video;
+    if (video != null) {
+      final current = value;
+      return current.isInitialized &&
+          current.isPlaying &&
+          current.position >= const Duration(seconds: 1);
+    }
+    final media3 = _media3;
+    if (media3 != null) {
+      final current = media3.value;
+      return media3.firstFrameRendered &&
+          current.isInitialized &&
+          current.isPlaying &&
+          current.position >= const Duration(seconds: 1);
+    }
+    final current = value;
+    return current.isInitialized &&
+        (current.duration > Duration.zero ||
+            current.size.width > 0 && current.size.height > 0 ||
+            current.position >= const Duration(seconds: 1));
+  }
+
+  _TvPlaybackValue get value {
+    final video = _video;
+    if (video != null) {
+      final raw = video.value;
+      return _TvPlaybackValue(
+        isInitialized: raw.isInitialized,
+        isPlaying: raw.isPlaying,
+        isBuffering: raw.isBuffering,
+        isEnded: raw.isCompleted,
+        duration: raw.duration,
+        position: raw.position,
+        size: raw.size,
+        aspectRatio: raw.aspectRatio <= 0 ? 16 / 9 : raw.aspectRatio,
+        errorDescription: raw.hasError ? raw.errorDescription ?? '' : '',
+      );
+    }
+    final media3 = _media3;
+    if (media3 != null) return media3.value;
+    final raw = _vlc!.value;
+    return _TvPlaybackValue(
+      isInitialized: raw.isInitialized,
+      isPlaying: raw.isPlaying,
+      isBuffering: raw.isBuffering,
+      isEnded: raw.isEnded,
+      duration: raw.duration,
+      position: raw.position,
+      size: raw.size,
+      aspectRatio: raw.aspectRatio <= 0 ? 16 / 9 : raw.aspectRatio,
+      errorDescription: raw.hasError ? raw.errorDescription : '',
+    );
+  }
+
+  Future<void> initialize({Duration timeout = const Duration(seconds: 22)}) async {
+    final video = _video;
+    if (video != null) return video.initialize().timeout(timeout);
+    final media3 = _media3;
+    if (media3 != null) return media3.initialize(timeout: timeout);
+    final vlc = _vlc!;
+    if (vlc.value.isInitialized) return Future<void>.value();
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (_vlcViewAttached(vlc)) break;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    if (!_vlcViewAttached(vlc)) {
+      throw TimeoutException('libVLC view attach timed out', timeout);
+    }
+    final completer = Completer<void>();
+    late VoidCallback listener;
+    var listenerAttached = false;
+    void detachListener() {
+      if (!listenerAttached) return;
+      listenerAttached = false;
+      vlc.removeListener(listener);
+    }
+
+    listener = () {
+      final value = vlc.value;
+      if (value.hasError && !completer.isCompleted) {
+        completer.completeError(value.errorDescription);
+      } else if (value.isInitialized && !completer.isCompleted) {
+        completer.complete();
+      }
+      if (completer.isCompleted) detachListener();
+    };
+    vlc.addListener(listener);
+    listenerAttached = true;
+    await vlc.initialize().catchError((Object error) {
+      final message = error.toString().toLowerCase();
+      if (message.contains('already initialized')) return;
+      if (!completer.isCompleted) completer.completeError(error);
+    });
+    final remaining = deadline.difference(DateTime.now());
+    if (remaining <= Duration.zero) {
+      detachListener();
+      throw TimeoutException('libVLC initialize timed out', timeout);
+    }
+    return completer.future.timeout(
+      remaining,
+      onTimeout: () {
+        detachListener();
+        throw TimeoutException('libVLC initialize timed out', timeout);
+      },
+    );
+  }
+
+  Future<void> play() => _video?.play() ?? _media3?.play() ?? _vlc!.play();
+  Future<void> pause() => _video?.pause() ?? _media3?.pause() ?? _vlc!.pause();
+  Future<void> seekTo(Duration position) =>
+      _video?.seekTo(position) ??
+      _media3?.seekTo(position) ??
+      _vlc!.seekTo(position);
+  Future<void> setPlaybackSpeed(double speed) =>
+      _video?.setPlaybackSpeed(speed) ??
+      _media3?.setPlaybackSpeed(speed) ??
+      _vlc!.setPlaybackSpeed(speed);
+
+  bool _vlcViewAttached(VlcPlayerController vlc) {
+    try {
+      final dynamic controller = vlc;
+      return controller.viewId is int;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Widget surface({required double aspectRatio}) {
+    final video = _video;
+    if (video != null) {
+      return IgnorePointer(child: VideoPlayer(video));
+    }
+    final media3 = _media3;
+    if (media3 != null) {
+      return IgnorePointer(
+        child: AndroidView(
+          viewType: 'app.juicr.flutter/media3_player',
+          creationParams: media3.creationParams,
+          creationParamsCodec: const StandardMessageCodec(),
+          onPlatformViewCreated: media3.attachView,
+        ),
+      );
+    }
+    return VlcPlayer(
+      controller: _vlc!,
+      aspectRatio: aspectRatio,
+      placeholder: const ColoredBox(color: Colors.black),
+      virtualDisplay: true,
+    );
+  }
+
+  @override
+  Future<void> dispose() async {
+    _video?.removeListener(notifyListeners);
+    _media3?.removeListener(notifyListeners);
+    _vlc?.removeListener(notifyListeners);
+    _relayProof?.removeListener(notifyListeners);
+    await _video?.dispose();
+    await _media3?.dispose();
+    await _vlc?.dispose();
+    await _relay?.stop();
+    super.dispose();
+  }
+}
+
+VlcPlayerOptions _tvVlcPlayerOptions(Map<String, String> headers) {
+  final extras = <String>[
+    ':network-caching=1800',
+    ':http-reconnect',
+    ':http-forward-cookies',
+  ];
+  final http = <String>[
+    VlcHttpOptions.httpReconnect(true),
+    VlcHttpOptions.httpForwardCookies(true),
+  ];
+  for (final entry in headers.entries) {
+    final key = entry.key.trim().toLowerCase();
+    final value = entry.value.trim();
+    if (value.isEmpty) continue;
+    if (key == 'user-agent') {
+      http.add(VlcHttpOptions.httpUserAgent(value));
+      extras.add(':http-user-agent=$value');
+    } else if (key == 'referer' || key == 'referrer') {
+      http.add(VlcHttpOptions.httpReferrer(value));
+      extras.add(':http-referrer=$value');
+    } else if (key == 'cookie') {
+      extras.add(':http-cookie=$value');
+    } else {
+      extras.add(':http-header=${entry.key.trim()}: $value');
+    }
+  }
+  return VlcPlayerOptions(
+    advanced: VlcAdvancedOptions([VlcAdvancedOptions.networkCaching(1800)]),
+    http: VlcHttpOptions(http),
+    extras: extras,
+  );
+}
 
 class _TvPlaybackPage extends StatefulWidget {
   const _TvPlaybackPage({
     required this.item,
-    required this.controller,
     required this.sessions,
     required this.initialSessionIndex,
     required this.initialSeason,
     required this.initialEpisode,
+    required this.initialResumePosition,
     required this.settings,
     required this.subtitles,
     required this.initialSubtitleIndex,
   });
 
   final _TvItem item;
-  final VideoPlayerController controller;
   final List<_PlaybackSession> sessions;
   final int initialSessionIndex;
   final int initialSeason;
   final int initialEpisode;
+  final Duration initialResumePosition;
   final _TvSettingsState settings;
   final List<_TvSubtitle> subtitles;
   final int initialSubtitleIndex;
@@ -34,21 +489,35 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
 
   final FocusNode _playbackFocusNode = FocusNode(debugLabel: 'tv-playback');
   final FocusNode _backFocusNode = FocusNode(debugLabel: 'tv-playback-back');
-  final FocusNode _skipBackFocusNode = FocusNode(debugLabel: 'tv-playback-skip-back');
+  final FocusNode _nextEpisodeFocusNode = FocusNode(
+    debugLabel: 'tv-playback-next-episode',
+  );
+  final FocusNode _skipBackFocusNode = FocusNode(
+    debugLabel: 'tv-playback-skip-back',
+  );
   final FocusNode _playFocusNode = FocusNode(debugLabel: 'tv-playback-play');
-  final FocusNode _skipForwardFocusNode = FocusNode(debugLabel: 'tv-playback-skip-forward');
-  final FocusNode _sourcesFocusNode = FocusNode(debugLabel: 'tv-playback-sources');
-  final FocusNode _settingsFocusNode = FocusNode(debugLabel: 'tv-playback-settings');
+  final FocusNode _skipForwardFocusNode = FocusNode(
+    debugLabel: 'tv-playback-skip-forward',
+  );
+  final FocusNode _sourcesFocusNode = FocusNode(
+    debugLabel: 'tv-playback-sources',
+  );
+  final FocusNode _settingsFocusNode = FocusNode(
+    debugLabel: 'tv-playback-settings',
+  );
   final FocusNode _lockFocusNode = FocusNode(debugLabel: 'tv-playback-lock');
-  final FocusNode _progressFocusNode = FocusNode(debugLabel: 'tv-playback-progress');
+  final FocusNode _progressFocusNode = FocusNode(
+    debugLabel: 'tv-playback-progress',
+  );
   final _api = _TvApi();
-  late VideoPlayerController _controller;
+  _TvNativePlaybackController? _controller;
   late List<_PlaybackSession> _sessions;
   Timer? _hideControlsTimer;
   Timer? _feedbackTimer;
   bool _controlsVisible = true;
   bool _locked = false;
   bool _switchingSource = false;
+  bool _closingPlayback = false;
   late bool _autoplayNextEpisode = widget.settings.nextEpisode;
   late bool _captionsEnabled;
   bool _autoNextQueued = false;
@@ -59,17 +528,22 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   late int _sessionIndex;
   late int _subtitleIndex;
   _TvPlaybackFeedback? _feedback;
+  TvRemoteDebugSnapshot _remoteDebugSnapshot = const TvRemoteDebugSnapshot(
+    currentSurfaceName: 'playback',
+  );
 
   @override
   void initState() {
     super.initState();
-    _controller = widget.controller;
     _sessions = widget.sessions;
-    _sessionIndex = widget.initialSessionIndex.clamp(0, _sessions.length - 1).toInt();
+    _sessionIndex = widget.initialSessionIndex
+        .clamp(0, _sessions.length - 1)
+        .toInt();
     _season = widget.initialSeason;
     _episode = widget.initialEpisode;
     _subtitleIndex = widget.initialSubtitleIndex;
-    _captionsEnabled = widget.settings.subtitles &&
+    _captionsEnabled =
+        widget.settings.subtitles &&
         widget.settings.builtInSubtitles &&
         _subtitleIndex >= 0 &&
         _subtitleIndex < widget.subtitles.length;
@@ -77,6 +551,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       if (!mounted) return;
       _showControls();
       _playFocusNode.requestFocus();
+      unawaited(_openSession(_sessionIndex, feedbackLabel: 'Ready'));
     });
   }
 
@@ -86,6 +561,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _feedbackTimer?.cancel();
     _playbackFocusNode.dispose();
     _backFocusNode.dispose();
+    _nextEpisodeFocusNode.dispose();
     _skipBackFocusNode.dispose();
     _playFocusNode.dispose();
     _skipForwardFocusNode.dispose();
@@ -93,32 +569,50 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _settingsFocusNode.dispose();
     _lockFocusNode.dispose();
     _progressFocusNode.dispose();
-    _controller.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 
   Future<void> _togglePlay() async {
-    if (!_controller.value.isInitialized) return;
-    if (_controller.value.isPlaying) {
-      await _controller.pause();
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    if (controller.value.isPlaying) {
+      await controller.pause();
     } else {
-      await _controller.play();
+      await controller.play();
     }
     _showControls();
     if (mounted) setState(() {});
   }
 
+  Future<void> _playOnly() async {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    await controller.play();
+    _showControls();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _pauseOnly() async {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    await controller.pause();
+    _showControls();
+    if (mounted) setState(() {});
+  }
+
   Future<void> _seekBy(Duration offset) async {
-    if (!_controller.value.isInitialized) return;
-    final value = _controller.value;
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    final value = controller.value;
     final target = value.position + offset;
     final duration = value.duration;
     final clamped = target < Duration.zero
         ? Duration.zero
         : duration > Duration.zero && target > duration
-            ? duration
-            : target;
-    await _controller.seekTo(clamped);
+        ? duration
+        : target;
+    await controller.seekTo(clamped);
     _showControls();
     if (mounted) setState(() {});
   }
@@ -171,7 +665,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       _locked = !_locked;
       _controlsVisible = true;
     });
-    _showFeedback(_locked ? Icons.lock_rounded : Icons.lock_open_rounded, _locked ? 'Locked' : 'Unlocked');
+    _showFeedback(
+      _locked ? Icons.lock_rounded : Icons.lock_open_rounded,
+      _locked ? 'Locked' : 'Unlocked',
+    );
     if (!_locked) _showControls();
   }
 
@@ -179,84 +676,332 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _showControls();
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 2)));
+      ..showSnackBar(
+        SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+      );
   }
 
   _TvPlaybackProgress _currentProgress() {
-    final value = _controller.value;
+    final value = _controller?.value ?? _TvPlaybackValue.empty;
     if (!value.isInitialized) {
-      return const _TvPlaybackProgress(position: Duration.zero, duration: Duration.zero);
+      return const _TvPlaybackProgress(
+        position: Duration.zero,
+        duration: Duration.zero,
+      );
     }
-    return _TvPlaybackProgress(position: value.position, duration: value.duration);
-  }
-
-  void _closePlayback() {
-    Navigator.of(context).pop(_currentProgress());
-  }
-
-  Future<VideoPlayerController> _prepareController(_PlaybackSession session) async {
-    final controller = VideoPlayerController.networkUrl(
-      Uri.parse(session.tvMediaUrl),
-      formatHint: session.videoFormatHint,
-      httpHeaders: session.httpHeaders,
-      closedCaptionFile: _activeSubtitleFile(),
+    return _TvPlaybackProgress(
+      position: value.position,
+      duration: value.duration,
     );
-    await controller.initialize().timeout(const Duration(seconds: 22));
-    await controller.setPlaybackSpeed(_playbackSpeed);
-    await controller.play();
-    return controller;
   }
 
-  Future<void> _replaceController({
-    required VideoPlayerController controller,
-    required List<_PlaybackSession> sessions,
-    required int sessionIndex,
-    required String feedbackLabel,
-  }) async {
-    final oldController = _controller;
-    setState(() {
-      _controller = controller;
-      _sessions = sessions;
-      _sessionIndex = sessionIndex;
-      _switchingSource = false;
-      _autoNextQueued = false;
-      _controlsVisible = true;
-    });
-    await oldController.dispose();
-    _showFeedback(Icons.check_rounded, feedbackLabel);
-    _playFocusNode.requestFocus();
-  }
-
-  Future<void> _switchToSource(int index) async {
-    if (index == _sessionIndex || index < 0 || index >= _sessions.length || _switchingSource) {
-      return;
+  Future<void> _closePlayback() async {
+    if (_closingPlayback) return;
+    _closingPlayback = true;
+    final progress = _currentProgress();
+    final controller = _controller;
+    if (controller != null) {
+      setState(() => _controller = null);
+      await controller.dispose();
     }
-    Navigator.of(context).pop();
+    if (!mounted) return;
+    Navigator.of(context).pop(progress);
+  }
+
+  void _updateRemoteDebug(TvRemoteActionBucket? bucket) {
+    final focusLabel = FocusManager.instance.primaryFocus?.debugLabel;
+    _remoteDebugSnapshot = _remoteDebugSnapshot.copyWith(
+      lastKeyBucket: bucket,
+      currentSurfaceName: 'playback',
+      currentFocusLabel: focusLabel == null || focusLabel.trim().isEmpty
+          ? 'none'
+          : focusLabel,
+      controlsVisible: _controlsVisible,
+      controlsLocked: _locked,
+    );
+  }
+
+  List<_TvPlaybackEngine> _engineLadderFor(_PlaybackSession session) {
+    if (_isNativeHlsSession(session)) {
+      return const <_TvPlaybackEngine>[
+        _TvPlaybackEngine.textureExoplayer,
+        _TvPlaybackEngine.media3,
+        _TvPlaybackEngine.libvlc,
+      ];
+    }
+    return const <_TvPlaybackEngine>[
+      _TvPlaybackEngine.media3,
+      _TvPlaybackEngine.textureExoplayer,
+      _TvPlaybackEngine.libvlc,
+    ];
+  }
+
+  Future<_TvNativePlaybackController> _prepareNativeController(
+    _PlaybackSession session,
+    _TvPlaybackEngine engine,
+  ) async {
+    var controllerSession = session;
+    LibVlcHlsRelay? relay;
+    _TvRelayStartupProof? relayProof;
+    final shouldRelay = _shouldRelaySession(session, engine);
+    if (engine == _TvPlaybackEngine.libvlc) {
+      debugPrint(
+        'Juicr TV libVLC relay decision shouldRelay=$shouldRelay '
+        'sourceType=${_safePlaybackTypeBucket(session.sourceType)} '
+        'url=${_safePlaybackUrlBucket(session.tvMediaUrl)}',
+      );
+    }
+    if (shouldRelay) {
+      relayProof = _TvRelayStartupProof();
+      final continuousTsMode = session.tvMediaUrl
+          .toLowerCase()
+          .contains('/web/playback/session/');
+      relay = await LibVlcHlsRelay.start(
+        upstreamUri: Uri.parse(session.tvMediaUrl),
+        headers: session.httpHeaders,
+        resumePosition: Duration.zero,
+        continuousTsMode: continuousTsMode,
+        onDuration: relayProof.updateDuration,
+        onContinuousTsProgress: relayProof.updateProgress,
+        onContinuousTsBytes: relayProof.updateBytes,
+        onEvent: (message) => debugPrint('Juicr TV $message'),
+      );
+      controllerSession = session.copyWith(
+        mediaUrl: relay.localUri.toString(),
+        sourceType: continuousTsMode ? 'ts' : 'hls',
+        httpHeaders: const <String, String>{},
+      );
+      debugPrint('Juicr TV native HLS relay started engine=${engine.name}');
+    }
+    final controller = switch (engine) {
+      _TvPlaybackEngine.media3 => _TvNativePlaybackController.media3(
+        controllerSession,
+        subtitles: _captionsEnabled ? widget.subtitles : const <_TvSubtitle>[],
+        relay: relay,
+      ),
+      _TvPlaybackEngine.textureExoplayer =>
+        _TvNativePlaybackController.textureExoplayer(
+          controllerSession,
+          relay: relay,
+        ),
+      _TvPlaybackEngine.libvlc => _TvNativePlaybackController.libvlc(
+        controllerSession,
+        relay: relay,
+        relayProof: relayProof,
+      ),
+    };
+    setState(() => _controller = controller);
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+      await Future<void>.delayed(const Duration(milliseconds: 16));
+      await controller.initialize().timeout(const Duration(seconds: 24));
+      await controller.setPlaybackSpeed(_playbackSpeed);
+      final shouldResumeInitialEpisode =
+          _season == widget.initialSeason && _episode == widget.initialEpisode;
+      if (shouldResumeInitialEpisode &&
+          widget.initialResumePosition > Duration.zero &&
+          widget.initialResumePosition < controller.value.duration) {
+        await controller.seekTo(widget.initialResumePosition);
+      }
+      await controller.play();
+      await _verifyStartupProof(controller, engine);
+      debugPrint('Juicr TV native playback ready engine=${engine.name}');
+      return controller;
+    } catch (error) {
+      debugPrint(
+        'Juicr TV native playback candidate failed '
+        'engine=${engine.name} bucket=${_playbackInitBucket(error)} '
+        'errorType=${error.runtimeType} detail=${_safeTvPlaybackError(error)}',
+      );
+      if (identical(_controller, controller)) {
+        setState(() => _controller = null);
+      }
+      if (relay != null && _controller != controller) {
+        await relay.stop();
+      }
+      await controller.dispose();
+      rethrow;
+    }
+  }
+
+  bool _shouldRelaySession(
+    _PlaybackSession session,
+    _TvPlaybackEngine engine,
+  ) {
+    if (_isNativeHlsSession(session)) return true;
+    return engine == _TvPlaybackEngine.libvlc &&
+        session.tvMediaUrl.toLowerCase().contains('/web/playback/session/');
+  }
+
+  bool _isNativeHlsSession(_PlaybackSession session) {
+    final type = session.sourceType.toLowerCase();
+    final url = session.tvMediaUrl.toLowerCase();
+    return type.contains('hls') ||
+        type.contains('m3u8') ||
+        type.contains('mpegurl') ||
+        url.contains('.m3u8');
+  }
+
+  String _safePlaybackTypeBucket(String sourceType) {
+    final type = sourceType.toLowerCase();
+    if (type.contains('mpegurl') || type.contains('m3u8')) return 'hls';
+    if (type.contains('dash') || type.contains('mpd')) return 'dash';
+    if (type.contains('mp4') || type.contains('video')) return 'file';
+    return type.isEmpty ? 'unknown' : 'other';
+  }
+
+  String _safePlaybackUrlBucket(String url) {
+    final lowerUrl = url.toLowerCase();
+    if (lowerUrl.contains('/web/playback/session/')) return 'web-session';
+    if (lowerUrl.contains('.m3u8')) return 'hls-path';
+    if (lowerUrl.contains('.mpd')) return 'dash-path';
+    if (lowerUrl.contains('.mp4')) return 'file-path';
+    return url.startsWith('https://') ? 'https' : 'other';
+  }
+
+  String _safeTvPlaybackError(Object error) {
+    return error
+        .toString()
+        .replaceAll(RegExp(r'https?://[^\s"]+'), '[hidden-url]')
+        .replaceAll(RegExp(r'127\.0\.0\.1[^\s"]*'), '[localhost-hidden]')
+        .replaceAll(RegExp(r'localhost[^\s"]*'), '[localhost-hidden]');
+  }
+
+  Future<_TvNativePlaybackController> _prepareWithLadder(
+    _PlaybackSession session,
+  ) async {
+    Object? lastError;
+    var currentSession = session;
+    final engineLadder = _engineLadderFor(session);
+    for (var index = 0; index < engineLadder.length; index += 1) {
+      final engine = engineLadder[index];
+      try {
+        return await _prepareNativeController(currentSession, engine);
+      } catch (error) {
+        lastError = error;
+        if (index < engineLadder.length - 1) {
+          final refreshed = await _freshPlaybackSessionForCurrentEpisode();
+          if (refreshed != null) {
+            currentSession = refreshed;
+            if (_sessionIndex >= 0 && _sessionIndex < _sessions.length) {
+              _sessions[_sessionIndex] = refreshed;
+            }
+            debugPrint(
+              'Juicr TV native playback refreshed session '
+              'after engine=${engine.name}',
+            );
+          }
+        }
+      }
+    }
+    throw _PlaybackUnavailableException(
+      _playbackInitBucket(lastError ?? 'media_init'),
+    );
+  }
+
+  Future<_PlaybackSession?> _freshPlaybackSessionForCurrentEpisode() async {
+    try {
+      final sessions = await _api
+          .playbackSessions(
+            widget.item,
+            season: _season,
+            episode: _episode,
+          )
+          .timeout(const Duration(seconds: 45));
+      return sessions.isEmpty ? null : sessions.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _verifyStartupProof(
+    _TvNativePlaybackController controller,
+    _TvPlaybackEngine engine,
+  ) async {
+    final timeout = engine == _TvPlaybackEngine.libvlc
+        ? const Duration(seconds: 22)
+        : const Duration(seconds: 6);
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (controller.value.errorDescription.isNotEmpty) {
+        throw StateError(controller.value.errorDescription);
+      }
+      if (controller.hasStartupProof) return;
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    throw StateError('${engine.name}_startup');
+  }
+
+  Future<void> _openSession(int index, {required String feedbackLabel}) async {
+    if (index < 0 || index >= _sessions.length || _switchingSource) return;
     setState(() {
       _switchingSource = true;
       _controlsVisible = true;
     });
+    final oldController = _controller;
     try {
-      final controller = await _prepareController(_sessions[index]);
+      var selectedIndex = index;
+      _TvNativePlaybackController? preparedController;
+      Object? lastError;
+      for (var candidateIndex = index;
+          candidateIndex < _sessions.length;
+          candidateIndex += 1) {
+        try {
+          preparedController = await _prepareWithLadder(
+            _sessions[candidateIndex],
+          );
+          selectedIndex = candidateIndex;
+          break;
+        } catch (error) {
+          lastError = error;
+          debugPrint(
+            'Juicr TV source candidate failed '
+            'index=${candidateIndex + 1} errorType=${error.runtimeType} '
+            'detail=${_safeTvPlaybackError(error)}',
+          );
+        }
+      }
+      if (preparedController == null) {
+        throw lastError ?? const _TvApiException('playback_unavailable');
+      }
       if (!mounted) {
-        await controller.dispose();
+        await _controller?.dispose();
         return;
       }
-      await _replaceController(
-        controller: controller,
-        sessions: _sessions,
-        sessionIndex: index,
-        feedbackLabel: 'Source ${index + 1}',
-      );
+      if (oldController != null && !identical(oldController, _controller)) {
+        await oldController.dispose();
+      }
+      setState(() {
+        _sessionIndex = selectedIndex;
+        _switchingSource = false;
+        _autoNextQueued = false;
+        _controlsVisible = true;
+      });
+      _playFocusNode.requestFocus();
     } catch (error) {
       if (!mounted) return;
-      setState(() => _switchingSource = false);
-      _showPlayerToast('That TV source was not ready. Try another source.');
+      setState(() {
+        _switchingSource = false;
+        _controller = oldController;
+      });
+      _showPlayerToast(_friendlyPlaybackError(error));
     }
   }
 
+  Future<void> _switchToSource(int index) async {
+    if (index == _sessionIndex ||
+        index < 0 ||
+        index >= _sessions.length ||
+        _switchingSource) {
+      return;
+    }
+    Navigator.of(context).pop();
+    await _openSession(index, feedbackLabel: 'Source ${index + 1}');
+  }
+
   Future<void> _openNextEpisode() async {
-    final seriesLike = widget.item.type == 'series' || widget.item.type == 'animation';
+    final seriesLike =
+        widget.item.type == 'series' || widget.item.type == 'animation';
     if (!seriesLike || _switchingSource) {
       _showPlayerToast('Next episode is available for series and animation.');
       return;
@@ -266,53 +1011,41 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       _controlsVisible = true;
     });
     final nextEpisode = _episode + 1;
+    final oldController = _controller;
     try {
       final sessions = await _api
-          .playbackSessions(
-            widget.item,
-            season: _season,
-            episode: nextEpisode,
-            allowWebFallback: widget.settings.playbackEngine != 'Native',
-          )
+          .playbackSessions(widget.item, season: _season, episode: nextEpisode)
           .timeout(const Duration(seconds: 75));
-      VideoPlayerController? readyController;
-      var readyIndex = 0;
-      Object? lastError;
-      for (var index = 0; index < sessions.length; index++) {
-        try {
-          readyController = await _prepareController(sessions[index]);
-          readyIndex = index;
-          break;
-        } catch (error) {
-          lastError = error;
-        }
-      }
-      final controller = readyController;
-      if (controller == null) {
-        throw _PlaybackUnavailableException(
-          _playbackInitBucket(lastError ?? 'media_init'),
-        );
-      }
+      final controller = await _prepareWithLadder(sessions.first);
       if (!mounted) {
         await controller.dispose();
         return;
       }
+      if (oldController != null && !identical(oldController, controller)) {
+        await oldController.dispose();
+      }
       _episode = nextEpisode;
-      await _replaceController(
-        controller: controller,
-        sessions: sessions,
-        sessionIndex: readyIndex,
-        feedbackLabel: 'S$_season E$_episode',
-      );
+      setState(() {
+        _sessions = sessions;
+        _sessionIndex = 0;
+        _switchingSource = false;
+        _autoNextQueued = false;
+        _controlsVisible = true;
+      });
+      _playFocusNode.requestFocus();
     } catch (error) {
       if (!mounted) return;
-      setState(() => _switchingSource = false);
+      setState(() {
+        _switchingSource = false;
+        _controller = oldController;
+      });
       _showPlayerToast(_friendlyPlaybackError(error));
     }
   }
 
-  void _maybeAutoNextEpisode(VideoPlayerValue value) {
-    final seriesLike = widget.item.type == 'series' || widget.item.type == 'animation';
+  void _maybeAutoNextEpisode(_TvPlaybackValue value) {
+    final seriesLike =
+        widget.item.type == 'series' || widget.item.type == 'animation';
     if (!_autoplayNextEpisode ||
         !seriesLike ||
         _autoNextQueued ||
@@ -398,7 +1131,11 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              for (var index = 0; index < _sessions.length; index++)
+                              for (
+                                var index = 0;
+                                index < _sessions.length;
+                                index++
+                              )
                                 Padding(
                                   padding: const EdgeInsets.only(bottom: 10),
                                   child: _TvTextButton(
@@ -407,11 +1144,17 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                         : Icons.video_library_rounded,
                                     label: index == _sessionIndex
                                         ? '${_sessionLabel(_sessions[index], index)} active'
-                                        : _sessionLabel(_sessions[index], index),
+                                        : _sessionLabel(
+                                            _sessions[index],
+                                            index,
+                                          ),
                                     autofocus: index == _sessionIndex,
                                     enabled: !_switchingSource,
-                                    animateIcon: _switchingSource && index != _sessionIndex,
-                                    onPressed: () => unawaited(_switchToSource(index)),
+                                    animateIcon:
+                                        _switchingSource &&
+                                        index != _sessionIndex,
+                                    onPressed: () =>
+                                        unawaited(_switchToSource(index)),
                                   ),
                                 ),
                             ],
@@ -430,8 +1173,9 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   }
 
   Future<void> _setPlaybackSpeed(double speed) async {
-    if (!_controller.value.isInitialized) return;
-    await _controller.setPlaybackSpeed(speed);
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    await controller.setPlaybackSpeed(speed);
     setState(() {
       _playbackSpeed = speed;
       _controlsVisible = true;
@@ -440,18 +1184,23 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   }
 
   Future<void> _restartPlayback() async {
-    if (!_controller.value.isInitialized) return;
-    await _controller.seekTo(Duration.zero);
-    await _controller.play();
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    await controller.seekTo(Duration.zero);
+    await controller.play();
     _showControls();
     _showFeedback(Icons.refresh_rounded, 'Restarted');
   }
 
   Future<void> _showSubtitlePicker(VoidCallback refreshSettingsDialog) async {
-    final captionsAvailable = widget.subtitles.isNotEmpty &&
+    final captionsAvailable =
+        widget.subtitles.isNotEmpty &&
         widget.settings.subtitles &&
         widget.settings.builtInSubtitles;
-    final selectedLabel = _captionsEnabled && _subtitleIndex >= 0 && _subtitleIndex < widget.subtitles.length
+    final selectedLabel =
+        _captionsEnabled &&
+            _subtitleIndex >= 0 &&
+            _subtitleIndex < widget.subtitles.length
         ? widget.subtitles[_subtitleIndex].label
         : 'Off';
     final selected = await showDialog<String>(
@@ -468,27 +1217,25 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       ),
     );
     if (selected == null || !mounted) return;
-    final subtitleIndex = widget.subtitles.indexWhere((subtitle) => subtitle.label == selected);
+    final subtitleIndex = widget.subtitles.indexWhere(
+      (subtitle) => subtitle.label == selected,
+    );
     setState(() {
       _subtitleIndex = subtitleIndex;
       _captionsEnabled = subtitleIndex >= 0;
       _controlsVisible = true;
     });
-    await _controller.setClosedCaptionFile(_activeSubtitleFile());
-    refreshSettingsDialog();
-    _showFeedback(Icons.closed_caption_rounded, _captionsEnabled ? 'Subtitles on' : 'Subtitles off');
-  }
-
-  Future<ClosedCaptionFile>? _activeSubtitleFile() {
-    if (!_captionsEnabled || _subtitleIndex < 0 || _subtitleIndex >= widget.subtitles.length) {
-      return null;
+    if (_controller?.engine == _TvPlaybackEngine.media3) {
+      await _openSession(
+        _sessionIndex,
+        feedbackLabel: _captionsEnabled ? 'Subtitles on' : 'Subtitles off',
+      );
     }
-    final subtitle = widget.subtitles[_subtitleIndex];
-    return _api.subtitleText(subtitle).then((text) {
-      return subtitle.format.toLowerCase().contains('srt')
-          ? SubRipCaptionFile(text)
-          : WebVTTCaptionFile(text);
-    });
+    refreshSettingsDialog();
+    _showFeedback(
+      Icons.closed_caption_rounded,
+      _captionsEnabled ? 'Subtitles on' : 'Subtitles off',
+    );
   }
 
   Future<void> _showVideoSizePicker(VoidCallback refreshSettingsDialog) async {
@@ -514,71 +1261,36 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _showFeedback(Icons.aspect_ratio_rounded, selected);
   }
 
-  Widget _videoSurface(VideoPlayerValue value) {
-    if (!value.isInitialized) return const _TvPlaybackLoadingState();
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final screenSize = Size(constraints.maxWidth, constraints.maxHeight);
-        final videoAspect = value.aspectRatio <= 0 ? 16 / 9 : value.aspectRatio;
-        final effectiveAspect = _videoSize == '16:9' ? 16 / 9 : videoAspect;
-        Widget withCaptions(Widget child) {
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              child,
-              if (_captionsEnabled)
-                Positioned(
-                  left: 72,
-                  right: 72,
-                  bottom: _controlsVisible ? 116 : 42,
-                  child: ClosedCaption(
-                    text: value.caption.text,
-                    textStyle: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      shadows: [
-                        Shadow(color: Colors.black, blurRadius: 8),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          );
-        }
-        if (_videoSize == 'Stretch') {
-          return SizedBox.expand(
-            child: FittedBox(
-              fit: BoxFit.fill,
-              child: SizedBox(
-                width: screenSize.width,
-                height: screenSize.height,
-                child: withCaptions(VideoPlayer(_controller)),
-              ),
-            ),
-          );
-        }
-        final fit = _videoSize == 'Fill' ? BoxFit.cover : BoxFit.contain;
-        return SizedBox.expand(
-          child: FittedBox(
-            fit: fit,
-            child: SizedBox(
-              width: effectiveAspect,
-              height: 1,
-              child: AspectRatio(
-                aspectRatio: effectiveAspect,
-                child: withCaptions(VideoPlayer(_controller)),
-              ),
-            ),
+  Widget _videoSurface(_TvPlaybackValue value) {
+    final controller = _controller;
+    if (controller == null) return const _TvPlaybackLoadingState();
+    Widget withLoading(Widget child) {
+      if (value.isInitialized) return child;
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          child,
+          const ColoredBox(
+            color: Colors.black,
+            child: Center(child: _TvPlaybackLoadingState()),
           ),
-        );
-      },
+        ],
+      );
+    }
+
+    return SizedBox.expand(
+      child: withLoading(
+        controller.surface(
+          aspectRatio: value.aspectRatio <= 0 ? 16 / 9 : value.aspectRatio,
+        ),
+      ),
     );
   }
 
   Future<void> _showSettingsPanel() async {
     _showControls();
-    final seriesLike = widget.item.type == 'series' || widget.item.type == 'animation';
+    final seriesLike =
+        widget.item.type == 'series' || widget.item.type == 'animation';
     await showDialog<void>(
       context: context,
       builder: (dialogContext) {
@@ -637,8 +1349,11 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                   icon: speed == _playbackSpeed
                                       ? Icons.check_circle_rounded
                                       : Icons.speed_rounded,
-                                  title: 'Speed ${speed.toStringAsFixed(speed == 1.0 ? 0 : 2)}x',
-                                  value: speed == _playbackSpeed ? 'Active' : '',
+                                  title:
+                                      'Speed ${speed.toStringAsFixed(speed == 1.0 ? 0 : 2)}x',
+                                  value: speed == _playbackSpeed
+                                      ? 'Active'
+                                      : '',
                                   selected: speed == _playbackSpeed,
                                   onPressed: () {
                                     unawaited(_setPlaybackSpeed(speed));
@@ -656,13 +1371,18 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                     ? Icons.closed_caption_rounded
                                     : Icons.closed_caption_off_rounded,
                                 title: 'Subtitle',
-                                value: _captionsEnabled && _subtitleIndex >= 0 && _subtitleIndex < widget.subtitles.length
+                                value:
+                                    _captionsEnabled &&
+                                        _subtitleIndex >= 0 &&
+                                        _subtitleIndex < widget.subtitles.length
                                     ? widget.subtitles[_subtitleIndex].label
                                     : widget.subtitles.isEmpty
-                                        ? 'Unavailable'
-                                        : 'Off',
+                                    ? 'Unavailable'
+                                    : 'Off',
                                 onPressed: () => unawaited(
-                                  _showSubtitlePicker(() => setDialogState(() {})),
+                                  _showSubtitlePicker(
+                                    () => setDialogState(() {}),
+                                  ),
                                 ),
                               ),
                               _TvPlaybackSettingsRow(
@@ -670,7 +1390,9 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                 title: 'Video size',
                                 value: _videoSize,
                                 onPressed: () => unawaited(
-                                  _showVideoSizePicker(() => setDialogState(() {})),
+                                  _showVideoSizePicker(
+                                    () => setDialogState(() {}),
+                                  ),
                                 ),
                               ),
                               if (seriesLike)
@@ -682,13 +1404,16 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                   value: _autoplayNextEpisode ? 'On' : 'Off',
                                   onPressed: () {
                                     setState(() {
-                                      _autoplayNextEpisode = !_autoplayNextEpisode;
+                                      _autoplayNextEpisode =
+                                          !_autoplayNextEpisode;
                                       _controlsVisible = true;
                                     });
                                     setDialogState(() {});
                                     _showFeedback(
                                       Icons.playlist_play_rounded,
-                                      _autoplayNextEpisode ? 'Auto next on' : 'Auto next off',
+                                      _autoplayNextEpisode
+                                          ? 'Auto next on'
+                                          : 'Auto next off',
                                     );
                                   },
                                 ),
@@ -715,10 +1440,15 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         _sourcesFocusNode.requestFocus();
         return KeyEventResult.handled;
       }
-      if (focused == _sourcesFocusNode || focused == _settingsFocusNode || focused == _lockFocusNode) {
+      if (focused == _sourcesFocusNode ||
+          focused == _settingsFocusNode ||
+          focused == _lockFocusNode) {
         _playFocusNode.requestFocus();
-      } else if (focused == _skipBackFocusNode || focused == _skipForwardFocusNode) {
+      } else if (focused == _skipBackFocusNode ||
+          focused == _skipForwardFocusNode) {
         _backFocusNode.requestFocus();
+      } else if (focused == _nextEpisodeFocusNode) {
+        _nextEpisodeFocusNode.requestFocus();
       } else {
         _backFocusNode.requestFocus();
       }
@@ -727,9 +1457,15 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     if (direction == TraversalDirection.down) {
       if (focused == _backFocusNode) {
         _playFocusNode.requestFocus();
-      } else if (focused == _playFocusNode || focused == _skipBackFocusNode || focused == _skipForwardFocusNode) {
+      } else if (focused == _nextEpisodeFocusNode) {
+        _playFocusNode.requestFocus();
+      } else if (focused == _playFocusNode ||
+          focused == _skipBackFocusNode ||
+          focused == _skipForwardFocusNode) {
         _sourcesFocusNode.requestFocus();
-      } else if (focused == _sourcesFocusNode || focused == _settingsFocusNode || focused == _lockFocusNode) {
+      } else if (focused == _sourcesFocusNode ||
+          focused == _settingsFocusNode ||
+          focused == _lockFocusNode) {
         _progressFocusNode.requestFocus();
       } else {
         _sourcesFocusNode.requestFocus();
@@ -740,26 +1476,67 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   }
 
   KeyEventResult _handlePlaybackKey(KeyEvent event) {
-    final key = event.logicalKey;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
-    if (_locked && key != LogicalKeyboardKey.select && key != LogicalKeyboardKey.enter) {
+    final bucket = tvRemoteInputMapper.bucketForEvent(event);
+    _updateRemoteDebug(bucket);
+    if (bucket == null) return KeyEventResult.ignored;
+    final command = tvPlaybackRemoteActionResolver.commandFor(bucket);
+    if (_locked &&
+        bucket != TvRemoteActionBucket.select &&
+        command != TvPlaybackRemoteCommand.close) {
       return KeyEventResult.handled;
     }
-    if (key == LogicalKeyboardKey.arrowUp) {
+    switch (command) {
+      case TvPlaybackRemoteCommand.togglePlay:
+        unawaited(_togglePlay());
+        return KeyEventResult.handled;
+      case TvPlaybackRemoteCommand.play:
+        unawaited(_playOnly());
+        return KeyEventResult.handled;
+      case TvPlaybackRemoteCommand.pause:
+        unawaited(_pauseOnly());
+        return KeyEventResult.handled;
+      case TvPlaybackRemoteCommand.stop:
+      case TvPlaybackRemoteCommand.close:
+        unawaited(_closePlayback());
+        return KeyEventResult.handled;
+      case TvPlaybackRemoteCommand.seekForward:
+        unawaited(_fastSeekBy(_fastSeekStep, direction: 1));
+        return KeyEventResult.handled;
+      case TvPlaybackRemoteCommand.seekBack:
+        unawaited(
+          _fastSeekBy(
+            Duration(seconds: -_fastSeekStep.inSeconds),
+            direction: -1,
+          ),
+        );
+        return KeyEventResult.handled;
+      case TvPlaybackRemoteCommand.openSources:
+        unawaited(_showSourcesPanel());
+        return KeyEventResult.handled;
+      case TvPlaybackRemoteCommand.openSettings:
+        unawaited(_showSettingsPanel());
+        return KeyEventResult.handled;
+      case TvPlaybackRemoteCommand.showControls:
+        break;
+      case null:
+        return KeyEventResult.ignored;
+    }
+    if (bucket == TvRemoteActionBucket.dpadUp) {
       return _focusPlaybackControl(TraversalDirection.up);
     }
-    if (key == LogicalKeyboardKey.arrowDown) {
+    if (bucket == TvRemoteActionBucket.dpadDown) {
       return _focusPlaybackControl(TraversalDirection.down);
     }
-    if (key == LogicalKeyboardKey.arrowRight) {
+    if (bucket == TvRemoteActionBucket.dpadRight) {
       return KeyEventResult.ignored;
     }
-    if (key == LogicalKeyboardKey.arrowLeft) {
+    if (bucket == TvRemoteActionBucket.dpadLeft) {
       return KeyEventResult.ignored;
     }
-    if (key == LogicalKeyboardKey.select || key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.space) {
+    if (bucket == TvRemoteActionBucket.select) {
       _showControls();
       return KeyEventResult.ignored;
     }
@@ -776,14 +1553,18 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
           SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),
           SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
           SingleActivator(LogicalKeyboardKey.select): ActivateIntent(),
-          SingleActivator(LogicalKeyboardKey.arrowUp): DirectionalFocusIntent(TraversalDirection.up),
-          SingleActivator(LogicalKeyboardKey.arrowDown): DirectionalFocusIntent(TraversalDirection.down),
+          SingleActivator(LogicalKeyboardKey.arrowUp): DirectionalFocusIntent(
+            TraversalDirection.up,
+          ),
+          SingleActivator(LogicalKeyboardKey.arrowDown): DirectionalFocusIntent(
+            TraversalDirection.down,
+          ),
         },
         child: Actions(
           actions: {
             DismissIntent: CallbackAction<DismissIntent>(
               onInvoke: (_) {
-                _closePlayback();
+                unawaited(_closePlayback());
                 return null;
               },
             ),
@@ -799,17 +1580,15 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
             autofocus: true,
             onKeyEvent: (_, event) => _handlePlaybackKey(event),
             child: AnimatedBuilder(
-              animation: _controller,
+              animation: _controller ?? Listenable.merge(const <Listenable>[]),
               builder: (context, _) {
-                final value = _controller.value;
+                final value = _controller?.value ?? _TvPlaybackValue.empty;
                 final initialized = value.isInitialized;
                 final feedback = _feedback;
                 _maybeAutoNextEpisode(value);
                 return Stack(
                   children: [
-                    Center(
-                      child: _videoSurface(value),
-                    ),
+                    Center(child: _videoSurface(value)),
                     Positioned.fill(
                       child: IgnorePointer(
                         child: AnimatedOpacity(
@@ -836,18 +1615,25 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                       const Positioned.fill(
                         child: Center(child: _TvPlaybackLoadingState()),
                       ),
-                    if (_controlsVisible && !_locked && feedback?.seeking != true && !_switchingSource)
-                              _TvPlaybackCenterControls(
-                                initialized: initialized,
-                                playing: value.isPlaying,
-                                skipBackFocusNode: _skipBackFocusNode,
-                                playFocusNode: _playFocusNode,
-                                skipForwardFocusNode: _skipForwardFocusNode,
-                                onTogglePlay: _togglePlay,
-                                onSeekBack: () => _skipBy(const Duration(seconds: -15), direction: -1),
-                                onSeekForward: () => _skipBy(_seekStep, direction: 1),
+                    if (_controlsVisible &&
+                        !_locked &&
+                        feedback?.seeking != true &&
+                        !_switchingSource)
+                      _TvPlaybackCenterControls(
+                        initialized: initialized,
+                        playing: value.isPlaying,
+                        skipBackFocusNode: _skipBackFocusNode,
+                        playFocusNode: _playFocusNode,
+                        skipForwardFocusNode: _skipForwardFocusNode,
+                        onTogglePlay: _togglePlay,
+                        onSeekBack: () => _skipBy(
+                          const Duration(seconds: -15),
+                          direction: -1,
+                        ),
+                        onSeekForward: () => _skipBy(_seekStep, direction: 1),
                       ),
-                    if (feedback != null) _TvPlaybackFeedbackOverlay(feedback: feedback),
+                    if (feedback != null)
+                      _TvPlaybackFeedbackOverlay(feedback: feedback),
                     SafeArea(
                       child: AnimatedOpacity(
                         duration: _tvDuration(180),
@@ -858,12 +1644,17 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                             children: [
                               _TvPlaybackTopBar(
                                 title: widget.item.title,
-                                showNextEpisode: widget.settings.nextEpisode &&
-                                    (widget.item.type == 'series' || widget.item.type == 'animation'),
+                                showNextEpisode:
+                                    widget.settings.nextEpisode &&
+                                    (widget.item.type == 'series' ||
+                                        widget.item.type == 'animation'),
                                 nextEpisodeLabel: 'Next episode',
                                 backFocusNode: _backFocusNode,
-                                onBack: _closePlayback,
+                                nextEpisodeFocusNode: _nextEpisodeFocusNode,
+                                onBack: () => unawaited(_closePlayback()),
                                 onNextEpisode: _openNextEpisode,
+                                onFocusMainControls: () =>
+                                    _playFocusNode.requestFocus(),
                               ),
                               const Spacer(),
                               _TvPlaybackActionRow(
@@ -874,7 +1665,8 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                 onLockPressed: _toggleLock,
                                 onSourcesPressed: _showSourcesPanel,
                                 onSettingsPressed: _showSettingsPanel,
-                                showAdvancedControls: widget.settings.advancedControls,
+                                showAdvancedControls:
+                                    widget.settings.advancedControls,
                               ),
                               const SizedBox(height: 14),
                               _TvPlaybackTransportHud(
@@ -882,8 +1674,12 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                 position: value.position,
                                 duration: value.duration,
                                 focusNode: _progressFocusNode,
-                                onSeekBack: () => _fastSeekBy(Duration(seconds: -_fastSeekStep.inSeconds), direction: -1),
-                                onSeekForward: () => _fastSeekBy(_fastSeekStep, direction: 1),
+                                onSeekBack: () => _fastSeekBy(
+                                  Duration(seconds: -_fastSeekStep.inSeconds),
+                                  direction: -1,
+                                ),
+                                onSeekForward: () =>
+                                    _fastSeekBy(_fastSeekStep, direction: 1),
                               ),
                             ],
                           ),
@@ -933,15 +1729,19 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
               border: Border.all(
                 color: focused
                     ? selected
-                        ? Colors.white
-                        : _tvFocusBorder
+                          ? Colors.white
+                          : _tvFocusBorder
                     : const Color(0x22FFFFFF),
                 width: focused ? 2 : 1,
               ),
             ),
             child: Row(
               children: [
-                Icon(icon, color: selected ? Colors.black : _tvAccentColor, size: 25),
+                Icon(
+                  icon,
+                  color: selected ? Colors.black : _tvAccentColor,
+                  size: 25,
+                ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: Text(
@@ -958,12 +1758,19 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
                 if (value.isNotEmpty) ...[
                   const SizedBox(width: 12),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 9,
+                    ),
                     decoration: BoxDecoration(
-                      color: selected ? const Color(0x22000000) : const Color(0x24FFFFFF),
+                      color: selected
+                          ? const Color(0x22000000)
+                          : const Color(0x24FFFFFF),
                       borderRadius: BorderRadius.circular(999),
                       border: Border.all(
-                        color: selected ? const Color(0x22000000) : const Color(0x22FFFFFF),
+                        color: selected
+                            ? const Color(0x22000000)
+                            : const Color(0x22FFFFFF),
                       ),
                     ),
                     child: Text(
@@ -1042,7 +1849,9 @@ class _TvPlaybackChoiceDialog extends StatelessWidget {
                   const SizedBox(height: 22),
                   for (final choice in choices)
                     _TvPlaybackSettingsRow(
-                      icon: choice.label == selected ? Icons.check_circle_rounded : choice.icon,
+                      icon: choice.label == selected
+                          ? Icons.check_circle_rounded
+                          : choice.icon,
                       title: choice.label,
                       value: choice.label == selected ? 'Active' : '',
                       selected: choice.label == selected,
@@ -1064,16 +1873,20 @@ class _TvPlaybackTopBar extends StatelessWidget {
     required this.showNextEpisode,
     required this.nextEpisodeLabel,
     required this.backFocusNode,
+    required this.nextEpisodeFocusNode,
     required this.onBack,
     required this.onNextEpisode,
+    required this.onFocusMainControls,
   });
 
   final String title;
   final bool showNextEpisode;
   final String nextEpisodeLabel;
   final FocusNode backFocusNode;
+  final FocusNode nextEpisodeFocusNode;
   final VoidCallback onBack;
   final VoidCallback onNextEpisode;
+  final VoidCallback onFocusMainControls;
 
   @override
   Widget build(BuildContext context) {
@@ -1084,6 +1897,10 @@ class _TvPlaybackTopBar extends StatelessWidget {
           label: 'Back',
           focusNode: backFocusNode,
           onPressed: onBack,
+          onArrowRight: showNextEpisode
+              ? () => nextEpisodeFocusNode.requestFocus()
+              : null,
+          onArrowDown: onFocusMainControls,
         ),
         const SizedBox(width: 18),
         Expanded(
@@ -1107,7 +1924,10 @@ class _TvPlaybackTopBar extends StatelessWidget {
                   child: _TvTextButton(
                     icon: Icons.skip_next_rounded,
                     label: nextEpisodeLabel,
+                    focusNode: nextEpisodeFocusNode,
                     onPressed: onNextEpisode,
+                    onArrowLeft: () => backFocusNode.requestFocus(),
+                    onArrowDown: onFocusMainControls,
                   ),
                 )
               : const SizedBox.shrink(),
@@ -1263,11 +2083,7 @@ class _TvPlaybackFeedbackOverlay extends StatelessWidget {
 }
 
 class _TvSeekPulse extends StatelessWidget {
-  const _TvSeekPulse({
-    super.key,
-    required this.icon,
-    required this.seeking,
-  });
+  const _TvSeekPulse({super.key, required this.icon, required this.seeking});
 
   final IconData icon;
   final bool seeking;
@@ -1299,10 +2115,7 @@ class _TvSeekPulse extends StatelessWidget {
 }
 
 class _TvSkipPulse extends StatefulWidget {
-  const _TvSkipPulse({
-    required this.direction,
-    required this.label,
-  });
+  const _TvSkipPulse({required this.direction, required this.label});
 
   final int direction;
   final String label;
@@ -1311,7 +2124,8 @@ class _TvSkipPulse extends StatefulWidget {
   State<_TvSkipPulse> createState() => _TvSkipPulseState();
 }
 
-class _TvSkipPulseState extends State<_TvSkipPulse> with SingleTickerProviderStateMixin {
+class _TvSkipPulseState extends State<_TvSkipPulse>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: _tvDuration(520),
@@ -1351,12 +2165,16 @@ class _TvSkipPulseState extends State<_TvSkipPulse> with SingleTickerProviderSta
             alignment: Alignment.center,
             children: [
               RotationTransition(
-                turns: Tween<double>(
-                  begin: reverse ? 0.0 : 0.0,
-                  end: reverse ? -1.0 : 1.0,
-                ).animate(
-                  CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
-                ),
+                turns:
+                    Tween<double>(
+                      begin: reverse ? 0.0 : 0.0,
+                      end: reverse ? -1.0 : 1.0,
+                    ).animate(
+                      CurvedAnimation(
+                        parent: _controller,
+                        curve: Curves.easeOutCubic,
+                      ),
+                    ),
                 child: Transform.scale(
                   scaleX: reverse ? 1 : -1,
                   child: const Icon(
@@ -1442,13 +2260,17 @@ class _TvPlaybackCenterControls extends StatelessWidget {
               Align(
                 alignment: Alignment.center,
                 child: _TvPlaybackRoundButton(
-                  icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  icon: playing
+                      ? Icons.pause_rounded
+                      : Icons.play_arrow_rounded,
                   label: playing ? 'Pause' : 'Play',
                   size: 96,
                   accent: true,
                   focusNode: playFocusNode,
                   autofocus: true,
-                  onPressed: initialized ? () => unawaited(onTogglePlay()) : null,
+                  onPressed: initialized
+                      ? () => unawaited(onTogglePlay())
+                      : null,
                 ),
               ),
               Align(
@@ -1458,7 +2280,9 @@ class _TvPlaybackCenterControls extends StatelessWidget {
                   label: 'Forward 15 seconds',
                   size: 72,
                   focusNode: skipForwardFocusNode,
-                  onPressed: initialized ? () => unawaited(onSeekForward()) : null,
+                  onPressed: initialized
+                      ? () => unawaited(onSeekForward())
+                      : null,
                 ),
               ),
             ],
@@ -1512,14 +2336,19 @@ class _TvPlaybackTransportHud extends StatelessWidget {
   Widget build(BuildContext context) {
     final progress = duration.inMilliseconds <= 0
         ? 0.0
-        : (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0).toDouble();
+        : (position.inMilliseconds / duration.inMilliseconds)
+              .clamp(0.0, 1.0)
+              .toDouble();
     return Row(
       children: [
         SizedBox(
           width: 54,
           child: Text(
             _formatDuration(position),
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+            ),
           ),
         ),
         const SizedBox(width: 8),
@@ -1538,7 +2367,10 @@ class _TvPlaybackTransportHud extends StatelessWidget {
           child: Text(
             _formatDuration(duration),
             textAlign: TextAlign.right,
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+            ),
           ),
         ),
       ],
@@ -1562,10 +2394,12 @@ class _TvPlaybackProgressScrubber extends StatefulWidget {
   final Future<void> Function() onSeekForward;
 
   @override
-  State<_TvPlaybackProgressScrubber> createState() => _TvPlaybackProgressScrubberState();
+  State<_TvPlaybackProgressScrubber> createState() =>
+      _TvPlaybackProgressScrubberState();
 }
 
-class _TvPlaybackProgressScrubberState extends State<_TvPlaybackProgressScrubber> {
+class _TvPlaybackProgressScrubberState
+    extends State<_TvPlaybackProgressScrubber> {
   static const Duration _holdSeekDelay = Duration(milliseconds: 260);
   static const Duration _holdSeekInterval = Duration(milliseconds: 240);
 
@@ -1604,7 +2438,10 @@ class _TvPlaybackProgressScrubberState extends State<_TvPlaybackProgressScrubber
   }
 
   void _startHoldSeek(int direction) {
-    if (_holdDirection == direction && (_holdSeekDelayTimer != null || _holdSeekTimer != null)) return;
+    if (_holdDirection == direction &&
+        (_holdSeekDelayTimer != null || _holdSeekTimer != null)) {
+      return;
+    }
     _stopHoldSeek();
     _holdDirection = direction;
     _holdSeekDelayTimer = Timer(_holdSeekDelay, () {
@@ -1627,13 +2464,16 @@ class _TvPlaybackProgressScrubberState extends State<_TvPlaybackProgressScrubber
   KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
     if (!widget.initialized) return KeyEventResult.ignored;
     if (event is KeyUpEvent) {
-      if (event.logicalKey == LogicalKeyboardKey.arrowLeft || event.logicalKey == LogicalKeyboardKey.arrowRight) {
+      if (event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+          event.logicalKey == LogicalKeyboardKey.arrowRight) {
         _stopHoldSeek();
         return KeyEventResult.handled;
       }
       return KeyEventResult.ignored;
     }
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return KeyEventResult.ignored;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
     if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
       if (event is KeyRepeatEvent) unawaited(widget.onSeekBack());
       _startHoldSeek(-1);
@@ -1776,7 +2616,8 @@ class _TvPlaybackSkipButton extends StatefulWidget {
   State<_TvPlaybackSkipButton> createState() => _TvPlaybackSkipButtonState();
 }
 
-class _TvPlaybackSkipButtonState extends State<_TvPlaybackSkipButton> with SingleTickerProviderStateMixin {
+class _TvPlaybackSkipButtonState extends State<_TvPlaybackSkipButton>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: _tvDuration(440),
@@ -1833,9 +2674,13 @@ class _TvPlaybackSkipButtonState extends State<_TvPlaybackSkipButton> with Singl
                 alignment: Alignment.center,
                 children: [
                   RotationTransition(
-                    turns: Tween<double>(begin: 0, end: reverse ? -1 : 1).animate(
-                      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
-                    ),
+                    turns: Tween<double>(begin: 0, end: reverse ? -1 : 1)
+                        .animate(
+                          CurvedAnimation(
+                            parent: _controller,
+                            curve: Curves.easeOutCubic,
+                          ),
+                        ),
                     child: Transform.scale(
                       scaleX: reverse ? 1 : -1,
                       child: Icon(
@@ -1876,5 +2721,3 @@ String _formatDuration(Duration duration) {
   }
   return '$minutes:${seconds.toString().padLeft(2, '0')}';
 }
-
-
