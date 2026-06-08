@@ -780,8 +780,6 @@ class _TvNavigationRailState extends State<_TvNavigationRail> {
       ),
       child: Column(
         children: [
-          const SizedBox(height: 28),
-          const _TvRailAppMark(),
           const Spacer(),
           for (var index = 0; index < widget.items.length; index++)
             Padding(
@@ -837,37 +835,6 @@ class _TvHeader extends StatelessWidget {
         const Spacer(),
         SizedBox(width: 350, child: trailing),
       ],
-    );
-  }
-}
-
-class _TvRailAppMark extends StatelessWidget {
-  const _TvRailAppMark();
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      label: 'Juicr TV',
-      child: Container(
-        width: 46,
-        height: 46,
-        decoration: BoxDecoration(
-          color: _tvAccentColor,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x3320D66B),
-              blurRadius: 18,
-              spreadRadius: 1,
-            ),
-          ],
-        ),
-        child: const Icon(
-          Icons.local_drink_rounded,
-          color: Colors.black,
-          size: 26,
-        ),
-      ),
     );
   }
 }
@@ -1260,7 +1227,7 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(top: 8, right: 56),
+                  padding: const EdgeInsets.only(top: 8),
                   child: SingleChildScrollView(
                     controller: _scrollController,
                     child: Column(
@@ -1531,7 +1498,7 @@ class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.only(top: 8, right: 56),
+                padding: const EdgeInsets.only(top: 8),
                 child: SingleChildScrollView(
                   controller: _scrollController,
                   child: Column(
@@ -1599,6 +1566,7 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
       filter: FocusNode(debugLabel: 'tv-library-menu-${filter.name}'),
   };
   final FocusNode _applyFocusNode = FocusNode(debugLabel: 'tv-library-apply');
+  final ScrollController _scrollController = ScrollController();
 
   late _TvLibraryFilter _filter = widget.filter;
 
@@ -1617,6 +1585,7 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
       node.dispose();
     }
     _applyFocusNode.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -1644,7 +1613,7 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
       insetPadding: const EdgeInsets.symmetric(horizontal: 170, vertical: 54),
       child: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
+          constraints: const BoxConstraints(maxWidth: 560, maxHeight: 500),
           child: Container(
             padding: const EdgeInsets.all(22),
             decoration: BoxDecoration(
@@ -1663,72 +1632,80 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(top: 8, right: 56),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Library menu',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          fontWeight: FontWeight.w900,
+                  padding: const EdgeInsets.only(top: 8),
+                  child: SingleChildScrollView(
+                    controller: _scrollController,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Library menu',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 24,
+                            fontWeight: FontWeight.w900,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 10),
-                      const Text(
-                        'Choose which saved TV items to show.',
-                        style: TextStyle(
-                          color: Color(0xFFAAA6BD),
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
+                        const SizedBox(height: 10),
+                        const Text(
+                          'Choose which saved TV items to show.',
+                          style: TextStyle(
+                            color: Color(0xFFAAA6BD),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 20),
-                      _TvChoiceListSection(
-                        title: 'Library',
-                        children: [
-                          for (
-                            var index = 0;
-                            index < _TvLibraryFilter.values.length;
-                            index++
-                          )
-                            _TvChoiceRow(
-                              icon: _TvLibraryFilter.values[index].icon,
-                              label: _TvLibraryFilter.values[index].label,
-                              selected:
-                                  _filter == _TvLibraryFilter.values[index],
-                              autofocus: index == 0,
-                              focusNode:
-                                  _filterNodes[_TvLibraryFilter.values[index]],
-                              onPressed: () => setState(
-                                () => _filter = _TvLibraryFilter.values[index],
+                        const SizedBox(height: 20),
+                        _TvChoiceListSection(
+                          title: 'Library',
+                          children: [
+                            for (
+                              var index = 0;
+                              index < _TvLibraryFilter.values.length;
+                              index++
+                            )
+                              _TvChoiceRow(
+                                icon: _TvLibraryFilter.values[index].icon,
+                                label: _TvLibraryFilter.values[index].label,
+                                selected:
+                                    _filter == _TvLibraryFilter.values[index],
+                                autofocus: index == 0,
+                                focusNode:
+                                    _filterNodes[_TvLibraryFilter
+                                        .values[index]],
+                                onPressed: () => setState(
+                                  () =>
+                                      _filter = _TvLibraryFilter.values[index],
+                                ),
+                                onArrowUp: index == 0
+                                    ? () => _focusFilter(
+                                        _TvLibraryFilter.values[index],
+                                      )
+                                    : () => _focusFilter(
+                                        _TvLibraryFilter.values[index - 1],
+                                      ),
+                                onArrowDown:
+                                    index == _TvLibraryFilter.values.length - 1
+                                    ? () => _applyFocusNode.requestFocus()
+                                    : () => _focusFilter(
+                                        _TvLibraryFilter.values[index + 1],
+                                      ),
                               ),
-                              onArrowUp: index == 0
-                                  ? null
-                                  : () => _focusFilter(
-                                      _TvLibraryFilter.values[index - 1],
-                                    ),
-                              onArrowDown:
-                                  index == _TvLibraryFilter.values.length - 1
-                                  ? () => _applyFocusNode.requestFocus()
-                                  : () => _focusFilter(
-                                      _TvLibraryFilter.values[index + 1],
-                                    ),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 22),
-                      _TvTextButton(
-                        icon: Icons.check_rounded,
-                        label: 'Apply',
-                        focusNode: _applyFocusNode,
-                        onArrowUp: () =>
-                            _focusFilter(_TvLibraryFilter.values.last),
-                        onPressed: () => Navigator.of(context).pop(_filter),
-                      ),
-                    ],
+                          ],
+                        ),
+                        const SizedBox(height: 22),
+                        _TvTextButton(
+                          icon: Icons.check_rounded,
+                          label: 'Apply',
+                          focusNode: _applyFocusNode,
+                          autoReveal: true,
+                          onArrowUp: () =>
+                              _focusFilter(_TvLibraryFilter.values.last),
+                          onPressed: () => Navigator.of(context).pop(_filter),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],

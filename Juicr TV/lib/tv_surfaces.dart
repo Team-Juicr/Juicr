@@ -2012,7 +2012,7 @@ class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.only(top: 4, right: 58),
+              padding: const EdgeInsets.only(top: 4),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -2178,7 +2178,7 @@ class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.only(top: 4, right: 58),
+              padding: const EdgeInsets.only(top: 4),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -3240,7 +3240,7 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(top: 8, right: 56),
+                  padding: const EdgeInsets.only(top: 8),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,

@@ -1315,7 +1315,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                       ),
                     ),
                     Padding(
-                      padding: const EdgeInsets.only(top: 8, right: 56),
+                      padding: const EdgeInsets.only(top: 8),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1904,7 +1904,7 @@ class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.only(top: 8, right: 58),
+              padding: const EdgeInsets.only(top: 8),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
