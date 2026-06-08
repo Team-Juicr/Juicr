@@ -1717,6 +1717,7 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: _TvFocusable(
+        autoReveal: true,
         onPressed: onPressed,
         builder: (focused) {
           return AnimatedContainer(

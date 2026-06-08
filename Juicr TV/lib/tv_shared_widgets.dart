@@ -582,7 +582,8 @@ class _TvFocusableState extends State<_TvFocusable> {
             context,
             duration: _tvDuration(180),
             curve: Curves.easeOutCubic,
-            alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+            alignment: 0.42,
+            alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
           );
         },
         child: GestureDetector(

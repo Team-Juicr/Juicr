@@ -2225,6 +2225,7 @@ class _TvSettingsOptionRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return _TvFocusable(
       autofocus: selected,
+      autoReveal: true,
       onPressed: onPressed,
       builder: (focused) {
         final active = focused || selected;
@@ -2413,6 +2414,7 @@ class _TvConsentRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _TvFocusable(
+      autoReveal: true,
       onPressed: onPressed,
       builder: (focused) {
         final active = focused || checked;
@@ -2936,6 +2938,7 @@ class _TvEditableDialogFieldState extends State<_TvEditableDialogField> {
         },
         child: _TvFocusable(
           focusNode: _shellFocusNode,
+          autoReveal: true,
           onPressed: _editing ? () {} : _beginEditing,
           onArrowUp: widget.onArrowUp,
           onArrowDown: widget.onArrowDown,
@@ -3710,6 +3713,7 @@ class _TvSeasonButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _TvFocusable(
+      autoReveal: true,
       onPressed: onPressed,
       builder: (focused) {
         final active = focused || selected;
@@ -3762,6 +3766,7 @@ class _TvEpisodeCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return _TvFocusable(
       autofocus: autofocus,
+      autoReveal: true,
       onPressed: onPlay,
       builder: (focused) {
         return AnimatedContainer(

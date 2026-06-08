@@ -1026,6 +1026,7 @@ class _TvDiscoveryMenuDialog extends StatefulWidget {
 }
 
 class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
+  final ScrollController _scrollController = ScrollController();
   final FocusNode _firstCatalogFocusNode = FocusNode(
     debugLabel: 'tv-discovery-menu-first',
   );
@@ -1096,7 +1097,7 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
     });
   }
 
-  void _focusMenuNode(FocusNode node) {
+  void _focusMenuNode(FocusNode node, {double alignment = 0.45}) {
     node.requestFocus();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final context = node.context;
@@ -1105,7 +1106,7 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
         context,
         duration: _tvDuration(140),
         curve: Curves.easeOutCubic,
-        alignment: 0.45,
+        alignment: alignment,
         alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
       );
     });
@@ -1125,6 +1126,7 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
 
   @override
   void dispose() {
+    _scrollController.dispose();
     _firstCatalogFocusNode.dispose();
     _seriesCatalogFocusNode.dispose();
     _animationCatalogFocusNode.dispose();
@@ -1206,6 +1208,7 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
                 Padding(
                   padding: const EdgeInsets.only(top: 8, right: 56),
                   child: SingleChildScrollView(
+                    controller: _scrollController,
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1284,8 +1287,10 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
                               icon: Icons.category_rounded,
                               label: _genre,
                               selected: true,
-                              onArrowUp: () =>
-                                  _focusMenuNode(_liveCatalogFocusNode),
+                              onArrowUp: () => _focusMenuNode(
+                                _liveCatalogFocusNode,
+                                alignment: 0.28,
+                              ),
                               onArrowDown: () =>
                                   _focusMenuNode(_sortNode(sortOptions.first)),
                               onArrowLeft: () =>
@@ -1311,7 +1316,10 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
                                 label: sortOptions[index].labelFor(_kind),
                                 selected: _sort == sortOptions[index],
                                 onArrowUp: index == 0
-                                    ? () => _focusMenuNode(_genreFocusNode)
+                                    ? () => _focusMenuNode(
+                                        _genreFocusNode,
+                                        alignment: 0.22,
+                                      )
                                     : () => _focusMenuNode(
                                         _sortNode(sortOptions[index - 1]),
                                       ),
@@ -1708,6 +1716,7 @@ class _TvChoiceRow extends StatelessWidget {
     return _TvFocusable(
       autofocus: autofocus,
       focusNode: focusNode,
+      autoReveal: true,
       onPressed: onPressed,
       onArrowLeft: onArrowLeft,
       onArrowRight: onArrowRight,
