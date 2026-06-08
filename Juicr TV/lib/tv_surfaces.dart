@@ -63,9 +63,10 @@ class _TvDiscoverySurface extends StatelessWidget {
       _TvDiscoveryKind.animation => animation,
       _TvDiscoveryKind.liveTv => liveTv,
     };
-    final laneItems =
-        discoveryLaneItems[_tvDiscoveryLaneKey(kind, sort)] ??
-        const <_TvItem>[];
+    final genreLaneItems =
+        discoveryLaneItems[_tvDiscoveryLaneKey(kind, sort, genre: genre)];
+    final baseLaneItems = discoveryLaneItems[_tvDiscoveryLaneKey(kind, sort)];
+    final laneItems = genreLaneItems ?? baseLaneItems ?? const <_TvItem>[];
     final items = _sortedCatalogItems(
       laneItems.isEmpty ? fallbackItems : laneItems,
       sort,

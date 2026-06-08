@@ -554,7 +554,11 @@ class _TvHomePageState extends State<TvHomePage> {
 
   Future<void> _loadMoreDiscoveryLane() async {
     if (!_tvSettings.hasCatalogSource) return;
-    final laneKey = _tvDiscoveryLaneKey(_discoveryKind, _discoverySort);
+    final laneKey = _tvDiscoveryLaneKey(
+      _discoveryKind,
+      _discoverySort,
+      genre: _discoveryGenre,
+    );
     if (_discoveryLaneLoading.contains(laneKey) ||
         _discoveryLaneExhausted.contains(laneKey)) {
       return;
@@ -565,39 +569,48 @@ class _TvHomePageState extends State<TvHomePage> {
       _TvDiscoveryKind.animation => 'animation',
       _TvDiscoveryKind.liveTv => 'live_tv',
     };
-    final nextPage = (_discoveryLanePages[laneKey] ?? 1) + 1;
+    var nextPage = (_discoveryLanePages[laneKey] ?? 0) + 1;
     _discoveryLaneLoading.add(laneKey);
     try {
-      final items = await _api
-          .catalog(
-            type: type,
-            sort: _discoverySort.catalogSortId,
-            page: nextPage,
-          )
-          .timeout(const Duration(seconds: 7));
-      if (!mounted) return;
-      if (items.isEmpty) {
-        setState(() {
-          _discoveryLaneExhausted.add(laneKey);
-        });
-        return;
-      }
       final existing = <String, _TvItem>{
         for (final item in _discoveryLaneItems[laneKey] ?? const <_TvItem>[])
           '${item.type}:${item.id}': item,
       };
       var added = 0;
-      for (final item in items) {
-        final normalized = _normalizeCatalogLane(item);
-        if (normalized.poster == null) continue;
-        final itemKey = '${normalized.type}:${normalized.id}';
-        if (existing.containsKey(itemKey)) continue;
-        existing[itemKey] = normalized;
-        added += 1;
+      var fetchedPages = 0;
+      var exhausted = false;
+      while (mounted && fetchedPages < 3 && added == 0) {
+        final items = await _api
+            .catalog(
+              type: type,
+              sort: _discoverySort.catalogSortId,
+              page: nextPage,
+              genre: _discoveryGenre,
+            )
+            .timeout(const Duration(seconds: 7));
+        fetchedPages += 1;
+        if (items.isEmpty) {
+          exhausted = true;
+          break;
+        }
+        for (final item in items) {
+          final normalized = _normalizeCatalogLane(item);
+          if (normalized.poster == null) continue;
+          final itemKey = '${normalized.type}:${normalized.id}';
+          if (existing.containsKey(itemKey)) continue;
+          existing[itemKey] = normalized;
+          added += 1;
+        }
+        nextPage += 1;
       }
+      if (!mounted) return;
+      final lastFetchedPage = nextPage - 1;
       setState(() {
-        _discoveryLanePages[laneKey] = nextPage;
-        if (added == 0) _discoveryLaneExhausted.add(laneKey);
+        _discoveryLanePages[laneKey] = math.max(
+          _discoveryLanePages[laneKey] ?? 0,
+          lastFetchedPage,
+        );
+        if (exhausted) _discoveryLaneExhausted.add(laneKey);
         _discoveryLaneItems[laneKey] = existing.values.toList(growable: false);
       });
     } catch (error) {
@@ -1561,8 +1574,7 @@ class _TvHomePageState extends State<TvHomePage> {
     List<_TvHomeEditorialRail> rails, {
     int offset = 0,
   }) {
-    final day = DateTime.now().difference(DateTime(2024)).inDays;
-    return rails[(day + offset) % rails.length];
+    return rails[_editorialBucket(offset: offset) % rails.length];
   }
 
   _TvHomeEditorialRail _editorialOrFallback(
@@ -1827,10 +1839,15 @@ class _TvHomePageState extends State<TvHomePage> {
 
   List<_TvItem> _stableDailyShuffle(List<_TvItem> items, {required int seed}) {
     final copy = [...items];
-    final day = DateTime.now().difference(DateTime(2024)).inDays;
-    final random = math.Random(day + seed.abs());
+    final random = math.Random(_editorialBucket(offset: seed.abs() % 997));
     copy.shuffle(random);
     return copy;
+  }
+
+  int _editorialBucket({int offset = 0}) {
+    final now = DateTime.now();
+    final days = now.difference(DateTime(2024)).inDays;
+    return days + offset;
   }
 
   void _selectTab(int index) {

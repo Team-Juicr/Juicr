@@ -63,10 +63,19 @@ class _TvApi {
         '$_apiBase/home/editorial',
       ).replace(queryParameters: const {'locale': 'en'});
       final json = await _getJson(uri).timeout(const Duration(seconds: 4));
+      if (json['degraded'] == true || json.containsKey('fallbackReason')) {
+        return null;
+      }
       final editorialJson = _homeEditorialPayload(json);
       if (editorialJson == null) return null;
+      if (editorialJson['degraded'] == true ||
+          editorialJson.containsKey('fallbackReason')) {
+        return null;
+      }
       if (editorialJson['schema'] != 'juicr.home_editorial.v1') return null;
-      return _TvHomeEditorialEdition.fromJson(editorialJson);
+      final editorial = _TvHomeEditorialEdition.fromJson(editorialJson);
+      if (!editorial.hasUsableRails) return null;
+      return editorial;
     } catch (error) {
       debugPrint(
         'Juicr TV home editorial unavailable '
@@ -837,6 +846,19 @@ class _TvHomeEditorialEdition {
   final _TvHomeEditorialRail upcoming;
   final List<_TvHomeEditorialRail> rails;
 
+  bool get hasUsableRails {
+    bool usableRail(_TvHomeEditorialRail rail) {
+      return rail.title.trim().isNotEmpty &&
+          (rail.items.isNotEmpty ||
+              rail.genres.isNotEmpty ||
+              rail.query.trim().isNotEmpty ||
+              rail.types.isNotEmpty ||
+              rail.curationKind.trim().isNotEmpty);
+    }
+
+    return usableRail(hero) || rails.any(usableRail);
+  }
+
   _TvHomeEditorialEdition copyWith({List<_TvHomeEditorialRail>? rails}) {
     return _TvHomeEditorialEdition(
       editionId: editionId,
@@ -1168,8 +1190,15 @@ List<_TvDiscoverySort> _tvDiscoverySortOptionsFor(_TvDiscoveryKind kind) {
   };
 }
 
-String _tvDiscoveryLaneKey(_TvDiscoveryKind kind, _TvDiscoverySort sort) {
-  return '${kind.name}:${sort.name}';
+String _tvDiscoveryLaneKey(
+  _TvDiscoveryKind kind,
+  _TvDiscoverySort sort, {
+  String genre = 'All genres',
+}) {
+  final normalizedGenre = genre.trim().toLowerCase();
+  final base = '${kind.name}:${sort.name}';
+  if (normalizedGenre.isEmpty || normalizedGenre == 'all genres') return base;
+  return '$base:${normalizedGenre.replaceAll(RegExp(r'[^a-z0-9]+'), '-')}';
 }
 
 class _TvDiscoverySelection {
