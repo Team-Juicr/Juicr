@@ -935,10 +935,10 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _firstActionFocusNode.requestFocus();
+      _focusAction(0);
       Future<void>.delayed(const Duration(milliseconds: 80), () {
         if (mounted && FocusManager.instance.primaryFocus == null) {
-          _firstActionFocusNode.requestFocus();
+          _focusAction(0);
         }
       });
     });
@@ -971,6 +971,23 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
 
   void _rememberActionFocus(FocusNode node) {
     _lastActionFocusNode = node;
+  }
+
+  void _focusAction(int index) {
+    final node = _actionNode(index);
+    _rememberActionFocus(node);
+    node.requestFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = node.context;
+      if (!mounted || context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: _tvDuration(150),
+        curve: Curves.easeOutCubic,
+        alignment: 0.42,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+      );
+    });
   }
 
   void _restoreLastActionFocus() {
@@ -1688,13 +1705,11 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                                 onFocus: () =>
                                     _rememberActionFocus(_actionNode(index)),
                                 onArrowUp: index == 0
-                                    ? _firstActionFocusNode.requestFocus
-                                    : () =>
-                                          _actionNode(index - 1).requestFocus(),
+                                    ? () => _focusAction(0)
+                                    : () => _focusAction(index - 1),
                                 onArrowDown: index == actions.length - 1
-                                    ? _firstActionFocusNode.requestFocus
-                                    : () =>
-                                          _actionNode(index + 1).requestFocus(),
+                                    ? () => _focusAction(0)
+                                    : () => _focusAction(index + 1),
                               ),
                             ),
                         ],
@@ -1855,20 +1870,58 @@ class _TvDefaultSourceDialog extends StatefulWidget {
 
 class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
   final _firstFocusNode = FocusNode(debugLabel: 'tv-default-source-first');
+  final List<FocusNode> _actionFocusNodes = <FocusNode>[];
   late _TvSettingsState _current = widget.settings;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _firstFocusNode.requestFocus();
+      if (mounted) _focusAction(0);
     });
   }
 
   @override
   void dispose() {
     _firstFocusNode.dispose();
+    for (final node in _actionFocusNodes) {
+      node.dispose();
+    }
     super.dispose();
+  }
+
+  void _syncActionFocusNodes(int count) {
+    final extraCount = math.max(0, count - 1);
+    while (_actionFocusNodes.length > extraCount) {
+      _actionFocusNodes.removeLast().dispose();
+    }
+    while (_actionFocusNodes.length < extraCount) {
+      final index = _actionFocusNodes.length + 1;
+      _actionFocusNodes.add(
+        FocusNode(debugLabel: 'tv-default-source-action-$index'),
+      );
+    }
+  }
+
+  FocusNode _actionNode(int index) {
+    if (index == 0) return _firstFocusNode;
+    return _actionFocusNodes[index - 1];
+  }
+
+  void _focusAction(int index) {
+    final node = _actionNode(index);
+    node.requestFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = node.context;
+      if (!mounted || context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: _tvDuration(150),
+        curve: Curves.easeOutCubic,
+        alignment: 0.42,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+      );
+    });
   }
 
   void _update(_TvSettingsState next) {
@@ -1935,6 +1988,7 @@ class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
   @override
   Widget build(BuildContext context) {
     final actions = _actions(context);
+    _syncActionFocusNodes(actions.length);
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 128, vertical: 46),
@@ -1987,13 +2041,13 @@ class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
                       child: _TvSettingsLineCard(
                         action: actions[index],
                         autofocus: index == 0,
-                        focusNode: index == 0 ? _firstFocusNode : null,
+                        focusNode: _actionNode(index),
                         onArrowUp: index == 0
-                            ? _firstFocusNode.requestFocus
-                            : null,
+                            ? () => _focusAction(0)
+                            : () => _focusAction(index - 1),
                         onArrowDown: index == actions.length - 1
-                            ? _firstFocusNode.requestFocus
-                            : null,
+                            ? () => _focusAction(0)
+                            : () => _focusAction(index + 1),
                       ),
                     ),
                 ],
@@ -2023,20 +2077,58 @@ class _TvUserAddOnDialog extends StatefulWidget {
 
 class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
   final _firstFocusNode = FocusNode(debugLabel: 'tv-user-addon-first');
+  final List<FocusNode> _actionFocusNodes = <FocusNode>[];
   late bool _enabled = widget.addon.enabled;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _firstFocusNode.requestFocus();
+      if (mounted) _focusAction(0);
     });
   }
 
   @override
   void dispose() {
     _firstFocusNode.dispose();
+    for (final node in _actionFocusNodes) {
+      node.dispose();
+    }
     super.dispose();
+  }
+
+  void _syncActionFocusNodes(int count) {
+    final extraCount = math.max(0, count - 1);
+    while (_actionFocusNodes.length > extraCount) {
+      _actionFocusNodes.removeLast().dispose();
+    }
+    while (_actionFocusNodes.length < extraCount) {
+      final index = _actionFocusNodes.length + 1;
+      _actionFocusNodes.add(
+        FocusNode(debugLabel: 'tv-user-addon-action-$index'),
+      );
+    }
+  }
+
+  FocusNode _actionNode(int index) {
+    if (index == 0) return _firstFocusNode;
+    return _actionFocusNodes[index - 1];
+  }
+
+  void _focusAction(int index) {
+    final node = _actionNode(index);
+    node.requestFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = node.context;
+      if (!mounted || context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: _tvDuration(150),
+        curve: Curves.easeOutCubic,
+        alignment: 0.42,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+      );
+    });
   }
 
   @override
@@ -2062,6 +2154,7 @@ class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
         onPressed: widget.onRemove,
       ),
     ];
+    _syncActionFocusNodes(actions.length);
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 160, vertical: 70),
@@ -2116,13 +2209,13 @@ class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
                       child: _TvSettingsLineCard(
                         action: actions[index],
                         autofocus: index == 0,
-                        focusNode: index == 0 ? _firstFocusNode : null,
+                        focusNode: _actionNode(index),
                         onArrowUp: index == 0
-                            ? _firstFocusNode.requestFocus
-                            : null,
+                            ? () => _focusAction(0)
+                            : () => _focusAction(index - 1),
                         onArrowDown: index == actions.length - 1
-                            ? _firstFocusNode.requestFocus
-                            : null,
+                            ? () => _focusAction(0)
+                            : () => _focusAction(index + 1),
                       ),
                     ),
                 ],
@@ -3450,7 +3543,7 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
         animateIcon: widget.preparing,
         onArrowRight: afterPrimary.requestFocus,
         onArrowUp: _closeFocusNode.requestFocus,
-        onArrowDown: _primaryActionFocusNode.requestFocus,
+        onArrowDown: _closeFocusNode.requestFocus,
         onPressed: widget.onPlay,
       ),
       if (_isSeriesLike)
@@ -3462,7 +3555,7 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
           onArrowLeft: _primaryActionFocusNode.requestFocus,
           onArrowRight: _trailerFocusNode.requestFocus,
           onArrowUp: _closeFocusNode.requestFocus,
-          onArrowDown: _episodesFocusNode.requestFocus,
+          onArrowDown: _closeFocusNode.requestFocus,
           onPressed: () => _showEpisodePicker(context),
         ),
       _TvTextButton(
@@ -3473,7 +3566,7 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
         onArrowLeft: beforeTrailer.requestFocus,
         onArrowRight: _likeFocusNode.requestFocus,
         onArrowUp: _closeFocusNode.requestFocus,
-        onArrowDown: _trailerFocusNode.requestFocus,
+        onArrowDown: _closeFocusNode.requestFocus,
         onPressed: () => unawaited(_showTrailerPicker(context)),
       ),
       _TvCircleIconButton(
@@ -3486,7 +3579,7 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
         onArrowLeft: _trailerFocusNode.requestFocus,
         onArrowRight: _likeFocusNode.requestFocus,
         onArrowUp: _closeFocusNode.requestFocus,
-        onArrowDown: _likeFocusNode.requestFocus,
+        onArrowDown: _closeFocusNode.requestFocus,
         onPressed: widget.onToggleLike,
       ),
     ];

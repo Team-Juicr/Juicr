@@ -1704,6 +1704,9 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
     required this.value,
     required this.onPressed,
     this.selected = false,
+    this.focusNode,
+    this.onArrowUp,
+    this.onArrowDown,
   });
 
   final IconData icon;
@@ -1711,6 +1714,9 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
   final String value;
   final VoidCallback onPressed;
   final bool selected;
+  final FocusNode? focusNode;
+  final VoidCallback? onArrowUp;
+  final VoidCallback? onArrowDown;
 
   @override
   Widget build(BuildContext context) {
@@ -1718,7 +1724,10 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 12),
       child: _TvFocusable(
         autoReveal: true,
+        focusNode: focusNode,
         onPressed: onPressed,
+        onArrowUp: onArrowUp,
+        onArrowDown: onArrowDown,
         builder: (focused) {
           return AnimatedContainer(
             duration: _tvDuration(130),
@@ -1800,7 +1809,7 @@ class _TvPlaybackChoice {
   final IconData icon;
 }
 
-class _TvPlaybackChoiceDialog extends StatelessWidget {
+class _TvPlaybackChoiceDialog extends StatefulWidget {
   const _TvPlaybackChoiceDialog({
     required this.title,
     required this.selected,
@@ -1812,7 +1821,68 @@ class _TvPlaybackChoiceDialog extends StatelessWidget {
   final List<_TvPlaybackChoice> choices;
 
   @override
+  State<_TvPlaybackChoiceDialog> createState() =>
+      _TvPlaybackChoiceDialogState();
+}
+
+class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
+  final List<FocusNode> _choiceFocusNodes = <FocusNode>[];
+
+  @override
+  void initState() {
+    super.initState();
+    _syncChoiceFocusNodes();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _focusChoice(_selectedIndex);
+    });
+  }
+
+  @override
+  void dispose() {
+    for (final node in _choiceFocusNodes) {
+      node.dispose();
+    }
+    super.dispose();
+  }
+
+  int get _selectedIndex {
+    final index = widget.choices.indexWhere(
+      (choice) => choice.label == widget.selected,
+    );
+    return index < 0 ? 0 : index;
+  }
+
+  void _syncChoiceFocusNodes() {
+    while (_choiceFocusNodes.length > widget.choices.length) {
+      _choiceFocusNodes.removeLast().dispose();
+    }
+    while (_choiceFocusNodes.length < widget.choices.length) {
+      final index = _choiceFocusNodes.length;
+      _choiceFocusNodes.add(FocusNode(debugLabel: 'tv-playback-choice-$index'));
+    }
+  }
+
+  void _focusChoice(int index) {
+    if (index < 0 || index >= _choiceFocusNodes.length) return;
+    final node = _choiceFocusNodes[index];
+    node.requestFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = node.context;
+      if (!mounted || context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: _tvDuration(140),
+        curve: Curves.easeOutCubic,
+        alignment: 0.42,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+      );
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    _syncChoiceFocusNodes();
     return Dialog(
       backgroundColor: Colors.transparent,
       child: Container(
@@ -1840,7 +1910,7 @@ class _TvPlaybackChoiceDialog extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    title,
+                    widget.title,
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 26,
@@ -1848,15 +1918,26 @@ class _TvPlaybackChoiceDialog extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 22),
-                  for (final choice in choices)
+                  for (var index = 0; index < widget.choices.length; index++)
                     _TvPlaybackSettingsRow(
-                      icon: choice.label == selected
+                      icon: widget.choices[index].label == widget.selected
                           ? Icons.check_circle_rounded
-                          : choice.icon,
-                      title: choice.label,
-                      value: choice.label == selected ? 'Active' : '',
-                      selected: choice.label == selected,
-                      onPressed: () => Navigator.of(context).pop(choice.label),
+                          : widget.choices[index].icon,
+                      title: widget.choices[index].label,
+                      value: widget.choices[index].label == widget.selected
+                          ? 'Active'
+                          : '',
+                      selected: widget.choices[index].label == widget.selected,
+                      focusNode: _choiceFocusNodes[index],
+                      onArrowUp: index == 0
+                          ? () => _focusChoice(index)
+                          : () => _focusChoice(index - 1),
+                      onArrowDown: index == widget.choices.length - 1
+                          ? () => _focusChoice(index)
+                          : () => _focusChoice(index + 1),
+                      onPressed: () => Navigator.of(
+                        context,
+                      ).pop(widget.choices[index].label),
                     ),
                 ],
               ),

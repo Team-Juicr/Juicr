@@ -1858,18 +1858,16 @@ class _TvHomePageState extends State<TvHomePage> {
         return;
       }
       _selectTab(tabIndex);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        _enterSelectedTabContent();
-      });
+      _enterSelectedTabContentAfterNavigation();
     }
   }
 
   void _moveRightFromNavigation(int index) {
     if (_navItems[index].label == 'Search') {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        _focusSelectedTabFirstItem();
+      setState(() {
+        _selectedItem = null;
+        _expandedRail = null;
+        _searchOpen = true;
       });
       return;
     }
@@ -1878,9 +1876,20 @@ class _TvHomePageState extends State<TvHomePage> {
     if (tabIndex != _selectedTab) {
       _selectTab(tabIndex);
     }
+    _enterSelectedTabContentAfterNavigation();
+  }
+
+  void _enterSelectedTabContentAfterNavigation() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _enterSelectedTabContent();
+      Future<void>.delayed(const Duration(milliseconds: 70), () {
+        final navigationState = _navigationRailKey.currentState;
+        if (!mounted || navigationState == null || !navigationState.hasFocus) {
+          return;
+        }
+        _enterSelectedTabContent();
+      });
     });
   }
 
@@ -2082,6 +2091,9 @@ class _TvHomePageState extends State<TvHomePage> {
   }
 
   Future<void> _openDiscoveryMenu() async {
+    final previousKind = _discoveryKind;
+    final previousSort = _discoverySort;
+    final previousGenre = _discoveryGenre;
     final selection = await showDialog<_TvDiscoverySelection>(
       context: context,
       builder: (context) => _TvDiscoveryMenuDialog(
@@ -2092,6 +2104,11 @@ class _TvHomePageState extends State<TvHomePage> {
       ),
     );
     if (!mounted) return;
+    final changed =
+        selection != null &&
+        (selection.kind != previousKind ||
+            selection.sort != previousSort ||
+            selection.genre != previousGenre);
     if (selection != null) {
       setState(() {
         _discoveryKind = selection.kind;
@@ -2100,7 +2117,13 @@ class _TvHomePageState extends State<TvHomePage> {
       });
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _focusRememberedPageNode()) return;
+      if (!mounted) return;
+      if (changed) {
+        _rememberPageFocus(_pageEntryFocusNodes[_selectedTab]);
+        _focusPageEntry();
+        return;
+      }
+      if (_focusRememberedPageNode()) return;
       _focusPageEntry();
     });
   }
