@@ -1072,99 +1072,128 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       _showPlayerToast('Only one TV source is ready for this title.');
       return;
     }
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          child: Container(
-            width: 560,
-            constraints: const BoxConstraints(maxHeight: 560),
-            padding: const EdgeInsets.all(22),
-            decoration: BoxDecoration(
-              color: const Color(0xEE15151E),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: const Color(0x24FFFFFF)),
-            ),
-            child: Stack(
-              children: [
-                Positioned(
-                  top: 0,
-                  right: 0,
-                  child: _TvCircleIconButton(
-                    icon: Icons.close_rounded,
-                    size: 48,
-                    onPressed: () => Navigator.of(dialogContext).pop(),
+    final closeFocusNode = FocusNode(debugLabel: 'tv-playback-sources-close');
+    final sourceFocusNodes = [
+      for (var index = 0; index < _sessions.length; index++)
+        FocusNode(debugLabel: 'tv-playback-source-$index'),
+    ];
+    void focusSource(int index) {
+      if (index < 0 || index >= sourceFocusNodes.length) return;
+      sourceFocusNodes[index].requestFocus();
+    }
+
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: Container(
+              width: 560,
+              constraints: const BoxConstraints(maxHeight: 560),
+              padding: const EdgeInsets.all(22),
+              decoration: BoxDecoration(
+                color: const Color(0xEE15151E),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: const Color(0x24FFFFFF)),
+              ),
+              child: Stack(
+                children: [
+                  Positioned(
+                    top: 0,
+                    right: 0,
+                    child: _TvCircleIconButton(
+                      focusNode: closeFocusNode,
+                      icon: Icons.close_rounded,
+                      size: 48,
+                      onArrowUp: () => closeFocusNode.requestFocus(),
+                      onArrowRight: () => closeFocusNode.requestFocus(),
+                      onArrowLeft: () => focusSource(_sessionIndex),
+                      onArrowDown: () => focusSource(_sessionIndex),
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                    ),
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(top: 8, right: 62),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Sources',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      const Text(
-                        'Choose another TV-ready playback option.',
-                        style: TextStyle(
-                          color: Color(0xFFAAA6BD),
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 18),
-                      Flexible(
-                        child: SingleChildScrollView(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              for (
-                                var index = 0;
-                                index < _sessions.length;
-                                index++
-                              )
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 10),
-                                  child: _TvTextButton(
-                                    icon: index == _sessionIndex
-                                        ? Icons.check_circle_rounded
-                                        : Icons.video_library_rounded,
-                                    label: index == _sessionIndex
-                                        ? '${_sessionLabel(_sessions[index], index)} active'
-                                        : _sessionLabel(
-                                            _sessions[index],
-                                            index,
-                                          ),
-                                    autofocus: index == _sessionIndex,
-                                    enabled: !_switchingSource,
-                                    animateIcon:
-                                        _switchingSource &&
-                                        index != _sessionIndex,
-                                    onPressed: () =>
-                                        unawaited(_switchToSource(index)),
-                                  ),
-                                ),
-                            ],
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8, right: 62),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Sources',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 24,
+                            fontWeight: FontWeight.w900,
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Choose another TV-ready playback option.',
+                          style: TextStyle(
+                            color: Color(0xFFAAA6BD),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        Flexible(
+                          child: SingleChildScrollView(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                for (
+                                  var index = 0;
+                                  index < _sessions.length;
+                                  index++
+                                )
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: _TvTextButton(
+                                      focusNode: sourceFocusNodes[index],
+                                      icon: index == _sessionIndex
+                                          ? Icons.check_circle_rounded
+                                          : Icons.video_library_rounded,
+                                      label: index == _sessionIndex
+                                          ? '${_sessionLabel(_sessions[index], index)} active'
+                                          : _sessionLabel(
+                                              _sessions[index],
+                                              index,
+                                            ),
+                                      autofocus: index == _sessionIndex,
+                                      enabled: !_switchingSource,
+                                      animateIcon:
+                                          _switchingSource &&
+                                          index != _sessionIndex,
+                                      onArrowUp: index == 0
+                                          ? () => closeFocusNode.requestFocus()
+                                          : () => focusSource(index - 1),
+                                      onArrowDown: index == _sessions.length - 1
+                                          ? () => focusSource(index)
+                                          : () => focusSource(index + 1),
+                                      onPressed: () =>
+                                          unawaited(_switchToSource(index)),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        );
-      },
-    );
+          );
+        },
+      );
+    } finally {
+      closeFocusNode.dispose();
+      for (final node in sourceFocusNodes) {
+        node.dispose();
+      }
+    }
     if (!mounted) return;
     _showControls();
     _sourcesFocusNode.requestFocus();
@@ -1289,145 +1318,172 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _showControls();
     final seriesLike =
         widget.item.type == 'series' || widget.item.type == 'animation';
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return Dialog(
-              backgroundColor: Colors.transparent,
-              child: Container(
-                width: 760,
-                padding: const EdgeInsets.all(26),
-                decoration: BoxDecoration(
-                  color: const Color(0xEE15151E),
-                  borderRadius: BorderRadius.circular(24),
-                  border: Border.all(color: const Color(0x24FFFFFF)),
-                ),
-                child: Stack(
-                  children: [
-                    Positioned(
-                      top: 0,
-                      right: 0,
-                      child: _TvCircleIconButton(
-                        icon: Icons.close_rounded,
-                        onPressed: () => Navigator.of(dialogContext).pop(),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Settings',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 24,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            seriesLike
-                                ? 'S$_season E$_episode - Source ${_sessionIndex + 1}/${_sessions.length}'
-                                : 'Source ${_sessionIndex + 1}/${_sessions.length}',
-                            style: const TextStyle(
-                              color: Color(0xFFAAA6BD),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 22),
-                          Column(
-                            children: [
-                              for (final speed in const [0.75, 1.0, 1.25, 1.5])
-                                _TvPlaybackSettingsRow(
-                                  icon: speed == _playbackSpeed
-                                      ? Icons.check_circle_rounded
-                                      : Icons.speed_rounded,
-                                  title:
-                                      'Speed ${speed.toStringAsFixed(speed == 1.0 ? 0 : 2)}x',
-                                  value: speed == _playbackSpeed
-                                      ? 'Active'
-                                      : '',
-                                  selected: speed == _playbackSpeed,
-                                  onPressed: () {
-                                    unawaited(_setPlaybackSpeed(speed));
-                                    setDialogState(() {});
-                                  },
-                                ),
-                              _TvPlaybackSettingsRow(
-                                icon: Icons.refresh_rounded,
-                                title: 'Restart',
-                                value: 'Start from beginning',
-                                onPressed: () => unawaited(_restartPlayback()),
-                              ),
-                              _TvPlaybackSettingsRow(
-                                icon: _captionsEnabled
-                                    ? Icons.closed_caption_rounded
-                                    : Icons.closed_caption_off_rounded,
-                                title: 'Subtitle',
-                                value:
-                                    _captionsEnabled &&
-                                        _subtitleIndex >= 0 &&
-                                        _subtitleIndex < widget.subtitles.length
-                                    ? widget.subtitles[_subtitleIndex].label
-                                    : widget.subtitles.isEmpty
-                                    ? 'Unavailable'
-                                    : 'Off',
-                                onPressed: () => unawaited(
-                                  _showSubtitlePicker(
-                                    () => setDialogState(() {}),
-                                  ),
-                                ),
-                              ),
-                              _TvPlaybackSettingsRow(
-                                icon: Icons.aspect_ratio_rounded,
-                                title: 'Video size',
-                                value: _videoSize,
-                                onPressed: () => unawaited(
-                                  _showVideoSizePicker(
-                                    () => setDialogState(() {}),
-                                  ),
-                                ),
-                              ),
-                              if (seriesLike)
-                                _TvPlaybackSettingsRow(
-                                  icon: _autoplayNextEpisode
-                                      ? Icons.playlist_play_rounded
-                                      : Icons.playlist_remove_rounded,
-                                  title: 'Next episode',
-                                  value: _autoplayNextEpisode ? 'On' : 'Off',
-                                  onPressed: () {
-                                    setState(() {
-                                      _autoplayNextEpisode =
-                                          !_autoplayNextEpisode;
-                                      _controlsVisible = true;
-                                    });
-                                    setDialogState(() {});
-                                    _showFeedback(
-                                      Icons.playlist_play_rounded,
-                                      _autoplayNextEpisode
-                                          ? 'Auto next on'
-                                          : 'Auto next off',
-                                    );
-                                  },
-                                ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
+    final closeFocusNode = FocusNode(debugLabel: 'tv-playback-settings-close');
+    final firstRowFocusNode = FocusNode(
+      debugLabel: 'tv-playback-settings-first',
     );
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              return Dialog(
+                backgroundColor: Colors.transparent,
+                child: Container(
+                  width: 760,
+                  padding: const EdgeInsets.all(26),
+                  decoration: BoxDecoration(
+                    color: const Color(0xEE15151E),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: const Color(0x24FFFFFF)),
+                  ),
+                  child: Stack(
+                    children: [
+                      Positioned(
+                        top: 0,
+                        right: 0,
+                        child: _TvCircleIconButton(
+                          focusNode: closeFocusNode,
+                          icon: Icons.close_rounded,
+                          onArrowUp: () => closeFocusNode.requestFocus(),
+                          onArrowRight: () => closeFocusNode.requestFocus(),
+                          onArrowLeft: () => firstRowFocusNode.requestFocus(),
+                          onArrowDown: () => firstRowFocusNode.requestFocus(),
+                          onPressed: () => Navigator.of(dialogContext).pop(),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Settings',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 24,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              seriesLike
+                                  ? 'S$_season E$_episode - Source ${_sessionIndex + 1}/${_sessions.length}'
+                                  : 'Source ${_sessionIndex + 1}/${_sessions.length}',
+                              style: const TextStyle(
+                                color: Color(0xFFAAA6BD),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 22),
+                            Column(
+                              children: [
+                                for (final speed in const [
+                                  0.75,
+                                  1.0,
+                                  1.25,
+                                  1.5,
+                                ])
+                                  _TvPlaybackSettingsRow(
+                                    icon: speed == _playbackSpeed
+                                        ? Icons.check_circle_rounded
+                                        : Icons.speed_rounded,
+                                    title:
+                                        'Speed ${speed.toStringAsFixed(speed == 1.0 ? 0 : 2)}x',
+                                    value: speed == _playbackSpeed
+                                        ? 'Active'
+                                        : '',
+                                    selected: speed == _playbackSpeed,
+                                    focusNode: speed == 0.75
+                                        ? firstRowFocusNode
+                                        : null,
+                                    onArrowUp: speed == 0.75
+                                        ? () => closeFocusNode.requestFocus()
+                                        : null,
+                                    onPressed: () {
+                                      unawaited(_setPlaybackSpeed(speed));
+                                      setDialogState(() {});
+                                    },
+                                  ),
+                                _TvPlaybackSettingsRow(
+                                  icon: Icons.refresh_rounded,
+                                  title: 'Restart',
+                                  value: 'Start from beginning',
+                                  onPressed: () =>
+                                      unawaited(_restartPlayback()),
+                                ),
+                                _TvPlaybackSettingsRow(
+                                  icon: _captionsEnabled
+                                      ? Icons.closed_caption_rounded
+                                      : Icons.closed_caption_off_rounded,
+                                  title: 'Subtitle',
+                                  value:
+                                      _captionsEnabled &&
+                                          _subtitleIndex >= 0 &&
+                                          _subtitleIndex <
+                                              widget.subtitles.length
+                                      ? widget.subtitles[_subtitleIndex].label
+                                      : widget.subtitles.isEmpty
+                                      ? 'Unavailable'
+                                      : 'Off',
+                                  onPressed: () => unawaited(
+                                    _showSubtitlePicker(
+                                      () => setDialogState(() {}),
+                                    ),
+                                  ),
+                                ),
+                                _TvPlaybackSettingsRow(
+                                  icon: Icons.aspect_ratio_rounded,
+                                  title: 'Video size',
+                                  value: _videoSize,
+                                  onPressed: () => unawaited(
+                                    _showVideoSizePicker(
+                                      () => setDialogState(() {}),
+                                    ),
+                                  ),
+                                ),
+                                if (seriesLike)
+                                  _TvPlaybackSettingsRow(
+                                    icon: _autoplayNextEpisode
+                                        ? Icons.playlist_play_rounded
+                                        : Icons.playlist_remove_rounded,
+                                    title: 'Next episode',
+                                    value: _autoplayNextEpisode ? 'On' : 'Off',
+                                    onPressed: () {
+                                      setState(() {
+                                        _autoplayNextEpisode =
+                                            !_autoplayNextEpisode;
+                                        _controlsVisible = true;
+                                      });
+                                      setDialogState(() {});
+                                      _showFeedback(
+                                        Icons.playlist_play_rounded,
+                                        _autoplayNextEpisode
+                                            ? 'Auto next on'
+                                            : 'Auto next off',
+                                      );
+                                    },
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      closeFocusNode.dispose();
+      firstRowFocusNode.dispose();
+    }
     if (!mounted) return;
     _showControls();
     _settingsFocusNode.requestFocus();
@@ -1826,6 +1882,9 @@ class _TvPlaybackChoiceDialog extends StatefulWidget {
 }
 
 class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
+  final FocusNode _closeFocusNode = FocusNode(
+    debugLabel: 'tv-playback-choice-close',
+  );
   final List<FocusNode> _choiceFocusNodes = <FocusNode>[];
 
   @override
@@ -1840,6 +1899,7 @@ class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
 
   @override
   void dispose() {
+    _closeFocusNode.dispose();
     for (final node in _choiceFocusNodes) {
       node.dispose();
     }
@@ -1899,7 +1959,12 @@ class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
               top: 0,
               right: 0,
               child: _TvCircleIconButton(
+                focusNode: _closeFocusNode,
                 icon: Icons.close_rounded,
+                onArrowUp: () => _closeFocusNode.requestFocus(),
+                onArrowRight: () => _closeFocusNode.requestFocus(),
+                onArrowLeft: () => _focusChoice(_selectedIndex),
+                onArrowDown: () => _focusChoice(_selectedIndex),
                 onPressed: () => Navigator.of(context).pop(),
               ),
             ),
@@ -1930,7 +1995,7 @@ class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
                       selected: widget.choices[index].label == widget.selected,
                       focusNode: _choiceFocusNodes[index],
                       onArrowUp: index == 0
-                          ? () => _focusChoice(index)
+                          ? () => _closeFocusNode.requestFocus()
                           : () => _focusChoice(index - 1),
                       onArrowDown: index == widget.choices.length - 1
                           ? () => _focusChoice(index)

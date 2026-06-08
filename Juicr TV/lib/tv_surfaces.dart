@@ -922,6 +922,9 @@ class _TvSettingsSectionDialog extends StatefulWidget {
 }
 
 class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
+  final FocusNode _closeFocusNode = FocusNode(
+    debugLabel: 'tv-settings-dialog-close',
+  );
   final FocusNode _firstActionFocusNode = FocusNode(
     debugLabel: 'tv-settings-dialog-first',
   );
@@ -946,6 +949,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
 
   @override
   void dispose() {
+    _closeFocusNode.dispose();
     _firstActionFocusNode.dispose();
     for (final node in _actionFocusNodes) {
       node.dispose();
@@ -1648,8 +1652,13 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
               top: 0,
               right: 0,
               child: _TvCircleIconButton(
+                focusNode: _closeFocusNode,
                 icon: Icons.close_rounded,
                 size: 48,
+                onArrowUp: () => _closeFocusNode.requestFocus(),
+                onArrowRight: () => _closeFocusNode.requestFocus(),
+                onArrowLeft: () => _focusAction(0),
+                onArrowDown: () => _focusAction(0),
                 onPressed: () => Navigator.of(context).pop(),
               ),
             ),
@@ -1705,7 +1714,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                                 onFocus: () =>
                                     _rememberActionFocus(_actionNode(index)),
                                 onArrowUp: index == 0
-                                    ? () => _focusAction(0)
+                                    ? () => _closeFocusNode.requestFocus()
                                     : () => _focusAction(index - 1),
                                 onArrowDown: index == actions.length - 1
                                     ? () => _focusAction(0)
@@ -1869,6 +1878,7 @@ class _TvDefaultSourceDialog extends StatefulWidget {
 }
 
 class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
+  final _closeFocusNode = FocusNode(debugLabel: 'tv-default-source-close');
   final _firstFocusNode = FocusNode(debugLabel: 'tv-default-source-first');
   final List<FocusNode> _actionFocusNodes = <FocusNode>[];
   late _TvSettingsState _current = widget.settings;
@@ -1883,6 +1893,7 @@ class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
 
   @override
   void dispose() {
+    _closeFocusNode.dispose();
     _firstFocusNode.dispose();
     for (final node in _actionFocusNodes) {
       node.dispose();
@@ -2006,8 +2017,13 @@ class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
               top: 0,
               right: 0,
               child: _TvCircleIconButton(
+                focusNode: _closeFocusNode,
                 icon: Icons.close_rounded,
                 size: 48,
+                onArrowUp: () => _closeFocusNode.requestFocus(),
+                onArrowRight: () => _closeFocusNode.requestFocus(),
+                onArrowLeft: () => _focusAction(0),
+                onArrowDown: () => _focusAction(0),
                 onPressed: () => Navigator.of(context).pop(),
               ),
             ),
@@ -2043,7 +2059,7 @@ class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
                         autofocus: index == 0,
                         focusNode: _actionNode(index),
                         onArrowUp: index == 0
-                            ? () => _focusAction(0)
+                            ? () => _closeFocusNode.requestFocus()
                             : () => _focusAction(index - 1),
                         onArrowDown: index == actions.length - 1
                             ? () => _focusAction(0)
@@ -2076,6 +2092,7 @@ class _TvUserAddOnDialog extends StatefulWidget {
 }
 
 class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
+  final _closeFocusNode = FocusNode(debugLabel: 'tv-user-addon-close');
   final _firstFocusNode = FocusNode(debugLabel: 'tv-user-addon-first');
   final List<FocusNode> _actionFocusNodes = <FocusNode>[];
   late bool _enabled = widget.addon.enabled;
@@ -2090,6 +2107,7 @@ class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
 
   @override
   void dispose() {
+    _closeFocusNode.dispose();
     _firstFocusNode.dispose();
     for (final node in _actionFocusNodes) {
       node.dispose();
@@ -2172,8 +2190,13 @@ class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
               top: 0,
               right: 0,
               child: _TvCircleIconButton(
+                focusNode: _closeFocusNode,
                 icon: Icons.close_rounded,
                 size: 48,
+                onArrowUp: () => _closeFocusNode.requestFocus(),
+                onArrowRight: () => _closeFocusNode.requestFocus(),
+                onArrowLeft: () => _focusAction(0),
+                onArrowDown: () => _focusAction(0),
                 onPressed: () => Navigator.of(context).pop(),
               ),
             ),
@@ -2211,7 +2234,7 @@ class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
                         autofocus: index == 0,
                         focusNode: _actionNode(index),
                         onArrowUp: index == 0
-                            ? () => _focusAction(0)
+                            ? () => _closeFocusNode.requestFocus()
                             : () => _focusAction(index - 1),
                         onArrowDown: index == actions.length - 1
                             ? () => _focusAction(0)
@@ -2228,7 +2251,7 @@ class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
   }
 }
 
-class _TvSettingsOptionDialog extends StatelessWidget {
+class _TvSettingsOptionDialog extends StatefulWidget {
   const _TvSettingsOptionDialog({
     required this.title,
     required this.selected,
@@ -2240,7 +2263,70 @@ class _TvSettingsOptionDialog extends StatelessWidget {
   final List<String> options;
 
   @override
+  State<_TvSettingsOptionDialog> createState() =>
+      _TvSettingsOptionDialogState();
+}
+
+class _TvSettingsOptionDialogState extends State<_TvSettingsOptionDialog> {
+  final FocusNode _closeFocusNode = FocusNode(
+    debugLabel: 'tv-settings-option-close',
+  );
+  final List<FocusNode> _optionFocusNodes = <FocusNode>[];
+
+  @override
+  void initState() {
+    super.initState();
+    _syncOptionFocusNodes();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _focusOption(_selectedIndex);
+    });
+  }
+
+  @override
+  void dispose() {
+    _closeFocusNode.dispose();
+    for (final node in _optionFocusNodes) {
+      node.dispose();
+    }
+    super.dispose();
+  }
+
+  int get _selectedIndex {
+    final index = widget.options.indexOf(widget.selected);
+    return index < 0 ? 0 : index;
+  }
+
+  void _syncOptionFocusNodes() {
+    while (_optionFocusNodes.length > widget.options.length) {
+      _optionFocusNodes.removeLast().dispose();
+    }
+    while (_optionFocusNodes.length < widget.options.length) {
+      final index = _optionFocusNodes.length;
+      _optionFocusNodes.add(FocusNode(debugLabel: 'tv-settings-option-$index'));
+    }
+  }
+
+  void _focusOption(int index) {
+    if (index < 0 || index >= _optionFocusNodes.length) return;
+    final node = _optionFocusNodes[index];
+    node.requestFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = node.context;
+      if (!mounted || context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: _tvDuration(140),
+        curve: Curves.easeOutCubic,
+        alignment: 0.42,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+      );
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    _syncOptionFocusNodes();
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 80, vertical: 48),
@@ -2260,7 +2346,12 @@ class _TvSettingsOptionDialog extends StatelessWidget {
                   top: 0,
                   right: 0,
                   child: _TvCircleIconButton(
+                    focusNode: _closeFocusNode,
                     icon: Icons.close_rounded,
+                    onArrowUp: () => _closeFocusNode.requestFocus(),
+                    onArrowRight: () => _closeFocusNode.requestFocus(),
+                    onArrowLeft: () => _focusOption(_selectedIndex),
+                    onArrowDown: () => _focusOption(_selectedIndex),
                     onPressed: () => Navigator.of(context).pop(),
                   ),
                 ),
@@ -2271,7 +2362,7 @@ class _TvSettingsOptionDialog extends StatelessWidget {
                     Padding(
                       padding: const EdgeInsets.only(right: 64),
                       child: Text(
-                        title,
+                        widget.title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -2282,16 +2373,23 @@ class _TvSettingsOptionDialog extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 22),
-                    ...options.map(
-                      (option) => Padding(
+                    for (var index = 0; index < widget.options.length; index++)
+                      Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: _TvSettingsOptionRow(
-                          label: option,
-                          selected: option == selected,
-                          onPressed: () => Navigator.of(context).pop(option),
+                          label: widget.options[index],
+                          selected: widget.options[index] == widget.selected,
+                          focusNode: _optionFocusNodes[index],
+                          onArrowUp: index == 0
+                              ? () => _closeFocusNode.requestFocus()
+                              : () => _focusOption(index - 1),
+                          onArrowDown: index == widget.options.length - 1
+                              ? () => _focusOption(index)
+                              : () => _focusOption(index + 1),
+                          onPressed: () =>
+                              Navigator.of(context).pop(widget.options[index]),
                         ),
                       ),
-                    ),
                   ],
                 ),
               ],
@@ -2308,17 +2406,26 @@ class _TvSettingsOptionRow extends StatelessWidget {
     required this.label,
     required this.selected,
     required this.onPressed,
+    this.focusNode,
+    this.onArrowUp,
+    this.onArrowDown,
   });
 
   final String label;
   final bool selected;
   final VoidCallback onPressed;
+  final FocusNode? focusNode;
+  final VoidCallback? onArrowUp;
+  final VoidCallback? onArrowDown;
 
   @override
   Widget build(BuildContext context) {
     return _TvFocusable(
       autofocus: selected,
+      focusNode: focusNode,
       autoReveal: true,
+      onArrowUp: onArrowUp,
+      onArrowDown: onArrowDown,
       onPressed: onPressed,
       builder: (focused) {
         final active = focused || selected;
@@ -3215,112 +3322,145 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
         );
       return;
     }
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          child: Container(
-            width: 580,
-            constraints: const BoxConstraints(maxHeight: 590),
-            padding: const EdgeInsets.all(22),
-            decoration: BoxDecoration(
-              color: const Color(0xFF15151E),
-              borderRadius: BorderRadius.circular(28),
-              border: Border.all(color: const Color(0x22FFFFFF)),
-            ),
-            child: Stack(
-              children: [
-                Positioned(
-                  top: 0,
-                  right: 0,
-                  child: _TvCircleIconButton(
-                    icon: Icons.close_rounded,
-                    onPressed: () => Navigator.of(dialogContext).pop(),
+    final closeFocusNode = FocusNode(debugLabel: 'tv-trailer-picker-close');
+    final trailerFocusNodes = [
+      for (var index = 0; index < trailers.take(6).length; index++)
+        FocusNode(debugLabel: 'tv-trailer-picker-$index'),
+    ];
+    void focusTrailer(int index) {
+      if (index < 0 || index >= trailerFocusNodes.length) return;
+      trailerFocusNodes[index].requestFocus();
+    }
+
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: Container(
+              width: 580,
+              constraints: const BoxConstraints(maxHeight: 590),
+              padding: const EdgeInsets.all(22),
+              decoration: BoxDecoration(
+                color: const Color(0xFF15151E),
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(color: const Color(0x22FFFFFF)),
+              ),
+              child: Stack(
+                children: [
+                  Positioned(
+                    top: 0,
+                    right: 0,
+                    child: _TvCircleIconButton(
+                      focusNode: closeFocusNode,
+                      icon: Icons.close_rounded,
+                      onArrowUp: () => closeFocusNode.requestFocus(),
+                      onArrowRight: () => closeFocusNode.requestFocus(),
+                      onArrowLeft: () => focusTrailer(0),
+                      onArrowDown: () => focusTrailer(0),
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                    ),
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${widget.item.title} trailers',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Choose a trailer to open on this TV.',
-                        style: TextStyle(
-                          color: Color(0xFFAAA6BD),
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Flexible(
-                        child: SingleChildScrollView(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              for (
-                                var index = 0;
-                                index < trailers.take(6).length;
-                                index++
-                              )
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 10),
-                                  child: SizedBox(
-                                    width: double.infinity,
-                                    child: _TvTextButton(
-                                      icon:
-                                          trailers[index].isTvPlayable ||
-                                              trailers[index]
-                                                  .isExternalLaunchable
-                                          ? Icons.movie_filter_rounded
-                                          : Icons.lock_clock_rounded,
-                                      label:
-                                          trailers[index].isTvPlayable ||
-                                              trailers[index]
-                                                  .isExternalLaunchable
-                                          ? trailers[index].title
-                                          : '${trailers[index].title} unavailable',
-                                      autofocus: index == 0,
-                                      enabled:
-                                          trailers[index].isTvPlayable ||
-                                          trailers[index].isExternalLaunchable,
-                                      onPressed: () {
-                                        Navigator.of(dialogContext).pop();
-                                        unawaited(
-                                          _openTrailer(
-                                            context,
-                                            trailers[index],
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                ),
-                            ],
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${widget.item.title} trailers',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 24,
+                            fontWeight: FontWeight.w900,
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Choose a trailer to open on this TV.',
+                          style: TextStyle(
+                            color: Color(0xFFAAA6BD),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        Flexible(
+                          child: SingleChildScrollView(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                for (
+                                  var index = 0;
+                                  index < trailers.take(6).length;
+                                  index++
+                                )
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: SizedBox(
+                                      width: double.infinity,
+                                      child: _TvTextButton(
+                                        focusNode: trailerFocusNodes[index],
+                                        icon:
+                                            trailers[index].isTvPlayable ||
+                                                trailers[index]
+                                                    .isExternalLaunchable
+                                            ? Icons.movie_filter_rounded
+                                            : Icons.lock_clock_rounded,
+                                        label:
+                                            trailers[index].isTvPlayable ||
+                                                trailers[index]
+                                                    .isExternalLaunchable
+                                            ? trailers[index].title
+                                            : '${trailers[index].title} unavailable',
+                                        autofocus: index == 0,
+                                        enabled:
+                                            trailers[index].isTvPlayable ||
+                                            trailers[index]
+                                                .isExternalLaunchable,
+                                        onArrowUp: index == 0
+                                            ? () =>
+                                                  closeFocusNode.requestFocus()
+                                            : () => focusTrailer(index - 1),
+                                        onArrowDown:
+                                            index ==
+                                                trailerFocusNodes.length - 1
+                                            ? () => focusTrailer(index)
+                                            : () => focusTrailer(index + 1),
+                                        onPressed: () {
+                                          Navigator.of(dialogContext).pop();
+                                          unawaited(
+                                            _openTrailer(
+                                              context,
+                                              trailers[index],
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        );
-      },
-    );
+          );
+        },
+      );
+    } finally {
+      closeFocusNode.dispose();
+      for (final node in trailerFocusNodes) {
+        node.dispose();
+      }
+    }
     if (!mounted) return;
     _trailerFocusNode.requestFocus();
   }
@@ -3410,118 +3550,141 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
     final seasons =
         allEpisodes.map((episode) => episode.season).toSet().toList()..sort();
     var selectedSeason = seasons.isNotEmpty ? seasons.first : 1;
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          child: StatefulBuilder(
-            builder: (context, setDialogState) {
-              final episodes = allEpisodes
-                  .where((episode) => episode.season == selectedSeason)
-                  .toList();
-              return Container(
-                width: 800,
-                constraints: const BoxConstraints(maxHeight: 610),
-                padding: const EdgeInsets.all(24),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF15151E),
-                  borderRadius: BorderRadius.circular(28),
-                  border: Border.all(color: const Color(0x22FFFFFF)),
-                ),
-                child: Stack(
-                  children: [
-                    Positioned(
-                      top: 0,
-                      right: 0,
-                      child: _TvCircleIconButton(
-                        icon: Icons.close_rounded,
-                        size: 48,
-                        onPressed: () => Navigator.of(dialogContext).pop(),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.only(right: 70),
-                            child: Text(
-                              '${widget.item.title} episodes',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 24,
-                                fontWeight: FontWeight.w900,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: _tvSpacing / 2),
-                          Text(
-                            widget.item.episodes.isNotEmpty
-                                ? 'Choose an episode to start playback on this TV.'
-                                : 'Episode metadata is still loading for this title.',
-                            style: const TextStyle(
-                              color: Color(0xFFAAA6BD),
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 18),
-                          Wrap(
-                            spacing: 10,
-                            runSpacing: 10,
-                            children: [
-                              for (final season in seasons)
-                                _TvSeasonButton(
-                                  label: 'Season $season',
-                                  selected: season == selectedSeason,
-                                  onPressed: () => setDialogState(() {
-                                    selectedSeason = season;
-                                  }),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 22),
-                          Flexible(
-                            child: SingleChildScrollView(
-                              child: Column(
-                                children: [
-                                  for (final episode in episodes)
-                                    Padding(
-                                      padding: const EdgeInsets.only(
-                                        bottom: 12,
-                                      ),
-                                      child: _TvEpisodeCard(
-                                        episode: episode,
-                                        autofocus: episode == episodes.first,
-                                        onPlay: () {
-                                          Navigator.of(dialogContext).pop();
-                                          widget.onPlayEpisode(
-                                            episode.season,
-                                            episode.episode,
-                                          );
-                                        },
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        );
-      },
+    final closeFocusNode = FocusNode(debugLabel: 'tv-episode-picker-close');
+    final firstEpisodeFocusNode = FocusNode(
+      debugLabel: 'tv-episode-picker-first',
     );
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: StatefulBuilder(
+              builder: (context, setDialogState) {
+                final episodes = allEpisodes
+                    .where((episode) => episode.season == selectedSeason)
+                    .toList();
+                return Container(
+                  width: 800,
+                  constraints: const BoxConstraints(maxHeight: 610),
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF15151E),
+                    borderRadius: BorderRadius.circular(28),
+                    border: Border.all(color: const Color(0x22FFFFFF)),
+                  ),
+                  child: Stack(
+                    children: [
+                      Positioned(
+                        top: 0,
+                        right: 0,
+                        child: _TvCircleIconButton(
+                          focusNode: closeFocusNode,
+                          icon: Icons.close_rounded,
+                          size: 48,
+                          onArrowUp: () => closeFocusNode.requestFocus(),
+                          onArrowRight: () => closeFocusNode.requestFocus(),
+                          onArrowLeft: () =>
+                              firstEpisodeFocusNode.requestFocus(),
+                          onArrowDown: () =>
+                              firstEpisodeFocusNode.requestFocus(),
+                          onPressed: () => Navigator.of(dialogContext).pop(),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.only(right: 70),
+                              child: Text(
+                                '${widget.item.title} episodes',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: _tvSpacing / 2),
+                            Text(
+                              widget.item.episodes.isNotEmpty
+                                  ? 'Choose an episode to start playback on this TV.'
+                                  : 'Episode metadata is still loading for this title.',
+                              style: const TextStyle(
+                                color: Color(0xFFAAA6BD),
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 18),
+                            Wrap(
+                              spacing: 10,
+                              runSpacing: 10,
+                              children: [
+                                for (final season in seasons)
+                                  _TvSeasonButton(
+                                    label: 'Season $season',
+                                    selected: season == selectedSeason,
+                                    onPressed: () => setDialogState(() {
+                                      selectedSeason = season;
+                                    }),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 22),
+                            Flexible(
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  children: [
+                                    for (final episode in episodes)
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          bottom: 12,
+                                        ),
+                                        child: _TvEpisodeCard(
+                                          episode: episode,
+                                          autofocus: episode == episodes.first,
+                                          focusNode: episode == episodes.first
+                                              ? firstEpisodeFocusNode
+                                              : null,
+                                          onArrowUp: episode == episodes.first
+                                              ? () => closeFocusNode
+                                                    .requestFocus()
+                                              : null,
+                                          onPlay: () {
+                                            Navigator.of(dialogContext).pop();
+                                            widget.onPlayEpisode(
+                                              episode.season,
+                                              episode.episode,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          );
+        },
+      );
+    } finally {
+      closeFocusNode.dispose();
+      firstEpisodeFocusNode.dispose();
+    }
     if (!mounted) return;
     _episodesFocusNode.requestFocus();
   }
@@ -3849,17 +4012,23 @@ class _TvEpisodeCard extends StatelessWidget {
     required this.episode,
     required this.onPlay,
     this.autofocus = false,
+    this.focusNode,
+    this.onArrowUp,
   });
 
   final _TvEpisode episode;
   final VoidCallback onPlay;
   final bool autofocus;
+  final FocusNode? focusNode;
+  final VoidCallback? onArrowUp;
 
   @override
   Widget build(BuildContext context) {
     return _TvFocusable(
       autofocus: autofocus,
+      focusNode: focusNode,
       autoReveal: true,
+      onArrowUp: onArrowUp,
       onPressed: onPlay,
       builder: (focused) {
         return AnimatedContainer(

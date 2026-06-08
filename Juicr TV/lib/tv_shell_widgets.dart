@@ -1047,6 +1047,9 @@ class _TvDiscoveryMenuDialog extends StatefulWidget {
 }
 
 class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
+  final FocusNode _closeFocusNode = FocusNode(
+    debugLabel: 'tv-discovery-menu-close',
+  );
   final ScrollController _scrollController = ScrollController();
   final FocusNode _firstCatalogFocusNode = FocusNode(
     debugLabel: 'tv-discovery-menu-first',
@@ -1147,6 +1150,7 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
 
   @override
   void dispose() {
+    _closeFocusNode.dispose();
     _scrollController.dispose();
     _firstCatalogFocusNode.dispose();
     _seriesCatalogFocusNode.dispose();
@@ -1222,7 +1226,12 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
                   top: 0,
                   right: 0,
                   child: _TvCircleIconButton(
+                    focusNode: _closeFocusNode,
                     icon: Icons.close_rounded,
+                    onArrowUp: () => _closeFocusNode.requestFocus(),
+                    onArrowRight: () => _closeFocusNode.requestFocus(),
+                    onArrowLeft: () => _focusMenuNode(_firstCatalogFocusNode),
+                    onArrowDown: () => _focusMenuNode(_firstCatalogFocusNode),
                     onPressed: () => Navigator.of(context).pop(),
                   ),
                 ),
@@ -1270,11 +1279,7 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
                                     _kind == _TvDiscoveryKind.values[index],
                                 autofocus: index == 0,
                                 onArrowUp: index == 0
-                                    ? () => _focusMenuNode(
-                                        _kindNode(
-                                          _TvDiscoveryKind.values[index],
-                                        ),
-                                      )
+                                    ? () => _closeFocusNode.requestFocus()
                                     : () => _focusMenuNode(
                                         _kindNode(
                                           _TvDiscoveryKind.values[index - 1],
@@ -1399,6 +1404,9 @@ class _TvGenreMenuDialog extends StatefulWidget {
 }
 
 class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
+  final FocusNode _closeFocusNode = FocusNode(
+    debugLabel: 'tv-genre-menu-close',
+  );
   final Map<String, FocusNode> _genreFocusNodes = <String, FocusNode>{};
   final ScrollController _scrollController = ScrollController();
 
@@ -1464,6 +1472,7 @@ class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
 
   @override
   void dispose() {
+    _closeFocusNode.dispose();
     _scrollController.dispose();
     for (final node in _genreFocusNodes.values) {
       node.dispose();
@@ -1493,7 +1502,12 @@ class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
                 top: 0,
                 right: 0,
                 child: _TvCircleIconButton(
+                  focusNode: _closeFocusNode,
                   icon: Icons.close_rounded,
+                  onArrowUp: () => _closeFocusNode.requestFocus(),
+                  onArrowRight: () => _closeFocusNode.requestFocus(),
+                  onArrowLeft: () => _focusGenre(_choices.first),
+                  onArrowDown: () => _focusGenre(_choices.first),
                   onPressed: () => Navigator.of(context).pop(),
                 ),
               ),
@@ -1527,7 +1541,7 @@ class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
                               autofocus: choices[index] == widget.selected,
                               focusNode: _genreNode(choices[index]),
                               onArrowUp: index == 0
-                                  ? () => _focusGenre(choices[index])
+                                  ? () => _closeFocusNode.requestFocus()
                                   : () => _focusGenre(choices[index - 1]),
                               onArrowDown: index + 1 < choices.length
                                   ? () => _focusGenre(choices[index + 1])
@@ -1561,6 +1575,9 @@ class _TvLibraryMenuDialog extends StatefulWidget {
 }
 
 class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
+  final FocusNode _closeFocusNode = FocusNode(
+    debugLabel: 'tv-library-menu-close',
+  );
   late final Map<_TvLibraryFilter, FocusNode> _filterNodes = {
     for (final filter in _TvLibraryFilter.values)
       filter: FocusNode(debugLabel: 'tv-library-menu-${filter.name}'),
@@ -1581,6 +1598,7 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
 
   @override
   void dispose() {
+    _closeFocusNode.dispose();
     for (final node in _filterNodes.values) {
       node.dispose();
     }
@@ -1627,7 +1645,14 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
                   top: 0,
                   right: 0,
                   child: _TvCircleIconButton(
+                    focusNode: _closeFocusNode,
                     icon: Icons.close_rounded,
+                    onArrowUp: () => _closeFocusNode.requestFocus(),
+                    onArrowRight: () => _closeFocusNode.requestFocus(),
+                    onArrowLeft: () =>
+                        _focusFilter(_TvLibraryFilter.values.first),
+                    onArrowDown: () =>
+                        _focusFilter(_TvLibraryFilter.values.first),
                     onPressed: () => Navigator.of(context).pop(),
                   ),
                 ),
@@ -1679,9 +1704,7 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
                                       _filter = _TvLibraryFilter.values[index],
                                 ),
                                 onArrowUp: index == 0
-                                    ? () => _focusFilter(
-                                        _TvLibraryFilter.values[index],
-                                      )
+                                    ? () => _closeFocusNode.requestFocus()
                                     : () => _focusFilter(
                                         _TvLibraryFilter.values[index - 1],
                                       ),
