@@ -1,5 +1,24 @@
 ﻿part of 'main.dart';
 
+const MethodChannel _tvTrailerChannel = MethodChannel('app.juicr.flutter/trailer');
+
+Future<bool> _openTvExternalTrailer(_TvTrailer trailer) async {
+  if (!trailer.isExternalLaunchable) return false;
+  try {
+    return await _tvTrailerChannel.invokeMethod<bool>(
+          'openTrailer',
+          {'url': trailer.url},
+        ) ??
+        false;
+  } catch (error) {
+    debugPrint(
+      'Juicr TV trailer handoff skipped '
+      'bucket=trailer_handoff errorType=${error.runtimeType}',
+    );
+    return false;
+  }
+}
+
 class _TvDiscoverySurface extends StatelessWidget {
   const _TvDiscoverySurface({
     required this.allItems,
@@ -14,6 +33,7 @@ class _TvDiscoverySurface extends StatelessWidget {
     required this.onFocusNavigation,
     required this.entryFocusNode,
     required this.onFocusHeader,
+    required this.onRememberFocus,
   });
 
   final List<_TvItem> allItems;
@@ -28,6 +48,7 @@ class _TvDiscoverySurface extends StatelessWidget {
   final VoidCallback onFocusNavigation;
   final FocusNode entryFocusNode;
   final VoidCallback onFocusHeader;
+  final ValueChanged<FocusNode> onRememberFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -54,6 +75,9 @@ class _TvDiscoverySurface extends StatelessWidget {
             : 'No ${kind.label.toLowerCase()} are available for $genre yet.',
         height: MediaQuery.sizeOf(context).height - 210,
         verticalOffset: -42,
+        focusNode: entryFocusNode,
+        onFocusNavigation: onFocusNavigation,
+        onFocusHeader: onFocusHeader,
       );
     }
 
@@ -67,6 +91,7 @@ class _TvDiscoverySurface extends StatelessWidget {
       onOpenItem: onOpenItem,
       onFocusNavigation: onFocusNavigation,
       onTopRowArrowUp: onFocusHeader,
+      onRememberFocus: onRememberFocus,
     );
   }
 
@@ -93,6 +118,7 @@ class _TvLibrarySurface extends StatelessWidget {
     required this.onFocusNavigation,
     required this.entryFocusNode,
     required this.onFocusHeader,
+    required this.onRememberFocus,
   });
 
   final List<_TvItem> recentItems;
@@ -102,6 +128,7 @@ class _TvLibrarySurface extends StatelessWidget {
   final VoidCallback onFocusNavigation;
   final FocusNode entryFocusNode;
   final VoidCallback onFocusHeader;
+  final ValueChanged<FocusNode> onRememberFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -113,6 +140,9 @@ class _TvLibrarySurface extends StatelessWidget {
         subtitle: _emptySubtitle,
         height: MediaQuery.sizeOf(context).height - 210,
         verticalOffset: 42,
+        focusNode: entryFocusNode,
+        onFocusNavigation: onFocusNavigation,
+        onFocusHeader: onFocusHeader,
       );
     }
 
@@ -126,6 +156,7 @@ class _TvLibrarySurface extends StatelessWidget {
       onOpenItem: onOpenItem,
       onFocusNavigation: onFocusNavigation,
       onTopRowArrowUp: onFocusHeader,
+      onRememberFocus: onRememberFocus,
     );
   }
 
@@ -187,63 +218,24 @@ class _TvLibrarySurface extends StatelessWidget {
   }
 }
 
-class _TvSurfaceIntro extends StatelessWidget {
-  const _TvSurfaceIntro({
-    required this.title,
-    required this.subtitle,
-  });
-
-  final String title;
-  final String subtitle;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 580,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: const Color(0x14FFFFFF),
-        borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: const Color(0x1FFFFFFF)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 22,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            subtitle,
-            style: const TextStyle(
-              color: Color(0xFFAAA6BD),
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _TvEmptyCatalogState extends StatelessWidget {
   const _TvEmptyCatalogState({
     required this.title,
     required this.subtitle,
     this.height,
     this.verticalOffset = 0,
+    this.focusNode,
+    this.onFocusNavigation,
+    this.onFocusHeader,
   });
 
   final String title;
   final String subtitle;
   final double? height;
   final double verticalOffset;
+  final FocusNode? focusNode;
+  final VoidCallback? onFocusNavigation;
+  final VoidCallback? onFocusHeader;
 
   @override
   Widget build(BuildContext context) {
@@ -281,11 +273,34 @@ class _TvEmptyCatalogState extends StatelessWidget {
         ),
       ),
     );
+    final focusableContent = focusNode == null
+        ? content
+        : _TvFocusable(
+            focusNode: focusNode,
+            onPressed: () {},
+            onArrowLeft: onFocusNavigation,
+            onArrowUp: onFocusHeader,
+            onArrowRight: () => focusNode!.requestFocus(),
+            onArrowDown: () => focusNode!.requestFocus(),
+            builder: (focused) {
+              return AnimatedContainer(
+                duration: _tvDuration(130),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(28),
+                  border: Border.all(
+                    color: focused ? _tvFocusBorder : Colors.transparent,
+                    width: 2,
+                  ),
+                ),
+                child: content,
+              );
+            },
+          );
     final targetHeight = height;
-    if (targetHeight == null) return content;
+    if (targetHeight == null) return focusableContent;
     return SizedBox(
       height: targetHeight < 300 ? 300 : targetHeight,
-      child: content,
+      child: focusableContent,
     );
   }
 }
@@ -359,11 +374,18 @@ class _TvSettingsSurface extends StatelessWidget {
     required this.seriesCount,
     required this.animationCount,
     required this.hasCatalog,
+    required this.accountSignedIn,
+    required this.accountLabel,
+    required this.accountSyncLabel,
     required this.settings,
     required this.onSettingsChanged,
+    required this.onAccountSignIn,
+    required this.onAccountSignOut,
+    required this.onAccountSync,
     required this.onFocusNavigation,
     required this.onRefresh,
     required this.entryFocusNode,
+    required this.onRememberFocus,
   });
 
   final int totalCount;
@@ -371,11 +393,18 @@ class _TvSettingsSurface extends StatelessWidget {
   final int seriesCount;
   final int animationCount;
   final bool hasCatalog;
+  final bool accountSignedIn;
+  final String accountLabel;
+  final String accountSyncLabel;
   final _TvSettingsState settings;
   final ValueChanged<_TvSettingsState> onSettingsChanged;
+  final VoidCallback onAccountSignIn;
+  final VoidCallback onAccountSignOut;
+  final VoidCallback onAccountSync;
   final VoidCallback onFocusNavigation;
   final VoidCallback onRefresh;
   final FocusNode entryFocusNode;
+  final ValueChanged<FocusNode> onRememberFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -396,7 +425,7 @@ class _TvSettingsSurface extends StatelessWidget {
         'Player defaults, captions, quality, and watch behavior.',
         Icons.play_circle_fill_rounded,
         [
-          _TvSettingsLine('Playback engine', 'Auto chooses the safest available TV playback path.'),
+          _TvSettingsLine('Playback engine', 'Auto chooses the safest available TV playback choice.'),
           _TvSettingsLine('Preferred quality', 'TV playback starts with a balanced quality target.'),
           _TvSettingsLine('Subtitles', 'Captions stay readable and can be refined in playback settings.'),
           _TvSettingsLine('Continue watching', 'Progress is kept for the current TV session.'),
@@ -405,13 +434,13 @@ class _TvSettingsSurface extends StatelessWidget {
       ),
       const _TvSettingsSection(
         'Add-ons',
-        'Catalog and playback manifests you choose to manage.',
+        'Catalog and playback add-ons you choose to manage.',
         Icons.extension_rounded,
         [
           _TvSettingsLine('Manage add-ons', 'TV add-on management is being prepared for remote-first controls.'),
-          _TvSettingsLine('Default source lanes', 'Catalog, subtitle, and playback capabilities stay separated.'),
+          _TvSettingsLine('Built-in tools', 'Browsing, subtitle, trailer, and playback controls stay separated.'),
           _TvSettingsLine('Import and export', 'Add-on transfer will stay user-controlled and redacted.'),
-          _TvSettingsLine('Safety', 'Only add manifests you trust; Juicr does not review third-party services.'),
+          _TvSettingsLine('Safety', 'Only add links you trust; Juicr does not review third-party services.'),
         ],
       ),
       const _TvSettingsSection(
@@ -423,6 +452,22 @@ class _TvSettingsSurface extends StatelessWidget {
           _TvSettingsLine('History tools', 'Session history can be reviewed without exposing private playback details.'),
           _TvSettingsLine('Playback tuning', 'Timing and recovery controls stay grouped away from everyday settings.'),
           _TvSettingsLine('Storage', 'TV storage tools will use safe counts and clear actions.'),
+        ],
+      ),
+      _TvSettingsSection(
+        'Account',
+        accountSignedIn ? '$accountLabel - $accountSyncLabel' : 'Sign in, sync status, and account data.',
+        Icons.account_circle_rounded,
+        [
+          _TvSettingsLine(
+            accountSignedIn ? 'Signed in' : 'Sign in to Juicr',
+            accountSignedIn
+                ? 'Library sync is available for this TV.'
+                : 'Use email sign-in when you want account features.',
+          ),
+          const _TvSettingsLine('Library sync', 'Saved titles and watch progress can follow your account.'),
+          _TvSettingsLine('Sync status', accountSyncLabel),
+          const _TvSettingsLine('Privacy', 'Your account session stays in secure TV storage.'),
         ],
       ),
       _TvSettingsSection(
@@ -447,6 +492,7 @@ class _TvSettingsSurface extends StatelessWidget {
       entryFocusNode: entryFocusNode,
       onFocusNavigation: onFocusNavigation,
       onOpenSection: (section) => _showTvSettingsSection(context, section),
+      onRememberFocus: onRememberFocus,
     );
   }
 
@@ -456,6 +502,12 @@ class _TvSettingsSurface extends StatelessWidget {
       builder: (dialogContext) => _TvSettingsSectionDialog(
         section: section,
         settings: settings,
+        accountSignedIn: accountSignedIn,
+        accountLabel: accountLabel,
+        accountSyncLabel: accountSyncLabel,
+        onAccountSignIn: onAccountSignIn,
+        onAccountSignOut: onAccountSignOut,
+        onAccountSync: onAccountSync,
         onSettingsChanged: onSettingsChanged,
       ),
     );
@@ -468,12 +520,14 @@ class _TvSettingsGrid extends StatefulWidget {
     required this.entryFocusNode,
     required this.onFocusNavigation,
     required this.onOpenSection,
+    required this.onRememberFocus,
   });
 
   final List<_TvSettingsSection> sections;
   final FocusNode entryFocusNode;
   final VoidCallback onFocusNavigation;
   final ValueChanged<_TvSettingsSection> onOpenSection;
+  final ValueChanged<FocusNode> onRememberFocus;
 
   @override
   State<_TvSettingsGrid> createState() => _TvSettingsGridState();
@@ -520,9 +574,27 @@ class _TvSettingsGridState extends State<_TvSettingsGrid> {
     return _nodes[index];
   }
 
-  void _focusIndex(int index) {
+  void _focusIndex(int index, {double alignment = 0.34}) {
     if (index < 0 || index >= widget.sections.length) return;
-    _nodeFor(index).requestFocus();
+    final node = _nodeFor(index);
+    widget.onRememberFocus(node);
+    node.requestFocus();
+    _revealIndex(index, alignment: alignment);
+  }
+
+  void _revealIndex(int index, {double alignment = 0.34}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final context = _nodeFor(index).context;
+      if (context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: _tvDuration(180),
+        curve: Curves.easeOutCubic,
+        alignment: alignment,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+      );
+    });
   }
 
   @override
@@ -540,12 +612,21 @@ class _TvSettingsGridState extends State<_TvSettingsGrid> {
                 section: widget.sections[index],
                 width: cardWidth,
                 focusNode: _nodeFor(index),
+                autoReveal: false,
+                onFocus: () {
+                  widget.onRememberFocus(_nodeFor(index));
+                  _revealIndex(index);
+                },
                 onArrowLeft: index % _columnCount == 0 ? widget.onFocusNavigation : () => _focusIndex(index - 1),
                 onArrowRight: index + 1 < widget.sections.length && index % _columnCount != _columnCount - 1
                     ? () => _focusIndex(index + 1)
                     : null,
-                onArrowUp: index - _columnCount >= 0 ? () => _focusIndex(index - _columnCount) : null,
-                onArrowDown: index + _columnCount < widget.sections.length ? () => _focusIndex(index + _columnCount) : null,
+                onArrowUp: index - _columnCount >= 0
+                    ? () => _focusIndex(index - _columnCount, alignment: 0.2)
+                    : null,
+                onArrowDown: index + _columnCount < widget.sections.length
+                    ? () => _focusIndex(index + _columnCount, alignment: 0.56)
+                    : null,
                 onPressed: () => widget.onOpenSection(widget.sections[index]),
               ),
           ],
@@ -560,7 +641,9 @@ class _TvSettingsHomeCard extends StatelessWidget {
     required this.section,
     required this.onPressed,
     required this.width,
+    this.autoReveal = true,
     this.focusNode,
+    this.onFocus,
     this.onArrowLeft,
     this.onArrowRight,
     this.onArrowUp,
@@ -570,7 +653,9 @@ class _TvSettingsHomeCard extends StatelessWidget {
   final _TvSettingsSection section;
   final VoidCallback onPressed;
   final double width;
+  final bool autoReveal;
   final FocusNode? focusNode;
+  final VoidCallback? onFocus;
   final VoidCallback? onArrowLeft;
   final VoidCallback? onArrowRight;
   final VoidCallback? onArrowUp;
@@ -582,12 +667,13 @@ class _TvSettingsHomeCard extends StatelessWidget {
       width: width,
       child: _TvFocusable(
         focusNode: focusNode,
-        autoReveal: true,
+        autoReveal: autoReveal,
         onPressed: onPressed,
         onArrowLeft: onArrowLeft,
         onArrowRight: onArrowRight,
         onArrowUp: onArrowUp,
         onArrowDown: onArrowDown,
+        onFocus: onFocus,
         builder: (focused) {
           return AnimatedContainer(
             duration: _tvDuration(140),
@@ -652,11 +738,23 @@ class _TvSettingsSectionDialog extends StatefulWidget {
   const _TvSettingsSectionDialog({
     required this.section,
     required this.settings,
+    required this.accountSignedIn,
+    required this.accountLabel,
+    required this.accountSyncLabel,
+    required this.onAccountSignIn,
+    required this.onAccountSignOut,
+    required this.onAccountSync,
     required this.onSettingsChanged,
   });
 
   final _TvSettingsSection section;
   final _TvSettingsState settings;
+  final bool accountSignedIn;
+  final String accountLabel;
+  final String accountSyncLabel;
+  final VoidCallback onAccountSignIn;
+  final VoidCallback onAccountSignOut;
+  final VoidCallback onAccountSync;
   final ValueChanged<_TvSettingsState> onSettingsChanged;
 
   @override
@@ -664,7 +762,29 @@ class _TvSettingsSectionDialog extends StatefulWidget {
 }
 
 class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
+  final FocusNode _firstActionFocusNode = FocusNode(debugLabel: 'tv-settings-dialog-first');
+
   late _TvSettingsState _current = widget.settings;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _firstActionFocusNode.requestFocus();
+      Future<void>.delayed(const Duration(milliseconds: 80), () {
+        if (mounted && FocusManager.instance.primaryFocus == null) {
+          _firstActionFocusNode.requestFocus();
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _firstActionFocusNode.dispose();
+    super.dispose();
+  }
 
   void _update(_TvSettingsState next) {
     setState(() => _current = next);
@@ -751,15 +871,15 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     if (current.defaultSourceConsentAccepted) return true;
     final accepted = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => _TvConsentDialog(
-        title: 'Enable built-in sources?',
+      builder: (dialogContext) => const _TvConsentDialog(
+        title: 'Enable built-in tools?',
         intro:
-            'Before Juicr turns these optional tools on, confirm each acknowledgement. Juicr provides the app tools; you choose what sources to enable and use.',
-        confirmLabel: 'Enable sources',
-        acknowledgements: const [
+            'Before Juicr turns these optional tools on, confirm each acknowledgement. Juicr provides the app tools; you choose what to enable and use.',
+        confirmLabel: 'Enable tools',
+        acknowledgements: [
           _TvConsentAcknowledgement(
             'Juicr does not provide media',
-            'Built-in sources are optional tools for catalog items, subtitles, trailers, and playback lookups.',
+            'Built-in browsing and playback tools are optional and remain under your control.',
           ),
           _TvConsentAcknowledgement(
             'Use only allowed content',
@@ -779,14 +899,14 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     if (current.addOnConsentAccepted) return true;
     final accepted = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => _TvConsentDialog(
+      builder: (dialogContext) => const _TvConsentDialog(
         title: 'Add third-party add-on?',
         intro:
-            'Add-ons are manifests you choose. Juicr does not review, control, or endorse third-party add-ons.',
+            'Add-ons are links you choose. Juicr does not review, control, or endorse third-party add-ons.',
         confirmLabel: 'I understand',
-        acknowledgements: const [
+        acknowledgements: [
           _TvConsentAcknowledgement(
-            'Only add sources you trust',
+            'Only add links you trust',
             'Add-ons may contact outside services, and those services may see network information such as your IP address.',
           ),
           _TvConsentAcknowledgement(
@@ -839,6 +959,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     ValueChanged<_TvSettingsState> update,
   ) async {
     if (!await _confirmAddOnConsent(context, current)) return;
+    if (!mounted) return;
+    if (!context.mounted) return;
     final consented = current.copyWith(addOnConsentAccepted: true);
     update(consented);
     final added = await showDialog<_TvUserAddOn>(
@@ -980,7 +1102,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         return [
           _TvSettingsAction(
             title: 'Add your own add-on',
-            subtitle: 'Add a manifest you trust. The saved settings only show safe labels here.',
+            subtitle: 'Add a link you trust. The saved settings only show safe labels here.',
             value: current.userAddOns.isEmpty ? 'None' : '${current.userAddOns.length} saved',
             icon: Icons.add_link_rounded,
             onPressed: () => unawaited(_addUserAddOn(context, current, update)),
@@ -989,7 +1111,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
             title: 'Default',
             subtitle: current.defaultSourceConsentAccepted
                 ? 'Manage optional Built-in catalog, subtitles, trailers, Live TV, and playback.'
-                : 'Review consent before showing optional Built-in source tools.',
+                : 'Review consent before showing optional built-in tools.',
             value: current.defaultSourceConsentAccepted ? 'Ready' : 'Consent',
             icon: Icons.inventory_2_outlined,
             onPressed: () => unawaited(_openDefaultSources(context, current, update)),
@@ -1109,34 +1231,66 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
             ),
           ),
         ];
+      case 'Account':
+        return [
+          _TvSettingsAction(
+            title: widget.accountSignedIn ? 'Signed in to Juicr' : 'Sign in to Juicr',
+            subtitle: widget.accountSignedIn
+                ? 'Saved titles and watch progress can sync with your account.'
+                : 'Use email sign-in when you want account features. Guest mode stays available.',
+            value: widget.accountSignedIn ? widget.accountLabel : 'Guest',
+            icon: widget.accountSignedIn ? Icons.account_circle_rounded : Icons.account_circle_outlined,
+            onPressed: widget.accountSignedIn ? widget.onAccountSync : widget.onAccountSignIn,
+          ),
+          _TvSettingsAction(
+            title: 'Library sync',
+            subtitle: widget.accountSignedIn
+                ? 'Pull and push saved titles, continue watching, and safe watch-time totals.'
+                : 'Library sync starts after sign-in.',
+            value: widget.accountSignedIn ? widget.accountSyncLabel : 'Sign in',
+            icon: Icons.sync_rounded,
+            onPressed: widget.accountSignedIn ? widget.onAccountSync : widget.onAccountSignIn,
+          ),
+          _TvSettingsAction(
+            title: widget.accountSignedIn ? 'Sign out' : 'Continue as guest',
+            subtitle: widget.accountSignedIn
+                ? 'Clear the account session from this TV. Local app settings stay on this device.'
+                : 'Use this TV without account sync.',
+            value: widget.accountSignedIn ? 'Ready' : 'Guest',
+            icon: widget.accountSignedIn ? Icons.logout_rounded : Icons.person_outline_rounded,
+            onPressed: widget.accountSignedIn
+                ? widget.onAccountSignOut
+                : () => Navigator.of(context).pop(),
+          ),
+        ];
       default:
         return [
           _TvSettingsAction(
-            title: 'API connection',
-            subtitle: 'Catalog, metadata, editorial, trailers, and guarded playback use Juicr API routes.',
+            title: 'Juicr connection',
+            subtitle: 'Catalog, metadata, editorial, trailers, and guarded playback use Juicr app services.',
             value: 'Connected',
             icon: Icons.cloud_done_rounded,
             onPressed: () => unawaited(
               _showStatusDialog(
                 context,
-                title: 'API connection',
+                title: 'Juicr connection',
                 message:
-                    'Catalog, metadata, editorial, trailers, and guarded playback checks use Juicr app routes. The TV never shows private request details here.',
+                    'Catalog, metadata, editorial, trailers, and guarded playback checks use Juicr app services. The TV never shows private request details here.',
                 icon: Icons.cloud_done_rounded,
               ),
             ),
           ),
           _TvSettingsAction(
-            title: 'Playback path',
+            title: 'Playback',
             subtitle: 'TV playback uses protected app routes and keeps private playback details hidden.',
             value: 'Guarded',
             icon: Icons.play_circle_fill_rounded,
             onPressed: () => unawaited(
               _showStatusDialog(
                 context,
-                title: 'Playback path',
+                title: 'Playback',
                 message:
-                    'Playback stays behind TV-safe app controls. Enable playback sources in Add-ons before starting titles.',
+                    'Playback stays behind TV-safe app controls. Enable playback in Settings before starting titles.',
                 icon: Icons.play_circle_fill_rounded,
               ),
             ),
@@ -1241,6 +1395,9 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                               child: _TvSettingsLineCard(
                                 action: actions[index],
                                 autofocus: index == 0,
+                                focusNode: index == 0 ? _firstActionFocusNode : null,
+                                onArrowUp: index == 0 ? _firstActionFocusNode.requestFocus : null,
+                                onArrowDown: index == actions.length - 1 ? _firstActionFocusNode.requestFocus : null,
                               ),
                             ),
                         ],
@@ -1261,17 +1418,26 @@ class _TvSettingsLineCard extends StatelessWidget {
   const _TvSettingsLineCard({
     required this.action,
     this.autofocus = false,
+    this.focusNode,
+    this.onArrowUp,
+    this.onArrowDown,
   });
 
   final _TvSettingsAction action;
   final bool autofocus;
+  final FocusNode? focusNode;
+  final VoidCallback? onArrowUp;
+  final VoidCallback? onArrowDown;
 
   @override
   Widget build(BuildContext context) {
     return _TvFocusable(
       autofocus: autofocus,
+      focusNode: focusNode,
       autoReveal: false,
       onPressed: action.onPressed,
+      onArrowUp: onArrowUp,
+      onArrowDown: onArrowDown,
       builder: (focused) {
         return AnimatedContainer(
           duration: _tvDuration(140),
@@ -1582,7 +1748,7 @@ class _TvConsentDialogState extends State<_TvConsentDialog> {
                 Expanded(
                   child: Text(
                     allAccepted
-                        ? 'Thanks. This source lane can be enabled now.'
+                        ? 'Thanks. These tools can be enabled now.'
                         : 'Check every acknowledgement to continue.',
                     style: TextStyle(
                       color: allAccepted ? _tvAccentColor : const Color(0xFFAAA6BD),
@@ -1755,7 +1921,7 @@ class _TvAddOnEntryDialogState extends State<_TvAddOnEntryDialog> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Enter a display name and manifest address for a source you trust.',
+              'Enter a display name and add-on link you trust.',
               style: TextStyle(
                 color: Color(0xFFAAA6BD),
                 fontSize: 14,
@@ -1774,7 +1940,7 @@ class _TvAddOnEntryDialogState extends State<_TvAddOnEntryDialog> {
             _TvDialogTextField(
               controller: _manifestController,
               icon: Icons.link_rounded,
-              hintText: 'https://example.com/manifest.json',
+              hintText: 'Add-on link',
               focusNode: _manifestFocusNode,
               onArrowUp: () => _nameFocusNode.requestFocus(),
               onArrowDown: () => _saveFocusNode.requestFocus(),
@@ -1799,6 +1965,216 @@ class _TvAddOnEntryDialogState extends State<_TvAddOnEntryDialog> {
                   onArrowLeft: () => _cancelFocusNode.requestFocus(),
                   onArrowUp: () => _manifestFocusNode.requestFocus(),
                   onPressed: _save,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TvAccountSignInResult {
+  const _TvAccountSignInResult({
+    required this.profile,
+    required this.session,
+  });
+
+  final TvAccountProfile profile;
+  final TvAccountSession session;
+}
+
+class _TvAccountSignInDialog extends StatefulWidget {
+  const _TvAccountSignInDialog({required this.api});
+
+  final _TvApi api;
+
+  @override
+  State<_TvAccountSignInDialog> createState() => _TvAccountSignInDialogState();
+}
+
+class _TvAccountSignInDialogState extends State<_TvAccountSignInDialog> {
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _codeController = TextEditingController();
+  final FocusNode _emailFocusNode = FocusNode(debugLabel: 'tv-account-email');
+  final FocusNode _codeFocusNode = FocusNode(debugLabel: 'tv-account-code');
+  final FocusNode _guestFocusNode = FocusNode(debugLabel: 'tv-account-guest');
+  final FocusNode _primaryFocusNode = FocusNode(debugLabel: 'tv-account-primary');
+  bool _codeSent = false;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _codeController.dispose();
+    _emailFocusNode.dispose();
+    _codeFocusNode.dispose();
+    _guestFocusNode.dispose();
+    _primaryFocusNode.dispose();
+    super.dispose();
+  }
+
+  Future<void> _sendCode() async {
+    final email = _emailController.text.trim();
+    if (_busy) return;
+    if (!isSupportedTvAccountEmail(email)) {
+      setState(() => _error = unsupportedTvAccountEmailMessage);
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.api.sendAuthCode(email);
+      if (!mounted) return;
+      setState(() => _codeSent = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _codeFocusNode.requestFocus();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _error = _friendlyAccountError(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _verifyCode() async {
+    final email = _emailController.text.trim();
+    final code = _codeController.text.trim();
+    if (_busy) return;
+    if (!isSupportedTvAccountEmail(email)) {
+      setState(() => _error = unsupportedTvAccountEmailMessage);
+      return;
+    }
+    if (code.length < 6) {
+      setState(() => _error = 'Enter the 6-digit sign-in code.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final result = await widget.api.verifyAuthCode(email: email, code: code);
+      if (!mounted) return;
+      Navigator.of(context).pop(
+        _TvAccountSignInResult(
+          profile: result.profile,
+          session: result.session,
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _error = _friendlyAccountError(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  String _friendlyAccountError(Object error) {
+    if (error is _TvApiException) {
+      final status = error.status.toLowerCase();
+      if (status.contains('rate') || status.contains('cooldown')) {
+        return 'Please wait a moment before trying again.';
+      }
+      if (status.contains('code') || status.contains('invalid')) {
+        return 'That sign-in code was not accepted.';
+      }
+    }
+    return 'Sign-in is unavailable right now. Try again shortly.';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final primaryLabel = _codeSent ? 'Verify code' : 'Send code';
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 150, vertical: 46),
+      child: Container(
+        width: 700,
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: const Color(0xF215151E),
+          borderRadius: BorderRadius.circular(28),
+          border: Border.all(color: const Color(0x22FFFFFF)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Sign in to Juicr',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 26,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Your email is used for sign-in and account recovery. Use a supported personal email provider.',
+              style: TextStyle(
+                color: Color(0xFFAAA6BD),
+                fontSize: 14,
+                height: 1.35,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 18),
+            _TvDialogTextField(
+              controller: _emailController,
+              icon: Icons.email_outlined,
+              hintText: 'Email',
+              focusNode: _emailFocusNode,
+              onArrowDown: () => _codeSent ? _codeFocusNode.requestFocus() : _primaryFocusNode.requestFocus(),
+            ),
+            if (_codeSent) ...[
+              const SizedBox(height: 12),
+              _TvDialogTextField(
+                controller: _codeController,
+                icon: Icons.password_rounded,
+                hintText: '6-digit code',
+                focusNode: _codeFocusNode,
+                onArrowUp: () => _emailFocusNode.requestFocus(),
+                onArrowDown: () => _primaryFocusNode.requestFocus(),
+              ),
+            ],
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _error!,
+                style: const TextStyle(
+                  color: Color(0xFFFF9A8B),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+            const SizedBox(height: 18),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                _TvTextButton(
+                  icon: Icons.person_outline_rounded,
+                  label: 'Continue as guest',
+                  focusNode: _guestFocusNode,
+                  onArrowRight: () => _primaryFocusNode.requestFocus(),
+                  onArrowUp: () => _codeSent ? _codeFocusNode.requestFocus() : _emailFocusNode.requestFocus(),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+                const SizedBox(width: 10),
+                _TvTextButton(
+                  icon: _busy ? Icons.hourglass_top_rounded : Icons.arrow_forward_rounded,
+                  label: _busy ? 'Please wait' : primaryLabel,
+                  enabled: !_busy,
+                  focusNode: _primaryFocusNode,
+                  onArrowLeft: () => _guestFocusNode.requestFocus(),
+                  onArrowUp: () => _codeSent ? _codeFocusNode.requestFocus() : _emailFocusNode.requestFocus(),
+                  onPressed: () => unawaited(_codeSent ? _verifyCode() : _sendCode()),
                 ),
               ],
             ),
@@ -1898,35 +2274,6 @@ class _TvEditableDialogFieldState extends State<_TvEditableDialogField> {
     setState(() => _editing = false);
     _shellFocusNode.requestFocus();
     SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
-  }
-
-  KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-      return KeyEventResult.ignored;
-    }
-    final key = event.logicalKey;
-    if (!_editing &&
-        (key == LogicalKeyboardKey.select ||
-            key == LogicalKeyboardKey.enter ||
-            key == LogicalKeyboardKey.space)) {
-      _beginEditing();
-      return KeyEventResult.handled;
-    }
-    if (_editing &&
-        (key == LogicalKeyboardKey.goBack ||
-            key == LogicalKeyboardKey.escape)) {
-      _endEditing();
-      return KeyEventResult.handled;
-    }
-    if (!_editing && key == LogicalKeyboardKey.arrowUp && widget.onArrowUp != null) {
-      widget.onArrowUp!();
-      return KeyEventResult.handled;
-    }
-    if (!_editing && key == LogicalKeyboardKey.arrowDown && widget.onArrowDown != null) {
-      widget.onArrowDown!();
-      return KeyEventResult.handled;
-    }
-    return _editing ? KeyEventResult.ignored : KeyEventResult.ignored;
   }
 
   @override
@@ -2030,6 +2377,7 @@ class _TvDetailsOverlay extends StatefulWidget {
     required this.onClose,
     required this.preparing,
     required this.liked,
+    required this.settings,
     required this.onPlay,
     required this.onPlayEpisode,
     required this.onToggleLike,
@@ -2039,6 +2387,7 @@ class _TvDetailsOverlay extends StatefulWidget {
   final VoidCallback onClose;
   final bool preparing;
   final bool liked;
+  final _TvSettingsState settings;
   final VoidCallback onPlay;
   final void Function(int season, int episode) onPlayEpisode;
   final VoidCallback onToggleLike;
@@ -2048,9 +2397,51 @@ class _TvDetailsOverlay extends StatefulWidget {
 }
 
 class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
+  final FocusNode _closeFocusNode = FocusNode(debugLabel: 'tv-details-close');
+  final FocusNode _primaryActionFocusNode = FocusNode(debugLabel: 'tv-details-primary');
+  final FocusNode _episodesFocusNode = FocusNode(debugLabel: 'tv-details-episodes');
+  final FocusNode _trailerFocusNode = FocusNode(debugLabel: 'tv-details-trailer');
+  final FocusNode _likeFocusNode = FocusNode(debugLabel: 'tv-details-like');
+
   bool get _isSeriesLike => widget.item.type == 'series' || widget.item.type == 'animation';
 
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final initialNode = widget.preparing ? _closeFocusNode : _primaryActionFocusNode;
+      initialNode.requestFocus();
+      Future<void>.delayed(const Duration(milliseconds: 80), () {
+        if (mounted && FocusManager.instance.primaryFocus == null) {
+          initialNode.requestFocus();
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _closeFocusNode.dispose();
+    _primaryActionFocusNode.dispose();
+    _episodesFocusNode.dispose();
+    _trailerFocusNode.dispose();
+    _likeFocusNode.dispose();
+    super.dispose();
+  }
+
   Future<void> _showTrailerPicker(BuildContext context) async {
+    if (!widget.settings.builtInTrailers) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Enable trailers in Settings before opening trailer choices.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      return;
+    }
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -2108,7 +2499,7 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
                       ),
                       const SizedBox(height: 8),
                       const Text(
-                        'Choose a trailer that is ready for TV playback.',
+                        'Choose a trailer to open on this TV.',
                         style: TextStyle(
                           color: Color(0xFFAAA6BD),
                           fontSize: 14,
@@ -2127,14 +2518,17 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
                                   child: SizedBox(
                                     width: double.infinity,
                                     child: _TvTextButton(
-                                      icon: trailers[index].isTvPlayable
+                                      icon: trailers[index].isTvPlayable ||
+                                              trailers[index].isExternalLaunchable
                                           ? Icons.movie_filter_rounded
                                           : Icons.lock_clock_rounded,
-                                      label: trailers[index].isTvPlayable
+                                      label: trailers[index].isTvPlayable ||
+                                              trailers[index].isExternalLaunchable
                                           ? trailers[index].title
                                           : '${trailers[index].title} unavailable',
                                       autofocus: index == 0,
-                                      enabled: trailers[index].isTvPlayable,
+                                      enabled: trailers[index].isTvPlayable ||
+                                          trailers[index].isExternalLaunchable,
                                       onPressed: () {
                                         Navigator.of(dialogContext).pop();
                                         unawaited(_openTrailer(context, trailers[index]));
@@ -2164,27 +2558,28 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
       ..showSnackBar(
         const SnackBar(content: Text('Preparing trailer...'), duration: Duration(seconds: 1)),
       );
-    VideoPlayerController? controller;
     try {
+      if (trailer.isExternalLaunchable) {
+        final opened = await _openTvExternalTrailer(trailer);
+        if (!context.mounted) return;
+        if (!opened) {
+          messenger
+            ..hideCurrentSnackBar()
+            ..showSnackBar(
+              const SnackBar(content: Text('No TV app can open this trailer yet.')),
+            );
+        }
+        return;
+      }
       final session = _PlaybackSession(
         mediaUrl: trailer.url,
         sourceType: trailer.sourceType,
         httpHeaders: _TvApi.juicrMediaHeaders,
       );
-      controller = VideoPlayerController.networkUrl(
-        Uri.parse(session.tvMediaUrl),
-        formatHint: session.videoFormatHint,
-        httpHeaders: session.httpHeaders,
-      );
-      await controller.initialize().timeout(const Duration(seconds: 22));
-      await controller.play();
-      if (!context.mounted) {
-        await controller.dispose();
-        return;
-      }
+      if (!context.mounted) return;
       final trailerItem = _TvItem(
         id: '${widget.item.id}:trailer',
-        type: 'movie',
+        type: widget.item.type,
         title: '${widget.item.title} trailer',
         color: widget.item.color,
         poster: widget.item.poster,
@@ -2194,19 +2589,18 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
         MaterialPageRoute<void>(
           builder: (_) => _TvPlaybackPage(
             item: trailerItem,
-            controller: controller!,
             sessions: [session],
             initialSessionIndex: 0,
             initialSeason: 1,
             initialEpisode: 1,
-            settings: const _TvSettingsState(),
+            initialResumePosition: Duration.zero,
+            settings: widget.settings,
             subtitles: const <_TvSubtitle>[],
             initialSubtitleIndex: -1,
           ),
         ),
       );
     } catch (error) {
-      await controller?.dispose();
       if (!context.mounted) return;
       messenger
         ..hideCurrentSnackBar()
@@ -2218,7 +2612,7 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
 
   Future<void> _showEpisodePicker(BuildContext context) async {
     final allEpisodes = widget.item.episodes.isNotEmpty
-        ? widget.item.episodes.take(12).toList()
+        ? widget.item.episodes.toList()
         : List<_TvEpisode>.generate(
             8,
             (index) => _TvEpisode(
@@ -2343,32 +2737,53 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
   }
 
   List<Widget> _detailActions(BuildContext context) {
+    final afterPrimary = _isSeriesLike ? _episodesFocusNode : _trailerFocusNode;
+    final beforeTrailer = _isSeriesLike ? _episodesFocusNode : _primaryActionFocusNode;
     return [
       _TvTextButton(
         icon: widget.preparing ? Icons.hourglass_top_rounded : Icons.play_arrow_rounded,
         label: widget.preparing ? 'Preparing' : 'Watch now',
         autofocus: true,
+        focusNode: _primaryActionFocusNode,
         enabled: !widget.preparing,
         animateIcon: widget.preparing,
+        onArrowRight: afterPrimary.requestFocus,
+        onArrowUp: _closeFocusNode.requestFocus,
+        onArrowDown: _primaryActionFocusNode.requestFocus,
         onPressed: widget.onPlay,
       ),
       if (_isSeriesLike)
         _TvTextButton(
+          focusNode: _episodesFocusNode,
           icon: Icons.format_list_numbered_rounded,
           label: 'Episodes',
           enabled: !widget.preparing,
+          onArrowLeft: _primaryActionFocusNode.requestFocus,
+          onArrowRight: _trailerFocusNode.requestFocus,
+          onArrowUp: _closeFocusNode.requestFocus,
+          onArrowDown: _episodesFocusNode.requestFocus,
           onPressed: () => _showEpisodePicker(context),
         ),
       _TvTextButton(
+        focusNode: _trailerFocusNode,
         icon: Icons.movie_filter_rounded,
         label: 'Trailer',
         enabled: !widget.preparing,
+        onArrowLeft: beforeTrailer.requestFocus,
+        onArrowRight: _likeFocusNode.requestFocus,
+        onArrowUp: _closeFocusNode.requestFocus,
+        onArrowDown: _trailerFocusNode.requestFocus,
         onPressed: () => unawaited(_showTrailerPicker(context)),
       ),
       _TvCircleIconButton(
+        focusNode: _likeFocusNode,
         icon: widget.liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
         selected: widget.liked,
         size: 48,
+        onArrowLeft: _trailerFocusNode.requestFocus,
+        onArrowRight: _likeFocusNode.requestFocus,
+        onArrowUp: _closeFocusNode.requestFocus,
+        onArrowDown: _likeFocusNode.requestFocus,
         onPressed: widget.onToggleLike,
       ),
     ];
@@ -2413,8 +2828,15 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
                           top: 0,
                           right: 0,
                           child: _TvCircleIconButton(
+                            focusNode: _closeFocusNode,
                             icon: Icons.close_rounded,
                             size: 48,
+                            onArrowLeft: _likeFocusNode.requestFocus,
+                            onArrowRight: _closeFocusNode.requestFocus,
+                            onArrowUp: _closeFocusNode.requestFocus,
+                            onArrowDown: widget.preparing
+                                ? _closeFocusNode.requestFocus
+                                : _primaryActionFocusNode.requestFocus,
                             onPressed: widget.onClose,
                           ),
                         ),
@@ -2500,7 +2922,6 @@ class _TvCircleIconButton extends StatelessWidget {
   const _TvCircleIconButton({
     required this.icon,
     required this.onPressed,
-    this.autofocus = false,
     this.selected = false,
     this.size = 48,
     this.focusNode,
@@ -2512,7 +2933,6 @@ class _TvCircleIconButton extends StatelessWidget {
 
   final IconData icon;
   final VoidCallback onPressed;
-  final bool autofocus;
   final bool selected;
   final double size;
   final FocusNode? focusNode;
@@ -2524,7 +2944,6 @@ class _TvCircleIconButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _TvFocusable(
-      autofocus: autofocus,
       focusNode: focusNode,
       onPressed: onPressed,
       onArrowLeft: onArrowLeft,
@@ -2751,7 +3170,7 @@ class _TvSearchOverlay extends StatefulWidget {
 }
 
 class _TvSearchOverlayState extends State<_TvSearchOverlay> {
-  static const _voiceChannel = MethodChannel('app.juicr.tv/voice_search');
+  static const _voiceChannel = MethodChannel('app.juicr.flutter/voice_search');
 
   final TextEditingController _controller = TextEditingController();
   final FocusNode _searchBarFocusNode = FocusNode(debugLabel: 'tv-search-bar');

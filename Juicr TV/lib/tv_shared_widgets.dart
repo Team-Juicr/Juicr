@@ -225,14 +225,25 @@ class _TvPosterArtworkFallback extends StatelessWidget {
 }
 
 class _CircleArrowButton extends StatelessWidget {
-  const _CircleArrowButton({required this.onPressed});
+  const _CircleArrowButton({
+    required this.onPressed,
+    this.focusNode,
+    this.onArrowLeft,
+    this.onArrowDown,
+  });
 
   final VoidCallback onPressed;
+  final FocusNode? focusNode;
+  final VoidCallback? onArrowLeft;
+  final VoidCallback? onArrowDown;
 
   @override
   Widget build(BuildContext context) {
     return _TvFocusable(
+      focusNode: focusNode,
       onPressed: onPressed,
+      onArrowLeft: onArrowLeft,
+      onArrowDown: onArrowDown,
       builder: (focused) {
         return AnimatedContainer(
           duration: _tvDuration(130),
@@ -326,13 +337,12 @@ class _TvTextButton extends StatelessWidget {
     this.autofocus = false,
     this.enabled = true,
     this.animateIcon = false,
-    this.autoReveal = false,
     this.focusNode,
+    this.onFocus,
     this.onArrowLeft,
     this.onArrowRight,
     this.onArrowUp,
     this.onArrowDown,
-    this.onFocus,
   });
 
   final IconData icon;
@@ -341,21 +351,20 @@ class _TvTextButton extends StatelessWidget {
   final bool autofocus;
   final bool enabled;
   final bool animateIcon;
-  final bool autoReveal;
   final FocusNode? focusNode;
+  final VoidCallback? onFocus;
   final VoidCallback? onArrowLeft;
   final VoidCallback? onArrowRight;
   final VoidCallback? onArrowUp;
   final VoidCallback? onArrowDown;
-  final VoidCallback? onFocus;
 
   @override
   Widget build(BuildContext context) {
     return _TvFocusable(
       autofocus: autofocus,
       enabled: enabled,
-      autoReveal: autoReveal,
       focusNode: focusNode,
+      onFocus: onFocus,
       onPressed: onPressed,
       onArrowLeft: onArrowLeft,
       onArrowRight: onArrowRight,
@@ -491,86 +500,91 @@ class _TvFocusable extends StatefulWidget {
 class _TvFocusableState extends State<_TvFocusable> {
   bool _focused = false;
 
+  bool _activateForKey(LogicalKeyboardKey key) {
+    return key == LogicalKeyboardKey.select ||
+        key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter ||
+        key == LogicalKeyboardKey.space ||
+        key == LogicalKeyboardKey.gameButtonA;
+  }
+
+  KeyEventResult _handleKey(KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    if (_activateForKey(key)) {
+      if (!widget.enabled) return KeyEventResult.handled;
+      widget.onPressed();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft && widget.onArrowLeft != null) {
+      if (widget.enabled) widget.onArrowLeft!();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight && widget.onArrowRight != null) {
+      if (widget.enabled) widget.onArrowRight!();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp && widget.onArrowUp != null) {
+      if (widget.enabled) widget.onArrowUp!();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown && widget.onArrowDown != null) {
+      if (widget.enabled) widget.onArrowDown!();
+      return KeyEventResult.handled;
+    }
+    if (!widget.enabled) return KeyEventResult.handled;
+    final direction = switch (key) {
+      LogicalKeyboardKey.arrowLeft => TraversalDirection.left,
+      LogicalKeyboardKey.arrowRight => TraversalDirection.right,
+      LogicalKeyboardKey.arrowUp => TraversalDirection.up,
+      LogicalKeyboardKey.arrowDown => TraversalDirection.down,
+      _ => null,
+    };
+    if (direction != null) {
+      final moved = FocusScope.of(context).focusInDirection(direction);
+      return moved ? KeyEventResult.handled : KeyEventResult.ignored;
+    }
+    return KeyEventResult.ignored;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final shortcuts = <ShortcutActivator, Intent>{
-      const SingleActivator(LogicalKeyboardKey.select): const ActivateIntent(),
-      const SingleActivator(LogicalKeyboardKey.enter): const ActivateIntent(),
-      const SingleActivator(LogicalKeyboardKey.space): const ActivateIntent(),
-    };
-    if (widget.onArrowLeft != null) {
-      shortcuts[const SingleActivator(LogicalKeyboardKey.arrowLeft)] = const _TvLeftBoundaryIntent();
+    void activate() {
+      if (!widget.enabled) return;
+      widget.onPressed();
     }
-    if (widget.onArrowRight != null) {
-      shortcuts[const SingleActivator(LogicalKeyboardKey.arrowRight)] = const _TvRightBoundaryIntent();
-    }
-    if (widget.onArrowUp != null) {
-      shortcuts[const SingleActivator(LogicalKeyboardKey.arrowUp)] = const _TvUpBoundaryIntent();
-    }
-    if (widget.onArrowDown != null) {
-      shortcuts[const SingleActivator(LogicalKeyboardKey.arrowDown)] = const _TvDownBoundaryIntent();
-    }
-    return FocusableActionDetector(
-      focusNode: widget.focusNode,
-      autofocus: widget.autofocus && widget.enabled,
-      enabled: widget.enabled,
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            if (!widget.enabled) return null;
-            widget.onPressed();
-            return null;
-          },
+
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.select): activate,
+        const SingleActivator(LogicalKeyboardKey.enter): activate,
+        const SingleActivator(LogicalKeyboardKey.numpadEnter): activate,
+        const SingleActivator(LogicalKeyboardKey.space): activate,
+        const SingleActivator(LogicalKeyboardKey.gameButtonA): activate,
+      },
+      child: Focus(
+        focusNode: widget.focusNode,
+        autofocus: widget.autofocus && widget.enabled,
+        canRequestFocus: widget.enabled,
+        descendantsAreFocusable: false,
+        onKeyEvent: (_, event) => _handleKey(event),
+        onFocusChange: (focused) {
+          setState(() => _focused = focused);
+          if (focused) widget.onFocus?.call();
+          if (!focused || !widget.autoReveal) return;
+          Scrollable.ensureVisible(
+            context,
+            duration: _tvDuration(180),
+            curve: Curves.easeOutCubic,
+            alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+          );
+        },
+        child: GestureDetector(
+          onTap: widget.enabled ? widget.onPressed : null,
+          child: widget.builder(widget.enabled && _focused),
         ),
-        if (widget.onArrowLeft != null)
-          _TvLeftBoundaryIntent: CallbackAction<_TvLeftBoundaryIntent>(
-            onInvoke: (_) {
-              if (!widget.enabled) return null;
-              widget.onArrowLeft!();
-              return null;
-            },
-          ),
-        if (widget.onArrowRight != null)
-          _TvRightBoundaryIntent: CallbackAction<_TvRightBoundaryIntent>(
-            onInvoke: (_) {
-              if (!widget.enabled) return null;
-              widget.onArrowRight!();
-              return null;
-            },
-          ),
-        if (widget.onArrowUp != null)
-          _TvUpBoundaryIntent: CallbackAction<_TvUpBoundaryIntent>(
-            onInvoke: (_) {
-              if (!widget.enabled) return null;
-              widget.onArrowUp!();
-              return null;
-            },
-          ),
-        if (widget.onArrowDown != null)
-          _TvDownBoundaryIntent: CallbackAction<_TvDownBoundaryIntent>(
-            onInvoke: (_) {
-              if (!widget.enabled) return null;
-              widget.onArrowDown!();
-              return null;
-            },
-          ),
-      },
-      shortcuts: shortcuts.isEmpty ? null : shortcuts,
-      onShowFocusHighlight: (focused) => setState(() => _focused = focused),
-      onFocusChange: (focused) {
-        setState(() => _focused = focused);
-        if (focused) widget.onFocus?.call();
-        if (!focused || !widget.autoReveal) return;
-        Scrollable.ensureVisible(
-          context,
-          duration: _tvDuration(180),
-          curve: Curves.easeOutCubic,
-          alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
-        );
-      },
-      child: GestureDetector(
-        onTap: widget.enabled ? widget.onPressed : null,
-        child: widget.builder(widget.enabled && _focused),
       ),
     );
   }
@@ -675,32 +689,6 @@ class _Pill extends StatelessWidget {
   }
 }
 
-class _JuicrMark extends StatelessWidget {
-  const _JuicrMark();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 54,
-      height: 54,
-      decoration: BoxDecoration(
-        color: const Color(0xFFE7DFFF),
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: const Center(
-        child: Text(
-          'J',
-          style: TextStyle(
-            color: Colors.black,
-            fontSize: 24,
-            fontWeight: FontWeight.w900,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _TvBackdrop extends StatelessWidget {
   const _TvBackdrop({required this.settings});
 
@@ -727,7 +715,7 @@ class _TvBackdrop extends StatelessWidget {
                 ],
         ),
       ),
-      child: SizedBox.expand(),
+      child: const SizedBox.expand(),
     );
   }
 }
