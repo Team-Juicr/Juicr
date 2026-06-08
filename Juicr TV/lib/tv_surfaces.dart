@@ -4150,11 +4150,10 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
 
   final TextEditingController _controller = TextEditingController();
   final FocusNode _searchBarFocusNode = FocusNode(debugLabel: 'tv-search-bar');
-  final FocusNode _searchTextFocusNode = FocusNode(
-    debugLabel: 'tv-search-text',
-  );
+  late final FocusNode _searchTextFocusNode;
   final FocusNode _voiceFocusNode = FocusNode(debugLabel: 'tv-search-voice');
   final FocusNode _closeFocusNode = FocusNode(debugLabel: 'tv-search-close');
+  final FocusNode _clearFocusNode = FocusNode(debugLabel: 'tv-search-clear');
   final FocusNode _resultsFocusNode = FocusNode(
     debugLabel: 'tv-search-results-first',
   );
@@ -4165,6 +4164,11 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
   @override
   void initState() {
     super.initState();
+    HardwareKeyboard.instance.addHandler(_handleSearchTextHardwareKey);
+    _searchTextFocusNode = FocusNode(
+      debugLabel: 'tv-search-text',
+      onKeyEvent: _handleSearchTextFocusKey,
+    );
     _searchTextFocusNode
       ..canRequestFocus = false
       ..skipTraversal = true;
@@ -4179,13 +4183,65 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleSearchTextHardwareKey);
     _searchBarFocusNode.dispose();
     _searchTextFocusNode.dispose();
     _voiceFocusNode.dispose();
     _closeFocusNode.dispose();
+    _clearFocusNode.dispose();
     _resultsFocusNode.dispose();
     _controller.dispose();
     super.dispose();
+  }
+
+  bool _handleSearchTextHardwareKey(KeyEvent event) {
+    if (!_editingText || (event is! KeyDownEvent && event is! KeyRepeatEvent)) {
+      return false;
+    }
+    return switch (event.logicalKey) {
+      LogicalKeyboardKey.arrowUp => _handleSearchTextEscape(_focusVoice),
+      LogicalKeyboardKey.arrowDown => _handleSearchTextEscape(
+        _focusSearchResults,
+      ),
+      LogicalKeyboardKey.arrowLeft => _handleSearchTextEscape(_focusSearchBar),
+      LogicalKeyboardKey.arrowRight => _handleSearchTextEscape(
+        _focusClearOrClose,
+      ),
+      LogicalKeyboardKey.escape ||
+      LogicalKeyboardKey.goBack => _handleSearchTextEscape(_focusSearchBar),
+      _ => false,
+    };
+  }
+
+  KeyEventResult _handleSearchTextFocusKey(FocusNode node, KeyEvent event) {
+    if (!_editingText || (event is! KeyDownEvent && event is! KeyRepeatEvent)) {
+      return KeyEventResult.ignored;
+    }
+    return switch (event.logicalKey) {
+      LogicalKeyboardKey.arrowUp => _handleSearchTextFocusEscape(_focusVoice),
+      LogicalKeyboardKey.arrowDown => _handleSearchTextFocusEscape(
+        _focusSearchResults,
+      ),
+      LogicalKeyboardKey.arrowLeft => _handleSearchTextFocusEscape(
+        _focusSearchBar,
+      ),
+      LogicalKeyboardKey.arrowRight => _handleSearchTextFocusEscape(
+        _focusClearOrClose,
+      ),
+      LogicalKeyboardKey.escape || LogicalKeyboardKey.goBack =>
+        _handleSearchTextFocusEscape(_focusSearchBar),
+      _ => KeyEventResult.ignored,
+    };
+  }
+
+  bool _handleSearchTextEscape(VoidCallback action) {
+    action();
+    return true;
+  }
+
+  KeyEventResult _handleSearchTextFocusEscape(VoidCallback action) {
+    action();
+    return KeyEventResult.handled;
   }
 
   List<_TvItem> get _results {
@@ -4243,11 +4299,10 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
 
   void _beginTextEntry() {
     _searchTextFocusNode
-      ..canRequestFocus = true
-      ..skipTraversal = false;
+      ..canRequestFocus = false
+      ..skipTraversal = true;
     setState(() => _editingText = true);
-    _searchTextFocusNode.requestFocus();
-    SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+    _searchBarFocusNode.requestFocus();
   }
 
   void _endTextEntry() {
@@ -4260,12 +4315,58 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
     SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
   }
 
+  void _appendSearchCharacter(String value) {
+    if (value.isEmpty) return;
+    final printable = value.characters.where((character) {
+      final runes = character.runes;
+      if (runes.isEmpty) return false;
+      final unit = runes.first;
+      return unit >= 0x20 && unit != 0x7f;
+    }).join();
+    if (printable.isEmpty) return;
+    _controller.text = '${_controller.text}$printable';
+    _controller.selection = TextSelection.collapsed(
+      offset: _controller.text.length,
+    );
+  }
+
+  void _deleteSearchCharacter() {
+    final text = _controller.text;
+    if (text.isEmpty) return;
+    final characters = text.characters.toList();
+    characters.removeLast();
+    _controller.text = characters.join();
+    _controller.selection = TextSelection.collapsed(
+      offset: _controller.text.length,
+    );
+  }
+
   void _focusSearchBar() {
     _endTextEntry();
     _searchBarFocusNode.requestFocus();
   }
 
+  void _focusVoice() {
+    _endTextEntry();
+    _voiceFocusNode.requestFocus();
+  }
+
+  void _focusClose() {
+    _endTextEntry();
+    _closeFocusNode.requestFocus();
+  }
+
+  void _focusClearOrClose() {
+    _endTextEntry();
+    if (_query.isNotEmpty) {
+      _clearFocusNode.requestFocus();
+    } else {
+      _closeFocusNode.requestFocus();
+    }
+  }
+
   void _focusSearchResults() {
+    _endTextEntry();
     if (_results.isEmpty) return;
     _resultsFocusNode.requestFocus();
   }
@@ -4276,19 +4377,41 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
     }
     final key = event.logicalKey;
     if (!_editingText &&
-        (key == LogicalKeyboardKey.select ||
-            key == LogicalKeyboardKey.enter ||
-            key == LogicalKeyboardKey.space)) {
+        (key == LogicalKeyboardKey.select || key == LogicalKeyboardKey.enter)) {
       _beginTextEntry();
       return KeyEventResult.handled;
     }
-    if (_editingText &&
-        (key == LogicalKeyboardKey.goBack ||
-            key == LogicalKeyboardKey.escape)) {
-      _endTextEntry();
-      return KeyEventResult.handled;
-    }
     if (_editingText) {
+      if (key == LogicalKeyboardKey.escape ||
+          key == LogicalKeyboardKey.goBack) {
+        _endTextEntry();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.backspace) {
+        _deleteSearchCharacter();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowDown) {
+        _focusSearchResults();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowUp) {
+        _focusVoice();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowLeft) {
+        _focusSearchBar();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowRight) {
+        _focusClearOrClose();
+        return KeyEventResult.handled;
+      }
+      final character = event.character;
+      if (character != null && character.isNotEmpty) {
+        _appendSearchCharacter(character);
+        return KeyEventResult.handled;
+      }
       return KeyEventResult.ignored;
     }
     if (key == LogicalKeyboardKey.arrowDown) {
@@ -4297,6 +4420,10 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
     }
     if (key == LogicalKeyboardKey.arrowUp) {
       _voiceFocusNode.requestFocus();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      _focusClearOrClose();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -4328,6 +4455,8 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
                           icon: Icons.close_rounded,
                           onPressed: widget.onClose,
                           focusNode: _closeFocusNode,
+                          onArrowUp: _focusClose,
+                          onArrowRight: _focusClose,
                           onArrowLeft: () => _voiceFocusNode.requestFocus(),
                           onArrowDown: _focusSearchBar,
                         ),
@@ -4357,6 +4486,8 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
                                   enabled: !_listening,
                                   animateIcon: _listening,
                                   focusNode: _voiceFocusNode,
+                                  onArrowLeft: _focusSearchBar,
+                                  onArrowUp: _focusVoice,
                                   onArrowRight: () =>
                                       _closeFocusNode.requestFocus(),
                                   onArrowDown: _focusSearchBar,
@@ -4366,84 +4497,138 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
                             ),
                           ),
                           const SizedBox(height: 18),
-                          Focus(
-                            focusNode: _searchBarFocusNode,
-                            autofocus: true,
-                            onKeyEvent: _handleSearchFieldKey,
-                            canRequestFocus: !_editingText,
-                            skipTraversal: _editingText,
-                            child: Builder(
-                              builder: (context) {
-                                final focused =
-                                    _searchBarFocusNode.hasFocus ||
-                                    _searchTextFocusNode.hasFocus;
-                                return GestureDetector(
-                                  onTap: _beginTextEntry,
-                                  child: AnimatedContainer(
-                                    duration: _tvDuration(130),
-                                    height: 54,
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 20,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: focused || _editingText
-                                          ? const Color(0x2FFFFFFF)
-                                          : const Color(0x24FFFFFF),
-                                      borderRadius: BorderRadius.circular(999),
-                                      border: Border.all(
-                                        color: focused || _editingText
-                                            ? _tvFocusBorder
-                                            : const Color(0x22FFFFFF),
-                                        width: focused || _editingText ? 2 : 1,
-                                      ),
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        const Icon(
-                                          Icons.search_rounded,
-                                          color: Color(0xFFBDB9D5),
-                                          size: 26,
-                                        ),
-                                        const SizedBox(width: 14),
-                                        Expanded(
-                                          child: TextField(
-                                            controller: _controller,
-                                            focusNode: _searchTextFocusNode,
-                                            onTapOutside: (_) =>
-                                                _endTextEntry(),
-                                            readOnly: !_editingText,
-                                            autofocus: false,
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 17,
-                                              fontWeight: FontWeight.w800,
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Focus(
+                                  focusNode: _searchBarFocusNode,
+                                  autofocus: true,
+                                  onKeyEvent: _handleSearchFieldKey,
+                                  canRequestFocus: true,
+                                  child: Builder(
+                                    builder: (context) {
+                                      final focused =
+                                          _searchBarFocusNode.hasFocus ||
+                                          _searchTextFocusNode.hasFocus ||
+                                          _editingText;
+                                      return GestureDetector(
+                                        onTap: _beginTextEntry,
+                                        child: AnimatedContainer(
+                                          duration: _tvDuration(130),
+                                          height: 54,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 20,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: focused || _editingText
+                                                ? const Color(0x2FFFFFFF)
+                                                : const Color(0x24FFFFFF),
+                                            borderRadius: BorderRadius.circular(
+                                              999,
                                             ),
-                                            decoration: InputDecoration(
-                                              border: InputBorder.none,
-                                              hintText: _editingText
-                                                  ? 'Type your search...'
-                                                  : 'Search titles, channels, animation',
-                                              hintStyle: const TextStyle(
-                                                color: Color(0xFFAAA6BD),
-                                                fontWeight: FontWeight.w700,
+                                            border: Border.all(
+                                              color: focused || _editingText
+                                                  ? _tvFocusBorder
+                                                  : const Color(0x22FFFFFF),
+                                              width: focused || _editingText
+                                                  ? 2
+                                                  : 1,
+                                            ),
+                                          ),
+                                          child: Row(
+                                            children: [
+                                              const Icon(
+                                                Icons.search_rounded,
+                                                color: Color(0xFFBDB9D5),
+                                                size: 26,
                                               ),
-                                            ),
-                                            onEditingComplete: _endTextEntry,
-                                            onSubmitted: (_) => _endTextEntry(),
+                                              const SizedBox(width: 14),
+                                              Expanded(
+                                                child: CallbackShortcuts(
+                                                  bindings: {
+                                                    const SingleActivator(
+                                                      LogicalKeyboardKey
+                                                          .arrowUp,
+                                                    ): _focusVoice,
+                                                    const SingleActivator(
+                                                      LogicalKeyboardKey
+                                                          .arrowDown,
+                                                    ): _focusSearchResults,
+                                                    const SingleActivator(
+                                                      LogicalKeyboardKey
+                                                          .arrowLeft,
+                                                    ): _focusSearchBar,
+                                                    const SingleActivator(
+                                                      LogicalKeyboardKey
+                                                          .arrowRight,
+                                                    ): _focusClearOrClose,
+                                                    const SingleActivator(
+                                                      LogicalKeyboardKey.escape,
+                                                    ): _focusSearchBar,
+                                                    const SingleActivator(
+                                                      LogicalKeyboardKey.goBack,
+                                                    ): _focusSearchBar,
+                                                  },
+                                                  child: TextField(
+                                                    controller: _controller,
+                                                    focusNode:
+                                                        _searchTextFocusNode,
+                                                    onTapOutside: (_) =>
+                                                        _endTextEntry(),
+                                                    readOnly: !_editingText,
+                                                    autofocus: false,
+                                                    style: const TextStyle(
+                                                      color: Colors.white,
+                                                      fontSize: 17,
+                                                      fontWeight:
+                                                          FontWeight.w800,
+                                                    ),
+                                                    decoration: InputDecoration(
+                                                      border: InputBorder.none,
+                                                      hintText: _editingText
+                                                          ? 'Type your search...'
+                                                          : 'Search titles, channels, animation',
+                                                      hintStyle:
+                                                          const TextStyle(
+                                                            color: Color(
+                                                              0xFFAAA6BD,
+                                                            ),
+                                                            fontWeight:
+                                                                FontWeight.w700,
+                                                          ),
+                                                    ),
+                                                    onEditingComplete:
+                                                        _endTextEntry,
+                                                    onSubmitted: (_) =>
+                                                        _endTextEntry(),
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
                                           ),
                                         ),
-                                        if (_query.isNotEmpty)
-                                          _TvTextButton(
-                                            icon: Icons.clear_rounded,
-                                            label: 'Clear',
-                                            onPressed: _controller.clear,
-                                          ),
-                                      ],
-                                    ),
+                                      );
+                                    },
                                   ),
-                                );
-                              },
-                            ),
+                                ),
+                              ),
+                              if (_query.isNotEmpty) ...[
+                                const SizedBox(width: 12),
+                                _TvTextButton(
+                                  icon: Icons.clear_rounded,
+                                  label: 'Clear',
+                                  focusNode: _clearFocusNode,
+                                  onArrowLeft: _focusSearchBar,
+                                  onArrowRight: _focusClose,
+                                  onArrowUp: _focusVoice,
+                                  onArrowDown: _focusSearchResults,
+                                  onPressed: () {
+                                    _controller.clear();
+                                    _focusSearchBar();
+                                  },
+                                ),
+                              ],
+                            ],
                           ),
                           const SizedBox(height: 24),
                           Expanded(
