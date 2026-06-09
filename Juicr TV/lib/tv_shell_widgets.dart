@@ -801,7 +801,7 @@ class _TvNavigationRailState extends State<_TvNavigationRail> {
                 onPressed: () => widget.onSelected(index),
               ),
             ),
-          const Spacer(flex: 2),
+          const Spacer(),
         ],
       ),
     );

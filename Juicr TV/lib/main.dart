@@ -276,6 +276,13 @@ class _TvHomePageState extends State<TvHomePage> {
     );
   }
 
+  void _focusNavigationAfterFrame() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _navigationRailKey.currentState?.focusSelected();
+    });
+  }
+
   Future<void> _loadCatalog() async {
     if (!_tvSettings.hasCatalogSource) {
       setState(() {
@@ -297,6 +304,7 @@ class _TvHomePageState extends State<TvHomePage> {
         _todaySignalRemoteItems = const <_TvItem>[];
         _juicrTopSignalRemoteItems = const <_TvItem>[];
       });
+      _focusNavigationAfterFrame();
       return;
     }
     setState(() {
@@ -877,6 +885,7 @@ class _TvHomePageState extends State<TvHomePage> {
       unawaited(_loadCatalog());
     } else {
       setState(() => _loading = false);
+      _focusNavigationAfterFrame();
     }
   }
 
