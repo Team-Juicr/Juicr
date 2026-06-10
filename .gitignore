@@ -10,6 +10,7 @@ Thumbs.db
 *.trace
 Diagnostics/
 logs/
+Scripts/
 
 # Flutter and Dart generated files
 .dart_tool/
