@@ -23,7 +23,7 @@ jobs:
   build-release:
     name: Build Android and TV release APKs
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
