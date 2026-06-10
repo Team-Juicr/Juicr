@@ -62,3 +62,17 @@
 -keep class com.google.android.gms.common.** { *; }
 -dontwarn com.google.android.gms.ads.**
 -dontwarn com.google.android.gms.common.**
+
+# AndroidX Startup initializes WorkManager before Flutter/Dart can recover.
+# WorkManager's internal database is Room-generated and release R8 can otherwise
+# strip or rename pieces that are reflectively constructed at provider startup.
+-keep class androidx.startup.** { *; }
+-keep class androidx.work.** { *; }
+-keep class androidx.work.impl.** { *; }
+-keep class androidx.room.** { *; }
+-keep class * extends androidx.room.RoomDatabase { *; }
+-keep @androidx.room.Database class * { *; }
+-keep @androidx.room.Dao class * { *; }
+-keep @androidx.room.Entity class * { *; }
+-dontwarn androidx.work.**
+-dontwarn androidx.room.**

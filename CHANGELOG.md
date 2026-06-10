@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Android release APKs no longer force close during startup when release minification initializes background app services.
 - Release publishing no longer stops at mobile-only artifacts when the current public release also expects TV downloads.
 - Manual workflow runs can rebuild the current release from the checked-out repository instead of relying on local release assets.
 - The release rebuild no longer risks timing out while producing both Android and TV assets.
