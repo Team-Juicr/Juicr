@@ -4,6 +4,17 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+def hasReleaseSigningConfig =
+    keystoreProperties["storeFile"] &&
+    keystoreProperties["storePassword"] &&
+    keystoreProperties["keyAlias"] &&
+    keystoreProperties["keyPassword"]
+
 android {
     namespace = "app.juicr.flutter"
     compileSdk = flutter.compileSdkVersion
@@ -26,9 +37,20 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        release {
+            if (hasReleaseSigningConfig) {
+                keyAlias = keystoreProperties["keyAlias"]
+                keyPassword = keystoreProperties["keyPassword"]
+                storeFile = file(keystoreProperties["storeFile"])
+                storePassword = keystoreProperties["storePassword"]
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig = signingConfigs.debug
+            signingConfig = hasReleaseSigningConfig ? signingConfigs.release : signingConfigs.debug
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }

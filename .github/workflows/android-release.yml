@@ -21,12 +21,9 @@ permissions:
 
 jobs:
   build-release:
-    name: Build Android release APKs
+    name: Build Android and TV release APKs
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    defaults:
-      run:
-        working-directory: Juicr Android
 
     steps:
       - name: Checkout
@@ -81,29 +78,56 @@ jobs:
             fi
           done
 
-          mkdir -p android/app
-          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 -d > android/app/release-keystore.jks
-          cat > android/key.properties <<EOF
-          storeFile=release-keystore.jks
-          storePassword=$RELEASE_STORE_PASSWORD
-          keyAlias=$RELEASE_KEY_ALIAS
-          keyPassword=$RELEASE_KEY_PASSWORD
-          EOF
+          prepare_lane() {
+            local lane="$1"
+            mkdir -p "$lane/android/app"
+            printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$lane/android/app/release-keystore.jks"
+            {
+              echo "storeFile=release-keystore.jks"
+              echo "storePassword=$RELEASE_STORE_PASSWORD"
+              echo "keyAlias=$RELEASE_KEY_ALIAS"
+              echo "keyPassword=$RELEASE_KEY_PASSWORD"
+            } > "$lane/android/key.properties"
+          }
 
-      - name: Install dependencies
+          prepare_lane "Juicr Android"
+          prepare_lane "Juicr TV"
+
+      - name: Install Android dependencies
+        working-directory: Juicr Android
         run: flutter pub get
 
-      - name: Build universal APK
+      - name: Install TV dependencies
+        working-directory: Juicr TV
+        run: flutter pub get
+
+      - name: Build Android universal APK
+        working-directory: Juicr Android
         env:
           JUICR_BLOCK_UNTRUSTED_APP: "false"
           JUICR_RELEASE_BLOCK_UNTRUSTED_APP: "false"
         run: flutter build apk --release
 
-      - name: Build ABI APKs
+      - name: Build Android ABI APKs
+        working-directory: Juicr Android
         env:
           JUICR_BLOCK_UNTRUSTED_APP: "false"
           JUICR_RELEASE_BLOCK_UNTRUSTED_APP: "false"
         run: flutter build apk --release --split-per-abi --obfuscate --split-debug-info=build/symbols/juicr
+
+      - name: Build TV universal APK
+        working-directory: Juicr TV
+        env:
+          JUICR_BLOCK_UNTRUSTED_APP: "false"
+          JUICR_RELEASE_BLOCK_UNTRUSTED_APP: "false"
+        run: flutter build apk --release
+
+      - name: Build TV ABI APKs
+        working-directory: Juicr TV
+        env:
+          JUICR_BLOCK_UNTRUSTED_APP: "false"
+          JUICR_RELEASE_BLOCK_UNTRUSTED_APP: "false"
+        run: flutter build apk --release --split-per-abi --obfuscate --split-debug-info=build/symbols/juicr-tv
 
       - name: Collect release APKs
         shell: bash
@@ -112,10 +136,19 @@ jobs:
           assets="$GITHUB_WORKSPACE/release-assets/$tag"
           mkdir -p "$assets"
 
-          cp build/app/outputs/flutter-apk/app-release.apk "$assets/juicr-${tag}-universal.apk"
-          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "$assets/juicr-${tag}-armeabi-v7a.apk"
-          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "$assets/juicr-${tag}-arm64-v8a.apk"
-          cp build/app/outputs/flutter-apk/app-x86_64-release.apk "$assets/juicr-${tag}-x86_64.apk"
+          collect_lane() {
+            local lane_path="$1"
+            local asset_prefix="$2"
+            local outputs="$GITHUB_WORKSPACE/$lane_path/build/app/outputs/flutter-apk"
+
+            cp "$outputs/app-release.apk" "$assets/${asset_prefix}-${tag}-universal.apk"
+            cp "$outputs/app-armeabi-v7a-release.apk" "$assets/${asset_prefix}-${tag}-armeabi-v7a.apk"
+            cp "$outputs/app-arm64-v8a-release.apk" "$assets/${asset_prefix}-${tag}-arm64-v8a.apk"
+            cp "$outputs/app-x86_64-release.apk" "$assets/${asset_prefix}-${tag}-x86_64.apk"
+          }
+
+          collect_lane "Juicr Android" "juicr-android"
+          collect_lane "Juicr TV" "juicr-tv"
 
           ls -lh "$assets"
 
@@ -210,7 +243,7 @@ jobs:
       - name: Upload APK workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: juicr-${{ steps.release.outputs.tag }}-release-apks
+          name: juicr-${{ steps.release.outputs.tag }}-android-tv-release-apks
           path: release-assets/${{ steps.release.outputs.tag }}/*.apk
 
       - name: Publish GitHub release
@@ -228,8 +261,12 @@ jobs:
           fi
 
           gh release upload "$TAG" \
-            "release-assets/$TAG/juicr-${TAG}-universal.apk" \
-            "release-assets/$TAG/juicr-${TAG}-armeabi-v7a.apk" \
-            "release-assets/$TAG/juicr-${TAG}-arm64-v8a.apk" \
-            "release-assets/$TAG/juicr-${TAG}-x86_64.apk" \
+            "release-assets/$TAG/juicr-android-${TAG}-universal.apk" \
+            "release-assets/$TAG/juicr-android-${TAG}-armeabi-v7a.apk" \
+            "release-assets/$TAG/juicr-android-${TAG}-arm64-v8a.apk" \
+            "release-assets/$TAG/juicr-android-${TAG}-x86_64.apk" \
+            "release-assets/$TAG/juicr-tv-${TAG}-universal.apk" \
+            "release-assets/$TAG/juicr-tv-${TAG}-armeabi-v7a.apk" \
+            "release-assets/$TAG/juicr-tv-${TAG}-arm64-v8a.apk" \
+            "release-assets/$TAG/juicr-tv-${TAG}-x86_64.apk" \
             --clobber
