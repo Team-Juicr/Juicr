@@ -73,31 +73,39 @@
 
 <table>
   <tr>
-    <td width="33%" align="center" valign="top">
+    <td width="25%" align="center" valign="top">
+      <img src="assets/screenshots/juicr.png" alt="Juicr app screen" width="100%">
+      <p><strong>Juicr</strong><br>Browse, save, organize, and play.</p>
+    </td>
+    <td width="25%" align="center" valign="top">
       <img src="assets/screenshots/home.png" alt="Juicr Home screen" width="100%">
       <p><strong>Home</strong><br>Curated shelves and quick paths.</p>
     </td>
-    <td width="33%" align="center" valign="top">
+    <td width="25%" align="center" valign="top">
       <img src="assets/screenshots/discovery.png" alt="Juicr Discovery screen" width="100%">
       <p><strong>Discovery</strong><br>Search, browse, and filter.</p>
     </td>
-    <td width="33%" align="center" valign="top">
+    <td width="25%" align="center" valign="top">
       <img src="assets/screenshots/library.png" alt="Juicr Library screen" width="100%">
       <p><strong>Library</strong><br>Lists, history, and saved titles.</p>
     </td>
   </tr>
   <tr>
-    <td width="33%" align="center" valign="top">
+    <td width="25%" align="center" valign="top">
       <img src="assets/screenshots/details.png" alt="Juicr Details screen" width="100%">
       <p><strong>Details</strong><br>Artwork and playback choices.</p>
     </td>
-    <td width="33%" align="center" valign="top">
+    <td width="25%" align="center" valign="top">
+      <img src="assets/screenshots/metrics.png" alt="Juicr Metrics screen" width="100%">
+      <p><strong>Metrics</strong><br>Safe support signals.</p>
+    </td>
+    <td width="25%" align="center" valign="top">
       <img src="assets/screenshots/add-ons.png" alt="Juicr Add-ons screen" width="100%">
       <p><strong>Add-ons</strong><br>Optional capabilities users choose to enable.</p>
     </td>
-    <td width="33%" align="center" valign="top">
-      <img src="assets/screenshots/metrics.png" alt="Juicr Metrics screen" width="100%">
-      <p><strong>Metrics</strong><br>Safe support signals.</p>
+    <td width="25%" align="center" valign="top">
+      <img src="assets/screenshots/login.png" alt="Juicr Login screen" width="100%">
+      <p><strong>Login</strong><br>Account access for sync features.</p>
     </td>
   </tr>
 </table>
