@@ -43,7 +43,7 @@ class _PosterCard extends StatelessWidget {
       onArrowDown: onArrowDown,
       onFocus: onFocus,
       builder: (focused) {
-        final contentWidth = width - 16;
+        final contentWidth = width;
         final rating = item.imdbRating?.trim();
         return SizedBox(
           width: width,
@@ -117,7 +117,10 @@ class _ImdbPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      padding: const EdgeInsets.symmetric(
+        horizontal: _tvSpacing,
+        vertical: _tvSpacing,
+      ),
       decoration: BoxDecoration(
         color: const Color(0xA611131A),
         borderRadius: BorderRadius.circular(999),
@@ -144,7 +147,7 @@ class _ImdbPill extends StatelessWidget {
               height: 1,
             ),
           ),
-          const SizedBox(width: 4),
+          const SizedBox(width: _tvSpacing),
           Text(
             label,
             maxLines: 1,
@@ -378,7 +381,7 @@ class _TvTextButton extends StatelessWidget {
         return AnimatedContainer(
           duration: _tvDuration(130),
           constraints: const BoxConstraints(minHeight: 48),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: _tvSpacing, vertical: _tvSpacing),
           decoration: BoxDecoration(
             color: active ? _tvAccentColor : const Color(0x1FFFFFFF),
             borderRadius: BorderRadius.circular(999),
@@ -423,7 +426,7 @@ class _TvTextButton extends StatelessWidget {
                               : const Color(0xFFAAA6BD),
                           size: 22,
                         ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: _tvSpacing),
                   if (constraints.hasBoundedWidth)
                     Flexible(child: labelText)
                   else
@@ -607,7 +610,7 @@ class _TvLoadingState extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             CircularProgressIndicator(),
-            SizedBox(height: 18),
+            SizedBox(height: _tvSpacing),
             Text(
               'Loading Juicr catalog...',
               style: TextStyle(
@@ -643,7 +646,7 @@ class _TvErrorState extends StatelessWidget {
               fontWeight: FontWeight.w800,
             ),
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: _tvSpacing),
           _TvTextButton(
             icon: Icons.refresh_rounded,
             label: 'Try again',
@@ -663,7 +666,7 @@ class _Pill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+      padding: const EdgeInsets.symmetric(horizontal: _tvSpacing, vertical: _tvSpacing),
       decoration: BoxDecoration(
         color: const Color(0xA611131A),
         borderRadius: BorderRadius.circular(999),

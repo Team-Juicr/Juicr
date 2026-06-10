@@ -7,6 +7,7 @@ void main() {
     expect(tvPlaybackRequestKindForItemType('series'), TvPlaybackRequestKind.tv);
     expect(tvPlaybackRequestKindForItemType('animation'), TvPlaybackRequestKind.tv);
     expect(tvPlaybackRequestKindForItemType('live'), TvPlaybackRequestKind.live);
+    expect(tvPlaybackRequestKindForItemType('live_tv'), TvPlaybackRequestKind.live);
     expect(tvPlaybackRequestKindForItemType('livetv'), TvPlaybackRequestKind.live);
     expect(tvPlaybackRequestKindForItemType('channel'), TvPlaybackRequestKind.live);
   });

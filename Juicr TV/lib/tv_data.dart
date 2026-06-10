@@ -27,6 +27,7 @@ class _TvApi {
     String search = '',
     bool deepSearch = false,
     bool preferDefaultCatalog = false,
+    String? fallbackType,
   }) async {
     final safePage = page < 1 ? 1 : page;
     final uri = Uri.parse('$_apiBase/catalog').replace(
@@ -50,7 +51,7 @@ class _TvApi {
         .map(
           (raw) => _TvItem.fromJson(
             Map<String, dynamic>.from(raw),
-            fallbackType: type,
+            fallbackType: fallbackType ?? type,
           ),
         )
         .where((item) => item.id.isNotEmpty && item.title.isNotEmpty)
@@ -101,6 +102,38 @@ class _TvApi {
         fallbackType: item.type,
       ),
     );
+  }
+
+  Future<List<_TvItem>> recommendations(_TvItem item) async {
+    if (item.type == 'live') return const <_TvItem>[];
+    final uri = Uri.parse('$_apiBase/recommendations').replace(
+      queryParameters: {
+        'type': item.type == 'animation' ? 'movie' : item.type,
+        'id': item.id,
+      },
+    );
+    try {
+      final json = await _getJson(uri).timeout(const Duration(seconds: 10));
+      final rawItems = json['items'] ?? json['metas'];
+      if (rawItems is! List) return const <_TvItem>[];
+      return rawItems
+          .whereType<Map>()
+          .map(
+            (raw) => _TvItem.fromJson(
+              Map<String, dynamic>.from(raw),
+              fallbackType: item.type == 'animation' ? 'movie' : item.type,
+            ),
+          )
+          .where((candidate) => candidate.id.isNotEmpty && candidate.poster != null)
+          .take(12)
+          .toList(growable: false);
+    } catch (error) {
+      debugPrint(
+        'Juicr TV recommendations unavailable '
+        'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+      );
+      return const <_TvItem>[];
+    }
   }
 
   Future<List<_TvTrailer>> trailers(_TvItem item) async {
@@ -394,6 +427,20 @@ class _TvApi {
     }, bearerToken: cleanToken).timeout(const Duration(seconds: 8));
   }
 
+  Future<_TvLeaderboardResult> fetchLeaderboard({
+    required String scope,
+    required String token,
+  }) async {
+    final uri = Uri.parse(
+      '$_apiBase/leaderboard',
+    ).replace(queryParameters: {'scope': scope.trim().isEmpty ? 'weekly' : scope.trim()});
+    final json = await _getJson(
+      uri,
+      bearerToken: token.trim().isEmpty ? null : token.trim(),
+    ).timeout(const Duration(seconds: 8));
+    return _TvLeaderboardResult.fromJson(json);
+  }
+
   Future<_TvAccountLibrarySnapshotResult?> fetchAccountLibrarySnapshot(
     String token,
   ) async {
@@ -498,6 +545,9 @@ class _TvItem {
     this.genres = const [],
     this.description,
     this.imdbRating,
+    this.runtime,
+    this.directorPeople = const [],
+    this.castPeople = const [],
     this.episodes = const [],
   });
 
@@ -510,7 +560,7 @@ class _TvItem {
     final genres = _stringList(json['genres']);
     return _TvItem(
       id: id,
-      type: _normalizeType((json['type'] ?? fallbackType).toString()),
+      type: _normalizeItemType(json['type'], fallbackType),
       title: title,
       color: _colorFromText(id.isEmpty ? title : id),
       poster: _image(
@@ -533,6 +583,9 @@ class _TvItem {
       genres: genres,
       description: (json['description'] ?? json['overview'])?.toString(),
       imdbRating: (json['imdbRating'] ?? json['rating'])?.toString(),
+      runtime: (json['runtime'] ?? json['runtimeLabel'])?.toString(),
+      directorPeople: _TvPersonCredit.fromList(json['director']),
+      castPeople: _TvPersonCredit.fromList(json['cast']),
       episodes: _TvEpisode.fromList(json['videos'] ?? json['episodes']),
     );
   }
@@ -548,12 +601,16 @@ class _TvItem {
   final List<String> genres;
   final String? description;
   final String? imdbRating;
+  final String? runtime;
+  final List<_TvPersonCredit> directorPeople;
+  final List<_TvPersonCredit> castPeople;
   final List<_TvEpisode> episodes;
 
   String get subtitle {
     final parts = [
       if (year != null && year!.isNotEmpty) year!,
       if (imdbRating != null && imdbRating!.isNotEmpty) 'IMDb $imdbRating',
+      if (runtime != null && runtime!.isNotEmpty) runtime!,
       ...genres.take(2),
     ];
     return parts.join(' - ');
@@ -572,6 +629,11 @@ class _TvItem {
       genres: other.genres.isNotEmpty ? other.genres : genres,
       description: other.description ?? description,
       imdbRating: other.imdbRating ?? imdbRating,
+      runtime: other.runtime ?? runtime,
+      directorPeople: other.directorPeople.isNotEmpty
+          ? other.directorPeople
+          : directorPeople,
+      castPeople: other.castPeople.isNotEmpty ? other.castPeople : castPeople,
       episodes: other.episodes.isNotEmpty ? other.episodes : episodes,
     );
   }
@@ -589,8 +651,36 @@ class _TvItem {
       genres: genres,
       description: description,
       imdbRating: imdbRating,
+      runtime: runtime,
+      directorPeople: directorPeople,
+      castPeople: castPeople,
       episodes: episodes,
     );
+  }
+}
+
+class _TvPersonCredit {
+  const _TvPersonCredit({required this.name, this.image});
+
+  factory _TvPersonCredit.fromJson(dynamic value) {
+    if (value is Map) {
+      return _TvPersonCredit(
+        name: (value['name'] ?? '').toString().trim(),
+        image: _image(value['image'] ?? value['profile'] ?? value['profileUrl']),
+      );
+    }
+    return _TvPersonCredit(name: value.toString().trim());
+  }
+
+  final String name;
+  final String? image;
+
+  static List<_TvPersonCredit> fromList(dynamic value) {
+    if (value is! List) return const <_TvPersonCredit>[];
+    return value
+        .map(_TvPersonCredit.fromJson)
+        .where((person) => person.name.isNotEmpty)
+        .toList(growable: false);
   }
 }
 
@@ -1521,10 +1611,102 @@ String _normalizeType(String value) {
   if (normalized == 'animation') return 'animation';
   if (normalized == 'live' ||
       normalized == 'livetv' ||
+      normalized == 'live_tv' ||
       normalized == 'channel') {
     return 'live';
   }
   return 'movie';
+}
+
+class _TvLeaderboardResult {
+  const _TvLeaderboardResult({
+    required this.scope,
+    required this.rows,
+    required this.viewer,
+  });
+
+  factory _TvLeaderboardResult.fromJson(Map<String, dynamic> json) {
+    final rawRows = json['rows'];
+    return _TvLeaderboardResult(
+      scope: (json['scope'] ?? '').toString().trim(),
+      rows: rawRows is List
+          ? rawRows
+                .whereType<Map>()
+                .map(
+                  (row) => _TvLeaderboardEntry.fromJson(
+                    Map<String, dynamic>.from(row),
+                  ),
+                )
+                .toList(growable: false)
+          : const <_TvLeaderboardEntry>[],
+      viewer: _TvLeaderboardViewer.fromJson(json['viewer']),
+    );
+  }
+
+  final String scope;
+  final List<_TvLeaderboardEntry> rows;
+  final _TvLeaderboardViewer viewer;
+}
+
+class _TvLeaderboardEntry {
+  const _TvLeaderboardEntry({
+    required this.rank,
+    required this.username,
+    required this.emoji,
+    required this.activeWatchSeconds,
+  });
+
+  factory _TvLeaderboardEntry.fromJson(Map<String, dynamic> json) {
+    return _TvLeaderboardEntry(
+      rank: _intFromJson(json['rank']) ?? 0,
+      username: (json['username'] ?? '').toString().trim(),
+      emoji: (json['emoji'] ?? '').toString().trim(),
+      activeWatchSeconds: _intFromJson(json['activeWatchSeconds']) ?? 0,
+    );
+  }
+
+  final int rank;
+  final String username;
+  final String emoji;
+  final int activeWatchSeconds;
+}
+
+class _TvLeaderboardViewer {
+  const _TvLeaderboardViewer({
+    this.rank,
+    required this.percentile,
+    required this.activeWatchSeconds,
+    required this.optedIn,
+  });
+
+  factory _TvLeaderboardViewer.fromJson(dynamic value) {
+    final json = value is Map<String, dynamic>
+        ? value
+        : value is Map
+        ? Map<String, dynamic>.from(value)
+        : const <String, dynamic>{};
+    final rank = _intFromJson(json['rank']);
+    return _TvLeaderboardViewer(
+      rank: rank != null && rank > 0 ? rank : null,
+      percentile: (_intFromJson(json['percentile']) ?? 0).clamp(0, 100).toInt(),
+      activeWatchSeconds: _intFromJson(json['activeWatchSeconds']) ?? 0,
+      optedIn: json['optedIn'] == true,
+    );
+  }
+
+  final int? rank;
+  final int percentile;
+  final int activeWatchSeconds;
+  final bool optedIn;
+}
+
+String _normalizeItemType(dynamic rawType, String fallbackType) {
+  final fallback = _normalizeType(fallbackType);
+  final raw = rawType?.toString().trim();
+  if (raw == null || raw.isEmpty) return fallback;
+  final normalized = _normalizeType(raw);
+  if (normalized == 'animation' && fallback == 'movie') return 'movie';
+  return normalized;
 }
 
 String? _image(dynamic value) {

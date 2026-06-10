@@ -15,6 +15,7 @@ TvPlaybackRequestKind tvPlaybackRequestKindForItemType(String itemType) {
     case 'animation':
       return TvPlaybackRequestKind.tv;
     case 'live':
+    case 'live_tv':
     case 'livetv':
     case 'channel':
     case 'channels':

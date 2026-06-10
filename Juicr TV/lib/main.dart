@@ -27,6 +27,9 @@ const _apiBase = 'https://api.juicr.app';
 const _tvSettingsPrefsKey = 'juicr_tv_settings_v1';
 const _juicrGreen = Color(0xFF20D66B);
 const double _tvSpacing = 12;
+const double _tvNavItemGap = 4;
+const double _tvPosterGridGap = 6;
+const double _tvHomeRailGap = 8;
 Color _tvAccentColor = _juicrGreen;
 double _tvTextScale = 1.0;
 bool _tvMotionEnabled = true;
@@ -60,10 +63,13 @@ Duration _tvDuration(int milliseconds) {
 
 enum _TvLibraryFilter {
   continueWatching('Continue', 'Recently opened titles', Icons.history_rounded),
+  lists('Lists', 'Custom watchlists', Icons.bookmarks_outlined),
   movies('Movies', 'Liked movies', Icons.movie_rounded),
   series('Series', 'Liked series', Icons.tv_rounded),
   animation('Animation', 'Liked animation', Icons.auto_awesome_rounded),
-  liveTv('Live TV', 'Liked live channels', Icons.live_tv_rounded);
+  liveTv('Live TV', 'Liked live channels', Icons.live_tv_rounded),
+  metrics('Metrics', 'Watching signals', Icons.insights_rounded),
+  ranking('Ranking', 'Watch time leaderboard', Icons.emoji_events_outlined);
 
   const _TvLibraryFilter(this.label, this.subtitle, this.icon);
 
@@ -112,7 +118,7 @@ class JuicrTvApp extends StatelessWidget {
             borderRadius: BorderRadius.circular(18),
             side: const BorderSide(color: Color(0x22FFFFFF)),
           ),
-          insetPadding: const EdgeInsets.only(bottom: 34),
+          insetPadding: const EdgeInsets.only(bottom: _tvSpacing),
         ),
         useMaterial3: true,
       ),
@@ -146,6 +152,7 @@ class _TvCatalogLaneRequest {
     required this.sort,
     required this.type,
     required this.catalogSort,
+    this.fallbackType,
     this.pages = 3,
   });
 
@@ -153,6 +160,7 @@ class _TvCatalogLaneRequest {
   final _TvDiscoverySort sort;
   final String type;
   final String catalogSort;
+  final String? fallbackType;
   final int pages;
 }
 
@@ -377,12 +385,14 @@ class _TvHomePageState extends State<TvHomePage> {
           kind: _TvDiscoveryKind.animation,
           sort: _TvDiscoverySort.popular,
           type: 'animation',
+          fallbackType: 'movie',
           catalogSort: _TvDiscoverySort.popular.catalogSortId,
         ),
         _TvCatalogLaneRequest(
           kind: _TvDiscoveryKind.animation,
           sort: _TvDiscoverySort.onTv,
           type: 'animation',
+          fallbackType: 'series',
           catalogSort: _TvDiscoverySort.onTv.catalogSortId,
         ),
         _TvCatalogLaneRequest(
@@ -432,6 +442,7 @@ class _TvHomePageState extends State<TvHomePage> {
         for (final request in catalogRequests)
           _safeCatalog(
             type: request.type,
+            fallbackType: request.fallbackType,
             sort: request.catalogSort,
             pages: request.pages,
           ),
@@ -535,6 +546,7 @@ class _TvHomePageState extends State<TvHomePage> {
   Future<List<_TvItem>> _safeCatalog({
     required String type,
     required String sort,
+    String? fallbackType,
     int pages = 1,
   }) async {
     final merged = <String, _TvItem>{};
@@ -542,7 +554,12 @@ class _TvHomePageState extends State<TvHomePage> {
     for (var page = 1; page <= safePages; page += 1) {
       try {
         final items = await _api
-            .catalog(type: type, sort: sort, page: page)
+            .catalog(
+              type: type,
+              fallbackType: fallbackType,
+              sort: sort,
+              page: page,
+            )
             .timeout(const Duration(seconds: 6));
         if (items.isEmpty) break;
         for (final item in items) {
@@ -577,6 +594,10 @@ class _TvHomePageState extends State<TvHomePage> {
       _TvDiscoveryKind.animation => 'animation',
       _TvDiscoveryKind.liveTv => 'live_tv',
     };
+    final fallbackType = _fallbackTypeForDiscovery(
+      _discoveryKind,
+      _discoverySort,
+    );
     var nextPage = (_discoveryLanePages[laneKey] ?? 0) + 1;
     _discoveryLaneLoading.add(laneKey);
     try {
@@ -591,6 +612,7 @@ class _TvHomePageState extends State<TvHomePage> {
         final items = await _api
             .catalog(
               type: type,
+              fallbackType: fallbackType,
               sort: _discoverySort.catalogSortId,
               page: nextPage,
               genre: _discoveryGenre,
@@ -811,8 +833,21 @@ class _TvHomePageState extends State<TvHomePage> {
 
   _TvItem _normalizeCatalogLane(_TvItem item) {
     if (_isLiveTvItem(item)) return item.withType('live');
-    if (_isAnimationOrAnimationItem(item)) return item.withType('animation');
+    if (item.type == 'series' && _hasAnimationSignal(item)) {
+      return item.withType('animation');
+    }
     return item;
+  }
+
+  String? _fallbackTypeForDiscovery(
+    _TvDiscoveryKind kind,
+    _TvDiscoverySort sort,
+  ) {
+    if (kind == _TvDiscoveryKind.animation) {
+      return sort == _TvDiscoverySort.onTv ? 'series' : 'movie';
+    }
+    if (kind == _TvDiscoveryKind.liveTv) return 'live';
+    return null;
   }
 
   bool _isAnimationOrAnimationItem(_TvItem item) {
@@ -840,6 +875,7 @@ class _TvHomePageState extends State<TvHomePage> {
 
   bool _isLiveTvItem(_TvItem item) {
     if (item.type == 'live' ||
+        item.type == 'live_tv' ||
         item.type == 'livetv' ||
         item.type == 'channel') {
       return true;
@@ -1163,8 +1199,10 @@ class _TvHomePageState extends State<TvHomePage> {
   int get _completedLibraryCount =>
       _libraryStore?.state.completedKeys.length ?? 0;
 
+  int get _activeWatchSeconds => _libraryStore?.state.activeWatchSeconds ?? 0;
+
   String get _activeWatchLabel {
-    final seconds = _libraryStore?.state.activeWatchSeconds ?? 0;
+    final seconds = _activeWatchSeconds;
     if (seconds <= 0) return '0m';
     final minutes = (seconds / 60).round();
     if (minutes < 60) return '${minutes}m';
@@ -1932,19 +1970,28 @@ class _TvHomePageState extends State<TvHomePage> {
 
   Future<void> _openItem(_TvItem item) async {
     _rememberItem(item);
-    setState(() {
-      _selectedItem = item;
-      _searchOpen = false;
-    });
-    try {
-      final detailed = await _api
-          .meta(item)
-          .timeout(const Duration(seconds: 10));
-      if (!mounted || _selectedItem?.id != item.id) return;
-      setState(() => _selectedItem = detailed);
-    } catch (_) {
-      // Keep the catalog card details visible if metadata is unavailable.
-    }
+    if (_searchOpen) setState(() => _searchOpen = false);
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _TvDetailsPage(
+          item: item,
+          settings: _tvSettings,
+          liked: _isItemLiked(item),
+          libraryLists: _libraryStore?.state.libraryLists ?? const [],
+          onPlay: (detailsItem) => _play(detailsItem),
+          onPlayEpisode: (detailsItem, season, episode) =>
+              _play(detailsItem, season: season, episode: episode),
+          onOpenItem: _openItem,
+          onToggleSaved: _toggleLike,
+          onCreateList: _createLibraryListForItem,
+          onToggleList: _toggleItemInLibraryList,
+          isItemSaved: _isItemLiked,
+          isItemInList: _isItemInLibraryList,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    _focusRememberedPageNode();
   }
 
   void _rememberItem(_TvItem item) {
@@ -2028,6 +2075,33 @@ class _TvHomePageState extends State<TvHomePage> {
       _libraryStore?.setLiked(_itemKey(item), liked) ?? Future<void>.value(),
     );
     _scheduleAccountLibraryPush();
+  }
+
+  Future<TvLibraryList?> _createLibraryListForItem(
+    _TvItem item,
+    String name,
+  ) async {
+    final store = _libraryStore;
+    if (store == null) return null;
+    final list = await store.createLibraryList(name, initialItemKey: _itemKey(item));
+    if (!mounted) return list;
+    setState(() => _likedItemKeys.add(_itemKey(item)));
+    _scheduleAccountLibraryPush();
+    return list;
+  }
+
+  Future<bool> _toggleItemInLibraryList(_TvItem item, TvLibraryList list) async {
+    final store = _libraryStore;
+    if (store == null) return false;
+    final selected = await store.toggleItemInLibraryList(list.id, _itemKey(item));
+    if (!mounted) return selected;
+    setState(() => _likedItemKeys.add(_itemKey(item)));
+    _scheduleAccountLibraryPush();
+    return selected;
+  }
+
+  bool _isItemInLibraryList(_TvItem item, TvLibraryList list) {
+    return list.itemKeys.contains(_itemKey(item));
   }
 
   void _updateTvSettings(_TvSettingsState next) {
@@ -2739,17 +2813,22 @@ class _TvHomePageState extends State<TvHomePage> {
                                 discoveryLaneItems: _discoveryLaneItems,
                                 recentItems: _recentItems,
                                 likedItems: _likedItems,
+                                libraryLists:
+                                    _libraryStore?.state.libraryLists ??
+                                    const [],
                                 discoveryKind: _discoveryKind,
                                 discoverySort: _discoverySort,
                                 discoveryGenre: _discoveryGenre,
                                 libraryFilter: _libraryFilter,
                                 accountSignedIn: _accountSignedIn,
+                                accountToken: _accountSession?.token ?? '',
                                 accountLabel: _accountLabel,
                                 accountSyncLabel: _accountSyncLabel,
                                 recentCount: _recentLibraryCount,
                                 savedCount: _savedLibraryCount,
                                 completedCount: _completedLibraryCount,
                                 activeWatchLabel: _activeWatchLabel,
+                                activeWatchSeconds: _activeWatchSeconds,
                                 tvSettings: _tvSettings,
                                 onTvSettingsChanged: _updateTvSettings,
                                 onAccountSignIn: () =>
@@ -2762,6 +2841,14 @@ class _TvHomePageState extends State<TvHomePage> {
                                 onDiscoveryLoadMore: () =>
                                     unawaited(_loadMoreDiscoveryLane()),
                                 onLibraryMenu: _openLibraryMenu,
+                                onOpenLibraryRanking: () => setState(
+                                  () =>
+                                      _libraryFilter = _TvLibraryFilter.ranking,
+                                ),
+                                onOpenLibraryMetrics: () => setState(
+                                  () =>
+                                      _libraryFilter = _TvLibraryFilter.metrics,
+                                ),
                                 onOpenItem: _openItem,
                                 onPlayItem: (item) => _play(item),
                                 onTrailerItem: (item) =>
@@ -2810,7 +2897,7 @@ class _TvHomePageState extends State<TvHomePage> {
                       if (_searchOpen)
                         _TvSearchOverlay(
                           items: _items,
-                          onClose: _closeOverlay,
+                          onClose: () => _closeOverlay(focusNavigation: true),
                           onOpenItem: _openItem,
                         ),
                     ],

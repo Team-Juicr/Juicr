@@ -5,6 +5,15 @@ void main() {
   test('exports a mobile-compatible account library snapshot', () {
     const state = TvLibraryState(
       likedKeys: {'movie:movie-1'},
+      libraryLists: [
+        TvLibraryList(
+          id: 'list-1',
+          name: 'Weekend',
+          itemKeys: ['movie:movie-1', 'series:series-1'],
+          createdAtMillis: 900,
+          updatedAtMillis: 1200,
+        ),
+      ],
       recentItems: [
         TvRecentItemSnapshot(
           key: 'movie:movie-1',
@@ -43,10 +52,15 @@ void main() {
     final snapshot = state.toMobileLibraryBackup();
 
     expect(snapshot['schema'], 'juicr.library.backup.v1');
-    expect(snapshot['lists'], isEmpty);
+    expect(snapshot['lists'], hasLength(1));
     expect(snapshot['saved'], hasLength(1));
     expect(snapshot['continueWatching'], hasLength(1));
     expect(snapshot['completedWatching'], hasLength(1));
+
+    final list = (snapshot['lists'] as List).single as Map<String, Object?>;
+    expect(list['id'], 'list-1');
+    expect(list['name'], 'Weekend');
+    expect(list['itemIds'], ['movie:movie-1', 'series:series-1']);
 
     final saved = (snapshot['saved'] as List).single as Map<String, Object?>;
     expect(saved['id'], 'movie-1');
@@ -72,6 +86,15 @@ void main() {
   test('merges a mobile-compatible account library snapshot into TV state', () {
     final state = const TvLibraryState().mergeMobileLibraryBackup({
       'schema': 'juicr.library.backup.v1',
+      'lists': [
+        {
+          'id': 'list-2',
+          'name': 'Watch with family',
+          'itemIds': ['movie:movie-2', 'series:series-2'],
+          'createdAt': DateTime.fromMillisecondsSinceEpoch(3500).toIso8601String(),
+          'updatedAt': DateTime.fromMillisecondsSinceEpoch(5500).toIso8601String(),
+        },
+      ],
       'saved': [
         {
           'id': 'movie-2',
@@ -111,9 +134,40 @@ void main() {
     });
 
     expect(state.likedKeys, contains('movie:movie-2'));
+    expect(state.libraryLists, hasLength(1));
+    expect(state.libraryLists.single.name, 'Watch with family');
+    expect(state.libraryLists.single.itemKeys, ['movie:movie-2', 'series:series-2']);
     expect(state.recentItems.map((item) => item.key), contains('movie:movie-2'));
     expect(state.progress['movie:movie-2:1:1']?.positionMillis, 300000);
     expect(state.completedKeys, contains('series:series-2:1:1'));
     expect(state.progress['series:series-2:1:1']?.durationMillis, 1800000);
+  });
+
+  test('normalizes TV library lists and preserves recent updates first', () {
+    const state = TvLibraryState(
+      libraryLists: [
+        TvLibraryList(
+          id: 'list-a',
+          name: '  My   List  ',
+          itemKeys: ['movie:one', 'movie:one', 'series:two'],
+          createdAtMillis: 1,
+          updatedAtMillis: 10,
+        ),
+        TvLibraryList(
+          id: 'list-b',
+          name: '',
+          itemKeys: ['movie:three'],
+          createdAtMillis: 2,
+          updatedAtMillis: 30,
+        ),
+      ],
+    );
+
+    final normalized = state.normalized();
+
+    expect(normalized.libraryLists.map((list) => list.id), ['list-b', 'list-a']);
+    expect(normalized.libraryLists.first.name, 'Untitled list');
+    expect(normalized.libraryLists.last.name, 'My List');
+    expect(normalized.libraryLists.last.itemKeys, ['movie:one', 'series:two']);
   });
 }

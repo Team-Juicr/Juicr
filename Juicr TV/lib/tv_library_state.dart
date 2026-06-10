@@ -6,6 +6,8 @@ const String tvLibraryStatePrefsKey = 'juicr_tv_library_state_v1';
 
 const int _schemaVersion = 1;
 const int _maxLikedKeys = 1000;
+const int _maxLibraryLists = 80;
+const int _maxLibraryListItems = 500;
 const int _maxRecentItems = 80;
 const int _maxProgressEntries = 200;
 const int _maxCompletedMarkers = 300;
@@ -65,6 +67,95 @@ class TvLibraryStateStore {
       likedKeys.remove(normalizedKey);
     }
     await save(state.copyWith(likedKeys: likedKeys));
+  }
+
+  Future<TvLibraryList> createLibraryList(
+    String name, {
+    String? initialItemKey,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final normalizedInitialItemKey = _safeString(initialItemKey);
+    final list = TvLibraryList(
+      id: _newLibraryListId(state.libraryLists, now),
+      name: name,
+      itemKeys: [
+        if (normalizedInitialItemKey != null) normalizedInitialItemKey,
+      ],
+      createdAtMillis: now,
+      updatedAtMillis: now,
+    ).normalized();
+    final likedKeys = Set<String>.from(state.likedKeys);
+    if (normalizedInitialItemKey != null) likedKeys.add(normalizedInitialItemKey);
+    await save(
+      state.copyWith(
+        likedKeys: likedKeys,
+        libraryLists: [list, ...state.libraryLists],
+      ),
+    );
+    return list;
+  }
+
+  Future<void> renameLibraryList(String listId, String name) async {
+    final normalizedId = _safeString(listId);
+    if (normalizedId == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await save(
+      state.copyWith(
+        libraryLists: [
+          for (final list in state.libraryLists)
+            if (list.id == normalizedId)
+              list.copyWith(name: name, updatedAtMillis: now)
+            else
+              list,
+        ],
+      ),
+    );
+  }
+
+  Future<void> deleteLibraryList(String listId) async {
+    final normalizedId = _safeString(listId);
+    if (normalizedId == null) return;
+    await save(
+      state.copyWith(
+        libraryLists: [
+          for (final list in state.libraryLists)
+            if (list.id != normalizedId) list,
+        ],
+      ),
+    );
+  }
+
+  Future<bool> toggleItemInLibraryList(String listId, String itemKey) async {
+    final normalizedId = _safeString(listId);
+    final normalizedItemKey = _safeString(itemKey);
+    if (normalizedId == null || normalizedItemKey == null) return false;
+    var selected = false;
+    var found = false;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final likedKeys = Set<String>.from(state.likedKeys)..add(normalizedItemKey);
+    final lists = [
+      for (final list in state.libraryLists)
+        if (list.id == normalizedId)
+          () {
+            found = true;
+            final itemKeys = list.itemKeys.toList();
+            if (itemKeys.contains(normalizedItemKey)) {
+              itemKeys.remove(normalizedItemKey);
+            } else {
+              itemKeys.insert(0, normalizedItemKey);
+              selected = true;
+            }
+            return list.copyWith(
+              itemKeys: itemKeys,
+              updatedAtMillis: now,
+            );
+          }()
+        else
+          list,
+    ];
+    if (!found) return false;
+    await save(state.copyWith(likedKeys: likedKeys, libraryLists: lists));
+    return selected;
   }
 
   Future<void> addRecentItem({
@@ -152,12 +243,14 @@ class TvLibraryStateStore {
 class TvLibraryState {
   const TvLibraryState({
     this.likedKeys = const <String>{},
+    this.libraryLists = const <TvLibraryList>[],
     this.recentItems = const <TvRecentItemSnapshot>[],
     this.progress = const <String, TvPlaybackProgress>{},
     this.completedKeys = const <String>{},
   });
 
   final Set<String> likedKeys;
+  final List<TvLibraryList> libraryLists;
   final List<TvRecentItemSnapshot> recentItems;
   final Map<String, TvPlaybackProgress> progress;
   final Set<String> completedKeys;
@@ -204,6 +297,10 @@ class TvLibraryState {
     if (json['version'] != _schemaVersion) return const TvLibraryState();
 
     final likedKeys = _safeStringSet(json['likedKeys'], _maxLikedKeys);
+    final libraryLists = _safeMapList(json['libraryLists'])
+        .map(TvLibraryList.fromJson)
+        .whereType<TvLibraryList>()
+        .toList(growable: false);
     final completedKeys = _safeStringSet(
       json['completedKeys'],
       _maxCompletedMarkers,
@@ -223,6 +320,7 @@ class TvLibraryState {
 
     return TvLibraryState(
       likedKeys: likedKeys,
+      libraryLists: libraryLists,
       recentItems: recentItems,
       progress: progress,
       completedKeys: completedKeys,
@@ -231,12 +329,14 @@ class TvLibraryState {
 
   TvLibraryState copyWith({
     Set<String>? likedKeys,
+    List<TvLibraryList>? libraryLists,
     List<TvRecentItemSnapshot>? recentItems,
     Map<String, TvPlaybackProgress>? progress,
     Set<String>? completedKeys,
   }) {
     return TvLibraryState(
       likedKeys: likedKeys ?? this.likedKeys,
+      libraryLists: libraryLists ?? this.libraryLists,
       recentItems: recentItems ?? this.recentItems,
       progress: progress ?? this.progress,
       completedKeys: completedKeys ?? this.completedKeys,
@@ -249,6 +349,12 @@ class TvLibraryState {
       completedKeys,
       _maxCompletedMarkers,
     ).toSet();
+    final listsById = <String, TvLibraryList>{};
+    for (final list in libraryLists) {
+      listsById[list.id] = list.normalized();
+    }
+    final lists = listsById.values.toList(growable: false)
+      ..sort((a, b) => b.updatedAtMillis.compareTo(a.updatedAtMillis));
 
     final recentByKey = <String, TvRecentItemSnapshot>{};
     for (final item in recentItems) {
@@ -266,6 +372,7 @@ class TvLibraryState {
 
     return TvLibraryState(
       likedKeys: liked,
+      libraryLists: lists.take(_maxLibraryLists).toList(growable: false),
       recentItems: recent.take(_maxRecentItems).toList(growable: false),
       progress: limitedProgress,
       completedKeys: completed,
@@ -279,6 +386,9 @@ class TvLibraryState {
     return <String, Object?>{
       'version': _schemaVersion,
       'likedKeys': normalizedState.likedKeys.toList(growable: false)..sort(),
+      'libraryLists': normalizedState.libraryLists
+          .map((list) => list.toJson())
+          .toList(growable: false),
       'recentItems': normalizedState.recentItems
           .map((item) => item.toJson())
           .toList(growable: false),
@@ -354,7 +464,9 @@ class TvLibraryState {
       'schema': 'juicr.library.backup.v1',
       'exportedAt': (exportedAt ?? DateTime.now()).toIso8601String(),
       'saved': saved,
-      'lists': const <Object?>[],
+      'lists': normalizedState.libraryLists
+          .map((list) => list.toMobileBackupJson())
+          .toList(growable: false),
       'continueWatching': continueWatching,
       'completedWatching': completedWatching,
     };
@@ -364,6 +476,9 @@ class TvLibraryState {
     if (backup['schema'] != 'juicr.library.backup.v1') return normalized();
 
     final nextLiked = Set<String>.from(likedKeys);
+    final nextLists = {
+      for (final list in libraryLists) list.id: list,
+    };
     final recentByKey = {
       for (final item in recentItems) item.key: item,
     };
@@ -375,6 +490,13 @@ class TvLibraryState {
       if (snapshot == null) continue;
       nextLiked.add(snapshot.key);
       recentByKey[snapshot.key] = snapshot;
+    }
+
+    for (final rawList in _safeMapList(backup['lists'])) {
+      final list = TvLibraryList.fromMobileBackupJson(rawList);
+      if (list == null) continue;
+      nextLists[list.id] = list;
+      nextLiked.addAll(list.itemKeys);
     }
 
     for (final entry in _safeMapList(backup['continueWatching'])) {
@@ -395,10 +517,132 @@ class TvLibraryState {
 
     return copyWith(
       likedKeys: nextLiked,
+      libraryLists: nextLists.values.toList(growable: false),
       recentItems: recentByKey.values.toList(growable: false),
       progress: nextProgress,
       completedKeys: nextCompleted,
     ).normalized();
+  }
+}
+
+class TvLibraryList {
+  const TvLibraryList({
+    required this.id,
+    required this.name,
+    required this.itemKeys,
+    required this.createdAtMillis,
+    required this.updatedAtMillis,
+  });
+
+  final String id;
+  final String name;
+  final List<String> itemKeys;
+  final int createdAtMillis;
+  final int updatedAtMillis;
+
+  static TvLibraryList? fromJson(Map<String, Object?> json) {
+    final id = _safeString(json['id']);
+    final createdAtMillis = _safeNonNegativeInt(json['createdAtMillis']);
+    final updatedAtMillis = _safeNonNegativeInt(json['updatedAtMillis']);
+    if (id == null || createdAtMillis == null || updatedAtMillis == null) {
+      return null;
+    }
+    final rawItems = json['itemKeys'] is List
+        ? json['itemKeys'] as List
+        : json['itemIds'] is List
+        ? json['itemIds'] as List
+        : json['items'] is List
+        ? json['items'] as List
+        : const [];
+    return TvLibraryList(
+      id: id,
+      name: (json['name'] ?? '').toString(),
+      itemKeys: rawItems.map((item) => item.toString()).toList(),
+      createdAtMillis: createdAtMillis,
+      updatedAtMillis: updatedAtMillis,
+    ).normalized();
+  }
+
+  static TvLibraryList? fromMobileBackupJson(Map<String, Object?> json) {
+    final id = _safeString(json['id']);
+    if (id == null) return null;
+    final createdAt =
+        DateTime.tryParse((json['createdAt'] ?? '').toString()) ??
+        DateTime.fromMillisecondsSinceEpoch(
+          _safeNonNegativeInt(json['createdAtMillis']) ?? 0,
+        );
+    final updatedAt =
+        DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
+        DateTime.fromMillisecondsSinceEpoch(
+          _safeNonNegativeInt(json['updatedAtMillis']) ??
+              createdAt.millisecondsSinceEpoch,
+        );
+    final rawItems = json['itemIds'] is List
+        ? json['itemIds'] as List
+        : json['itemKeys'] is List
+        ? json['itemKeys'] as List
+        : json['items'] is List
+        ? json['items'] as List
+        : const [];
+    return TvLibraryList(
+      id: id,
+      name: (json['name'] ?? '').toString(),
+      itemKeys: rawItems.map((item) => item.toString()).toList(),
+      createdAtMillis: createdAt.millisecondsSinceEpoch,
+      updatedAtMillis: updatedAt.millisecondsSinceEpoch,
+    ).normalized();
+  }
+
+  TvLibraryList copyWith({
+    String? id,
+    String? name,
+    List<String>? itemKeys,
+    int? createdAtMillis,
+    int? updatedAtMillis,
+  }) {
+    return TvLibraryList(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      itemKeys: itemKeys ?? this.itemKeys,
+      createdAtMillis: createdAtMillis ?? this.createdAtMillis,
+      updatedAtMillis: updatedAtMillis ?? this.updatedAtMillis,
+    ).normalized();
+  }
+
+  TvLibraryList normalized() {
+    return TvLibraryList(
+      id: _safeString(id) ?? 'list',
+      name: _normalizeLibraryListName(name),
+      itemKeys: _dedupeLibraryListItemKeys(itemKeys),
+      createdAtMillis: _safeNonNegativeInt(createdAtMillis) ?? 0,
+      updatedAtMillis: _safeNonNegativeInt(updatedAtMillis) ?? 0,
+    );
+  }
+
+  Map<String, Object?> toJson() {
+    final normalizedList = normalized();
+    return <String, Object?>{
+      'id': normalizedList.id,
+      'name': normalizedList.name,
+      'itemKeys': normalizedList.itemKeys,
+      'createdAtMillis': normalizedList.createdAtMillis,
+      'updatedAtMillis': normalizedList.updatedAtMillis,
+    };
+  }
+
+  Map<String, Object?> toMobileBackupJson() {
+    final normalizedList = normalized();
+    return <String, Object?>{
+      'id': normalizedList.id,
+      'name': normalizedList.name,
+      'itemIds': normalizedList.itemKeys,
+      'createdAt': DateTime.fromMillisecondsSinceEpoch(
+        normalizedList.createdAtMillis,
+      ).toIso8601String(),
+      'updatedAt': DateTime.fromMillisecondsSinceEpoch(
+        normalizedList.updatedAtMillis,
+      ).toIso8601String(),
+    };
   }
 }
 
@@ -536,6 +780,35 @@ List<String> _limitedStrings(Iterable<Object?> values, int limit) {
 Set<String> _safeStringSet(Object? value, int limit) {
   if (value is! List) return <String>{};
   return _limitedStrings(value.whereType<Object>(), limit).toSet();
+}
+
+String _newLibraryListId(Iterable<TvLibraryList> lists, int nowMillis) {
+  final existingIds = lists.map((list) => list.id).toSet();
+  var candidate = 'list-$nowMillis';
+  var suffix = 2;
+  while (existingIds.contains(candidate)) {
+    candidate = 'list-$nowMillis-$suffix';
+    suffix += 1;
+  }
+  return candidate;
+}
+
+String _normalizeLibraryListName(String value) {
+  final normalized = value.trim().replaceAll(RegExp(r'\s+'), ' ');
+  if (normalized.isEmpty) return 'Untitled list';
+  return normalized.length <= 48 ? normalized : normalized.substring(0, 48);
+}
+
+List<String> _dedupeLibraryListItemKeys(Iterable<Object?> values) {
+  final seen = <String>{};
+  final itemKeys = <String>[];
+  for (final value in values) {
+    final key = _safeString(value);
+    if (key == null || !seen.add(key)) continue;
+    itemKeys.add(key);
+    if (itemKeys.length >= _maxLibraryListItems) break;
+  }
+  return itemKeys;
 }
 
 List<Map<String, Object?>> _safeMapList(Object? value) {
