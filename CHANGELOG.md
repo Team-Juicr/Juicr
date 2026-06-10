@@ -9,24 +9,28 @@
 
 ### Added
 
-- GitHub Actions release automation now rebuilds the Android universal APK and all supported ABI APKs from the repository.
-- Manual release rebuilds can target the current `v1.0.1` tag while using the same signing secret names as the existing release setup.
-- Release notes now publish in the Added, Changed, Fixed, Recent work, and Contributors format used by the project release page.
+- GitHub Actions release automation now rebuilds Android and Android TV APKs from the repository.
+- Android and Android TV releases now publish universal, `arm64-v8a`, `armeabi-v7a`, and `x86_64` APK downloads for the same `v1.0.1` release.
+- The release changelog now separates mobile and TV work so the website can surface version notes cleanly.
 
 ### Changed
 
-- Android release artifacts are collected with stable Juicr names for universal, `armeabi-v7a`, `arm64-v8a`, and `x86_64` APK downloads.
-- The release workflow updates an existing GitHub release when rebuilding a tag instead of requiring locally uploaded APKs.
-- Repository setup now includes Android CI, Dependabot coverage, issue templates, a pull request template, and a CODEOWNERS placeholder.
+- Android release artifacts use stable `juicr-android` names, and Android TV release artifacts use matching `juicr-tv` names.
+- Android TV is aligned to version `1.0.1` so both app lanes can be rebuilt and published together.
+- The release workflow builds Android and TV in separate jobs before publishing the full asset set to the existing GitHub release.
 
 ### Fixed
 
-- Release publishing no longer stops at an app bundle artifact when the current public release expects APK downloads.
+- Release publishing no longer stops at mobile-only artifacts when the current public release also expects TV downloads.
 - Manual workflow runs can rebuild the current release from the checked-out repository instead of relying on local release assets.
-- Release note generation now fails fast when a tagged changelog section is missing or still contains placeholder text.
+- The release rebuild no longer risks timing out while producing both Android and TV assets.
 
 ### Recent work
 
-- Restored the current `v1.0.1` release path around signed APK artifacts produced by GitHub Actions.
-- Aligned Juicr repository automation with the proven release shape while keeping Juicr-specific app folders, artifact names, and privacy rules.
-- Added bounded doctors for the release workflow and repository setup so future automation changes can be checked quickly.
+- Rebuilt `v1.0.1` with signed Android and Android TV APKs produced by GitHub Actions.
+- Organized the release into mobile and TV asset groups with matching ABI coverage.
+- Updated repository and website release copy so download pages can point users at the current asset names.
+
+### Contributors
+
+- xC3FFF0E
