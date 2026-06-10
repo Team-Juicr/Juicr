@@ -428,7 +428,6 @@ class _DetailsPageState extends State<DetailsPage>
     );
     final result = await Navigator.of(context).push<String>(
       AppPageRoute<String>(
-        opaque: false,
         builder: (_) => NativePlayerPage(
           title: title,
           sources: sources,

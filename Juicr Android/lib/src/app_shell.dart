@@ -38,7 +38,7 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> {
+class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   static const _exitBackPressWindow = Duration(seconds: 2);
   static const _tabScreenDiagnosticWindow = Duration(milliseconds: 900);
   static const _sectionTransitionDuration = Duration(milliseconds: 320);
@@ -59,6 +59,7 @@ class _AppShellState extends State<AppShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final startupTab = AppState.settingsIntent.value == 'addons'
         ? 3
         : AppState.preferredStartupTabIndex()
@@ -76,10 +77,31 @@ class _AppShellState extends State<AppShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     AppState.shellTab.removeListener(_syncTab);
     _pageController.dispose();
     _adSlotDelayTimer?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    _forcePageControllerBackToShellTab(reason: 'metrics_change');
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _forcePageControllerBackToShellTab(reason: 'lifecycle_resumed');
+    }
+  }
+
+  void _forcePageControllerBackToShellTab({required String reason}) {
+    if (!mounted) return;
+    final target = AppState.shellTab.value.clamp(0, _pageCount - 1).toInt();
+    _pageCache.putIfAbsent(target, () => _buildPage(target));
+    _schedulePageControllerSync(target, animate: false, reason: reason);
   }
 
   void _syncTab() {
