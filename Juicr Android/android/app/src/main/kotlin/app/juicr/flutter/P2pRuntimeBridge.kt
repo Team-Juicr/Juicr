@@ -431,18 +431,12 @@ class P2pRuntimeBridge(private val context: Context) {
     }
 
     private fun injectTrackers(session: P2pSession, handle: Any) {
-        try {
-            val announceEntryClass = Class.forName("com.frostwire.jlibtorrent.AnnounceEntry")
-            val constructor = announceEntryClass.getDeclaredConstructor(String::class.java)
-            session.trackers.forEachIndexed { index, tracker ->
-                val entry = constructor.newInstance(tracker)
-                tryInvoke(entry, "tier", index.coerceAtMost(8).toShort())
-                tryInvoke(handle, "addTracker", entry)
-            }
-            session.trackersInjected = true
-        } catch (error: Throwable) {
-            session.error = "trackerInject:${error.javaClass.simpleName}".take(80)
-        }
+        if (session.trackers.isEmpty()) return
+        // Trackers are already embedded in the magnet URI. Constructing
+        // AnnounceEntry through the Android JNI wrapper can abort the process
+        // before Kotlin can catch the failure, so avoid the unsafe duplicate
+        // addTracker path and let libtorrent consume the magnet trackers.
+        session.trackersInjected = true
     }
 
     private fun updateHandleSnapshot(session: P2pSession, handle: Any) {

@@ -901,6 +901,8 @@ class AppState {
   static const String _interstitialAdsEnabledKey = 'interstitial_ads_enabled';
   static const String _bannerAdsEnabledKey = 'banner_ads_enabled';
   static const String _adDisableRewardUnlockKey = 'ad_disable_reward_unlock_v1';
+  static const String _adChoicesLocallyCustomizedKey =
+      'ad_choices_locally_customized_v1';
   static const String _sampleAdDefaultsMigratedKey =
       'sample_ad_defaults_migrated_v1';
   static const String _showMatureContentKey = 'show_mature_content';
@@ -1041,6 +1043,7 @@ class AppState {
   static final ValueNotifier<bool> matureContentChoiceSeen =
       ValueNotifier<bool>(false);
   static bool _matureContentChoiceInFlight = false;
+  static bool _adChoicesLocallyCustomized = false;
   static bool _applyingAccountAdPreferences = false;
   static bool get _signedInAdPreferencesActive =>
       accountSession.value?.isValid == true ||
@@ -1836,11 +1839,15 @@ class AppState {
       rewardedVideoAdsEnabled.value = true;
       interstitialAdsEnabled.value = true;
       bannerAdsEnabled.value = true;
+      _adChoicesLocallyCustomized = false;
       await _prefs!.setBool(_rewardedVideoAdsEnabledKey, true);
       await _prefs!.setBool(_interstitialAdsEnabledKey, true);
       await _prefs!.setBool(_bannerAdsEnabledKey, true);
+      await _prefs!.setBool(_adChoicesLocallyCustomizedKey, false);
       await _prefs!.setBool(_sampleAdDefaultsMigratedKey, true);
     } else {
+      _adChoicesLocallyCustomized =
+          _prefs!.getBool(_adChoicesLocallyCustomizedKey) ?? false;
       rewardedVideoAdsEnabled.value =
           _prefs!.getBool(_rewardedVideoAdsEnabledKey) ?? true;
       interstitialAdsEnabled.value =
@@ -2761,22 +2768,26 @@ class AppState {
 
   static void setRewardedVideoAdsEnabled(bool enabled) {
     if (rewardedVideoAdsEnabled.value == enabled) return;
+    _markAdChoicesLocallyCustomized();
     rewardedVideoAdsEnabled.value = enabled;
   }
 
   static void setInterstitialAdsEnabled(bool enabled) {
     if (interstitialAdsEnabled.value == enabled) return;
+    _markAdChoicesLocallyCustomized();
     interstitialAdsEnabled.value = enabled;
   }
 
   static void setBannerAdsEnabled(bool enabled) {
     if (bannerAdsEnabled.value == enabled) return;
+    _markAdChoicesLocallyCustomized();
     bannerAdsEnabled.value = enabled;
   }
 
   static void applyAccountAdPreferences(AccountAdPreferences? preferences) {
     accountAdPreferences.value = preferences;
     if (preferences == null) return;
+    if (_adChoicesLocallyCustomized) return;
     _applyingAccountAdPreferences = true;
     try {
       rewardedVideoAdsEnabled.value = preferences.adsEnabled;
@@ -2788,12 +2799,20 @@ class AppState {
   }
 
   static Future<void> resetGuestAdChoices() async {
+    _adChoicesLocallyCustomized = false;
     rewardedVideoAdsEnabled.value = true;
     interstitialAdsEnabled.value = true;
     bannerAdsEnabled.value = true;
     await _prefs?.setBool(_rewardedVideoAdsEnabledKey, true);
     await _prefs?.setBool(_interstitialAdsEnabledKey, true);
     await _prefs?.setBool(_bannerAdsEnabledKey, true);
+    await _prefs?.setBool(_adChoicesLocallyCustomizedKey, false);
+  }
+
+  static void _markAdChoicesLocallyCustomized() {
+    if (_applyingAccountAdPreferences) return;
+    _adChoicesLocallyCustomized = true;
+    unawaited(_prefs?.setBool(_adChoicesLocallyCustomizedKey, true));
   }
 
   static void setAdDisableRewardUnlocked(bool unlocked) {
@@ -4640,7 +4659,10 @@ class AppState {
   }
 
   static Future<void> _persistRewardedVideoAdsEnabled() async {
-    if (_applyingAccountAdPreferences || _signedInAdPreferencesActive) return;
+    if (_applyingAccountAdPreferences ||
+        (_signedInAdPreferencesActive && !_adChoicesLocallyCustomized)) {
+      return;
+    }
     await _prefs?.setBool(
       _rewardedVideoAdsEnabledKey,
       rewardedVideoAdsEnabled.value,
@@ -4648,7 +4670,10 @@ class AppState {
   }
 
   static Future<void> _persistInterstitialAdsEnabled() async {
-    if (_applyingAccountAdPreferences || _signedInAdPreferencesActive) return;
+    if (_applyingAccountAdPreferences ||
+        (_signedInAdPreferencesActive && !_adChoicesLocallyCustomized)) {
+      return;
+    }
     await _prefs?.setBool(
       _interstitialAdsEnabledKey,
       interstitialAdsEnabled.value,
@@ -4656,7 +4681,10 @@ class AppState {
   }
 
   static Future<void> _persistBannerAdsEnabled() async {
-    if (_applyingAccountAdPreferences || _signedInAdPreferencesActive) return;
+    if (_applyingAccountAdPreferences ||
+        (_signedInAdPreferencesActive && !_adChoicesLocallyCustomized)) {
+      return;
+    }
     await _prefs?.setBool(_bannerAdsEnabledKey, bannerAdsEnabled.value);
   }
 
@@ -4975,7 +5003,8 @@ class AppState {
           'status': 'effective_safe_baseline',
           'selected': true,
           'runtimePath': false,
-          'summary': 'Keep direct and account-backed playback first when available.',
+          'summary':
+              'Keep direct and account-backed playback first when available.',
         },
         <String, Object>{
           'id': 'externalHandoff',
