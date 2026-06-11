@@ -3378,10 +3378,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       if (attemptedEngine == _NativePlaybackEngine.libvlc) {
         final profile = _libVlcProfileForSource(source);
-        await DiagnosticLog.markNativeEngineActive(
-          engineId: attemptedEngine.id,
-          reason: 'open_source',
-        );
         DiagnosticLog.add(
           'native libvlc config provider=${source.providerId} profile=${profile.id} hwAcc=${profile.hwAcc.name} networkCaching=${profile.networkCachingMs}',
         );
@@ -3415,6 +3411,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           AppState.playerBehaviorSettings.value.media3NativeExoEnabled) {
         DiagnosticLog.add(
           'native media3 surface fallback active provider=${source.providerId} reason=previous_platform_view_failure',
+        );
+      }
+      if (attemptedEngine == _NativePlaybackEngine.libvlc) {
+        await DiagnosticLog.markNativeEngineActive(
+          engineId: attemptedEngine.id,
+          reason: 'controller_open',
         );
       }
       final controller = _NativePlaybackController.network(
@@ -3750,6 +3752,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             'native p2p source blocked provider=${source.providerId} action=battery_data_policy',
           );
         } else if (p2pBridgeReadinessFailure) {
+          await _stopP2pBridgeForPolicy('p2p_readiness_failed');
           if (attemptedEngine == _NativePlaybackEngine.exoplayer) {
             _lastOpenFailureMessage =
                 'P2P stream is still buffering. Trying another playback path.';

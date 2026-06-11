@@ -3651,27 +3651,29 @@ class StreamApi {
       try {
         final manifest = await _addonManifest(addon);
         if (!manifest.supportsResource('meta')) continue;
-        final uris = _addonResourceUris(
-          addon.manifestUrl,
-          resource: 'meta',
-          type: item.type.compatTypeValue,
-          id: item.id,
-        );
-        for (final uri in uris) {
-          DiagnosticLog.add(
-            'addon metadata start addon=${addon.name} uri=[hidden]',
+        for (final requestId in _addonRouteIdsForItem(item)) {
+          final uris = _addonResourceUris(
+            addon.manifestUrl,
+            resource: 'meta',
+            type: item.type.compatTypeValue,
+            id: requestId,
           );
-          final response = await _client
-              .get(uri)
-              .timeout(const Duration(seconds: 10));
-          final decoded = _decodeResponse(response, 'Add-on metadata');
-          final rawMeta = decoded['meta'] ?? decoded['item'];
-          if (rawMeta is! Map<String, dynamic>) continue;
-          final details = MetaDetails.fromJson({'meta': rawMeta});
-          DiagnosticLog.add(
-            'addon metadata ok addon=${addon.name} id=${item.id} episodes=${details.videos.length}',
-          );
-          return details;
+          for (final uri in uris) {
+            DiagnosticLog.add(
+              'addon metadata start addon=${addon.name} uri=[hidden]',
+            );
+            final response = await _client
+                .get(uri)
+                .timeout(const Duration(seconds: 10));
+            final decoded = _decodeResponse(response, 'Add-on metadata');
+            final rawMeta = decoded['meta'] ?? decoded['item'];
+            if (rawMeta is! Map<String, dynamic>) continue;
+            final details = MetaDetails.fromJson({'meta': rawMeta});
+            DiagnosticLog.add(
+              'addon metadata ok addon=${addon.name} id=${item.id} episodes=${details.videos.length}',
+            );
+            return details;
+          }
         }
       } catch (error) {
         DiagnosticLog.add(

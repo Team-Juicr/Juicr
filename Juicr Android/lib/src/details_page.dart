@@ -1339,10 +1339,12 @@ class _DetailsPageState extends State<DetailsPage>
         );
         return result;
       } on StreamApiException catch (error) {
-        if (!error.message.contains('No active stream add-ons') ||
-            !AppState.defaultProvidersEnabled.value) {
+        if (!_shouldTryDefaultAfterAddonError(error)) {
           rethrow;
         }
+        DiagnosticLog.add(
+          'details resolve movie addon fallback id=${item.id} reason=${_addonFallbackReason(error)}',
+        );
       }
     }
     if (!AppState.defaultProvidersEnabled.value) {
@@ -1467,10 +1469,12 @@ class _DetailsPageState extends State<DetailsPage>
         );
         return result;
       } on StreamApiException catch (error) {
-        if (!error.message.contains('No active stream add-ons') ||
-            !AppState.defaultProvidersEnabled.value) {
+        if (!_shouldTryDefaultAfterAddonError(error)) {
           rethrow;
         }
+        DiagnosticLog.add(
+          'details resolve episode addon fallback id=${item.id} season=$season episode=$episode reason=${_addonFallbackReason(error)}',
+        );
       }
     }
     if (!AppState.defaultProvidersEnabled.value) {
@@ -1496,6 +1500,24 @@ class _DetailsPageState extends State<DetailsPage>
       'details auto activated sole user add-on id=${addon.id} reason=no_other_stream_source',
     );
     AppState.updateUserAddon(addon.copyWith(active: true));
+  }
+
+  bool _shouldTryDefaultAfterAddonError(StreamApiException error) {
+    if (!AppState.defaultProvidersEnabled.value) return false;
+    final message = error.message;
+    return message.contains('No active stream add-ons') ||
+        message.contains('did not return playable sources');
+  }
+
+  String _addonFallbackReason(StreamApiException error) {
+    final message = error.message;
+    if (message.contains('did not return playable sources')) {
+      return 'empty_addon_route';
+    }
+    if (message.contains('No active stream add-ons')) {
+      return 'no_active_addon_route';
+    }
+    return 'addon_route_unavailable';
   }
 
   String? _verifiedPlaybackKeyFor(String? basePlaybackKey) {
