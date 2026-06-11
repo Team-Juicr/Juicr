@@ -991,7 +991,12 @@ class _DetailsPageState extends State<DetailsPage>
     if (normalized == 'source_class_not_native') {
       return _unsupportedSourceSnack;
     }
-    if (normalized == 'no_playable_source' ||
+    if (normalized == 'addon_route_unavailable' ||
+        normalized == 'empty_addon_route' ||
+        normalized == 'no_active_addon_route' ||
+        normalized == 'no_playback_available' ||
+        normalized == 'playback_unavailable' ||
+        normalized == 'no_playable_source' ||
         normalized == 'no_working_source' ||
         normalized == 'source_unavailable') {
       return _videoUnavailableSnack;
@@ -1619,7 +1624,12 @@ class _DetailsPageState extends State<DetailsPage>
             episodeItem: episode,
           );
     playbackKey ??= _playbackCacheKeyForResult(basePlaybackKey, result);
-    final sources = _orderSources(result.sources);
+    final sources = _orderSources(_nativeEligibleSources(result.sources));
+    if (sources.length != result.sources.length) {
+      DiagnosticLog.add(
+        'nextEpisode source gate skipped count=${result.sources.length - sources.length}',
+      );
+    }
     final initialByProvider = <String, List<PlaybackSource>>{};
     for (final source in sources) {
       initialByProvider
