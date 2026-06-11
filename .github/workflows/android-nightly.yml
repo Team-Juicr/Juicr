@@ -1,0 +1,276 @@
+name: Android Nightly
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch or ref to build"
+        required: true
+        default: dev
+      base_version:
+        description: "Next stable version base"
+        required: true
+        default: "1.0.2"
+      publish_prerelease:
+        description: "Create or update a GitHub pre-release"
+        required: true
+        type: boolean
+        default: true
+  schedule:
+    - cron: "0 16 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-nightly-${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || 'dev' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-nightly:
+    name: Resolve nightly build
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.nightly.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      tag: ${{ steps.nightly.outputs.tag }}
+      version: ${{ steps.nightly.outputs.version }}
+      version_code: ${{ steps.nightly.outputs.version_code }}
+      publish_prerelease: ${{ steps.nightly.outputs.publish_prerelease }}
+    steps:
+      - name: Resolve nightly inputs
+        id: nightly
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            source_ref="${{ inputs.source_ref }}"
+            base_version="${{ inputs.base_version }}"
+            publish_prerelease="${{ inputs.publish_prerelease }}"
+          else
+            source_ref="dev"
+            base_version="1.0.2"
+            publish_prerelease="true"
+          fi
+
+          if [[ ! "$base_version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::Base version must be numeric, for example 1.0.2."
+            exit 1
+          fi
+
+          nightly_date="$(date -u +%Y%m%d)"
+          version_code_base="$(date -u +%y%m%d)"
+          run_slot=$((GITHUB_RUN_NUMBER % 100))
+          version_code=$((10#$version_code_base * 100 + run_slot))
+          version="${base_version}-nightly.${nightly_date}.${GITHUB_RUN_NUMBER}"
+          tag="v${version}"
+
+          echo "source_ref=$source_ref" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "publish_prerelease=$publish_prerelease" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout source ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.nightly.outputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build-nightly:
+    name: Build ${{ matrix.label }} nightly APKs
+    needs: resolve-nightly
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: android
+            label: Android
+            app_dir: Juicr Android
+            asset_prefix: juicr-android
+            symbols_dir: juicr
+          - lane: tv
+            label: TV
+            app_dir: Juicr TV
+            asset_prefix: juicr-tv
+            symbols_dir: juicr-tv
+    steps:
+      - name: Checkout source ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-nightly.outputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Prepare release signing
+        shell: bash
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          APP_DIR: ${{ matrix.app_dir }}
+        run: |
+          for name in RELEASE_KEYSTORE_BASE64 RELEASE_STORE_PASSWORD RELEASE_KEY_ALIAS RELEASE_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is missing. Add release signing secrets before building nightlies."
+              exit 1
+            fi
+          done
+
+          mkdir -p "$APP_DIR/android/app"
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$APP_DIR/android/app/release-keystore.jks"
+          {
+            echo "storeFile=release-keystore.jks"
+            echo "storePassword=$RELEASE_STORE_PASSWORD"
+            echo "keyAlias=$RELEASE_KEY_ALIAS"
+            echo "keyPassword=$RELEASE_KEY_PASSWORD"
+          } > "$APP_DIR/android/key.properties"
+
+      - name: Apply nightly version
+        shell: bash
+        env:
+          PUBSPEC: ${{ matrix.app_dir }}/pubspec.yaml
+          NIGHTLY_VERSION: ${{ needs.resolve-nightly.outputs.version }}
+          NIGHTLY_CODE: ${{ needs.resolve-nightly.outputs.version_code }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          pubspec = Path(os.environ["PUBSPEC"])
+          version = os.environ["NIGHTLY_VERSION"]
+          code = os.environ["NIGHTLY_CODE"]
+          text = pubspec.read_text(encoding="utf-8")
+          updated = re.sub(r"^version:\s*.+$", f"version: {version}+{code}", text, flags=re.MULTILINE)
+          if text == updated:
+            raise SystemExit(f"Could not update version in {pubspec}")
+          pubspec.write_text(updated, encoding="utf-8")
+          print(f"{pubspec}: version: {version}+{code}")
+          PY
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.app_dir }}
+        run: flutter pub get
+
+      - name: Build universal APK
+        working-directory: ${{ matrix.app_dir }}
+        env:
+          JUICR_BLOCK_UNTRUSTED_APP: "false"
+          JUICR_RELEASE_BLOCK_UNTRUSTED_APP: "false"
+        run: flutter build apk --release
+
+      - name: Build ABI APKs
+        working-directory: ${{ matrix.app_dir }}
+        env:
+          JUICR_BLOCK_UNTRUSTED_APP: "false"
+          JUICR_RELEASE_BLOCK_UNTRUSTED_APP: "false"
+        run: flutter build apk --release --split-per-abi --obfuscate --split-debug-info=build/symbols/${{ matrix.symbols_dir }}
+
+      - name: Collect APKs
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve-nightly.outputs.tag }}
+          APP_DIR: ${{ matrix.app_dir }}
+          ASSET_PREFIX: ${{ matrix.asset_prefix }}
+        run: |
+          assets="$GITHUB_WORKSPACE/nightly-assets/$TAG"
+          outputs="$GITHUB_WORKSPACE/$APP_DIR/build/app/outputs/flutter-apk"
+          mkdir -p "$assets"
+
+          cp "$outputs/app-release.apk" "$assets/${ASSET_PREFIX}-${TAG}-universal.apk"
+          cp "$outputs/app-armeabi-v7a-release.apk" "$assets/${ASSET_PREFIX}-${TAG}-armeabi-v7a.apk"
+          cp "$outputs/app-arm64-v8a-release.apk" "$assets/${ASSET_PREFIX}-${TAG}-arm64-v8a.apk"
+          cp "$outputs/app-x86_64-release.apk" "$assets/${ASSET_PREFIX}-${TAG}-x86_64.apk"
+
+          ls -lh "$assets"
+
+      - name: Upload APK workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: juicr-${{ needs.resolve-nightly.outputs.tag }}-${{ matrix.lane }}-nightly-apks
+          path: nightly-assets/${{ needs.resolve-nightly.outputs.tag }}/*.apk
+
+  publish-nightly:
+    name: Publish nightly pre-release
+    needs:
+      - resolve-nightly
+      - build-nightly
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: needs.resolve-nightly.outputs.publish_prerelease == 'true'
+    steps:
+      - name: Download nightly APK artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: juicr-${{ needs.resolve-nightly.outputs.tag }}-*-nightly-apks
+          path: nightly-assets/${{ needs.resolve-nightly.outputs.tag }}
+          merge-multiple: true
+
+      - name: Write nightly notes
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve-nightly.outputs.tag }}
+          VERSION: ${{ needs.resolve-nightly.outputs.version }}
+          SOURCE_REF: ${{ needs.resolve-nightly.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.resolve-nightly.outputs.source_sha }}
+        run: |
+          short_sha="${SOURCE_SHA:0:7}"
+          {
+            echo "## Nightly build"
+            echo
+            echo "Built from \`$SOURCE_REF\` at \`$short_sha\`."
+            echo
+            echo "Nightly builds are for public testing before the next stable release. Use the universal APK when unsure which device build to install."
+            echo
+            echo "### Android"
+            echo
+            echo "- Universal"
+            echo "- arm64-v8a"
+            echo "- armeabi-v7a"
+            echo "- x86_64"
+            echo
+            echo "### Android TV"
+            echo
+            echo "- Universal"
+            echo "- arm64-v8a"
+            echo "- armeabi-v7a"
+            echo "- x86_64"
+          } > nightly-notes.md
+
+          cat nightly-notes.md
+
+      - name: Publish GitHub pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-nightly.outputs.tag }}
+          VERSION: ${{ needs.resolve-nightly.outputs.version }}
+          SOURCE_SHA: ${{ needs.resolve-nightly.outputs.source_sha }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "Juicr $VERSION Nightly" --notes-file nightly-notes.md --prerelease
+          else
+            gh release create "$TAG" --target "$SOURCE_SHA" --title "Juicr $VERSION Nightly" --notes-file nightly-notes.md --prerelease
+          fi
+
+          gh release upload "$TAG" nightly-assets/"$TAG"/*.apk --clobber
