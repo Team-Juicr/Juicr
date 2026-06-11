@@ -219,6 +219,12 @@ jobs:
     timeout-minutes: 15
     if: needs.resolve-nightly.outputs.publish_prerelease == 'true'
     steps:
+      - name: Checkout source ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-nightly.outputs.source_ref }}
+          fetch-depth: 0
+
       - name: Download nightly APK artifacts
         uses: actions/download-artifact@v7
         with:
@@ -263,6 +269,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.resolve-nightly.outputs.tag }}
           VERSION: ${{ needs.resolve-nightly.outputs.version }}
           SOURCE_SHA: ${{ needs.resolve-nightly.outputs.source_sha }}
