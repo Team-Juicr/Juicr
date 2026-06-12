@@ -16,6 +16,8 @@ import 'motion.dart';
 import 'p2p_indexer_connectors.dart';
 import 'p2p_stream_bridge.dart';
 import 'playback_provider.dart';
+import 'release_changelog_view.dart';
+import 'release_updates.dart';
 import 'source_ranking.dart';
 import 'stream_api.dart';
 import 'visual_style.dart';
@@ -25,6 +27,9 @@ const MethodChannel _externalPlayerChannel = MethodChannel(
 );
 const MethodChannel _catalogBuilderPickerChannel = MethodChannel(
   'app.juicr.flutter/catalog_builder_picker',
+);
+const MethodChannel _quickLinkChannel = MethodChannel(
+  'app.juicr.flutter/trailer',
 );
 
 class SettingsPage extends StatefulWidget {
@@ -38,6 +43,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final StreamApi _api = StreamApi();
   late Future<StreamConfig> _configFuture;
   late final Future<Map<String, Object?>> _installInfoFuture;
+  Future<_ReleaseUpdatesSnapshot>? _releaseUpdatesFuture;
   String _providerHealthSampleId = '';
   bool _checkingProviders = false;
   List<String> _providerHealthLogs = const [];
@@ -46,6 +52,12 @@ class _SettingsPageState extends State<SettingsPage> {
     name: 'Auto',
   );
   final ValueNotifier<bool> _checkingProvidersNotifier = ValueNotifier(false);
+  final ValueNotifier<bool> _checkingReleaseUpdatesNotifier = ValueNotifier(
+    false,
+  );
+  final ValueNotifier<int> _releaseUpdatesRefreshTickNotifier = ValueNotifier(
+    0,
+  );
   final ValueNotifier<bool> _addonSelectionModeNotifier = ValueNotifier(false);
   final ValueNotifier<Set<String>> _selectedAddonIdsNotifier =
       ValueNotifier<Set<String>>(const <String>{});
@@ -105,6 +117,8 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     AppState.settingsIntent.removeListener(_handleSettingsIntent);
     _checkingProvidersNotifier.dispose();
+    _checkingReleaseUpdatesNotifier.dispose();
+    _releaseUpdatesRefreshTickNotifier.dispose();
     _addonSelectionModeNotifier.dispose();
     _selectedAddonIdsNotifier.dispose();
     _providerHealthLogsNotifier.dispose();
@@ -240,6 +254,27 @@ class _SettingsPageState extends State<SettingsPage> {
     await Clipboard.setData(ClipboardData(text: parts.join(' ')));
     if (!mounted) return;
     _snack('App version copied.');
+  }
+
+  Future<void> _openQuickLink(String label, String url) async {
+    var opened = false;
+    try {
+      opened =
+          await _quickLinkChannel.invokeMethod<bool>('open', {'url': url}) ??
+          false;
+    } on MissingPluginException catch (_) {
+      opened = false;
+    } on PlatformException catch (_) {
+      opened = false;
+    }
+    if (!mounted) return;
+    if (opened) {
+      _snack('Opening $label.');
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!mounted) return;
+    _snack('$label link copied.');
   }
 
   Future<bool?> _confirmDiagnosticReportPrivacy() {
@@ -529,7 +564,9 @@ class _SettingsPageState extends State<SettingsPage> {
       );
       if (!silent) _providerHealthSummaryNotifier.value = summary;
     } catch (error) {
-      DiagnosticLog.add('settings playback availability refresh failed: $error');
+      DiagnosticLog.add(
+        'settings playback availability refresh failed: $error',
+      );
       if (!mounted) return;
       final temporarilyBlocked = error is StreamApiTemporaryBlockException;
       if (!silent) {
@@ -1649,6 +1686,24 @@ class _SettingsPageState extends State<SettingsPage> {
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       shape: JuicrVisual.bottomSheetShape,
       builder: (context) => const _AdvanceHelpSheet(),
+    );
+  }
+
+  Future<void> _showUpdatesHelpSheet() async {
+    await showJuicrBottomSheet<void>(
+      context: context,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      shape: JuicrVisual.bottomSheetShape,
+      builder: (context) => const _UpdatesHelpSheet(),
+    );
+  }
+
+  Future<void> _showAboutDiagnosticsHelpSheet() async {
+    await showJuicrBottomSheet<void>(
+      context: context,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      shape: JuicrVisual.bottomSheetShape,
+      builder: (context) => const _AboutDiagnosticsHelpSheet(),
     );
   }
 
@@ -3068,6 +3123,8 @@ class _SettingsPageState extends State<SettingsPage> {
           },
         ),
         const SizedBox(height: 12),
+        _buildAdChoicesSettingsCard(),
+        const SizedBox(height: 12),
         _SettingsCard(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -3096,6 +3153,88 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildAdChoicesSettingsCard() {
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        AppState.rewardedVideoAdsEnabled,
+        AppState.interstitialAdsEnabled,
+        AppState.bannerAdsEnabled,
+      ]),
+      builder: (context, _) {
+        return _SettingsCard(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const _AdvancedPlaybackSectionHeader(
+                icon: Icons.ads_click_rounded,
+                title: 'Ad choices',
+                subtitle:
+                    'Choose which ad placements can appear on this device. These settings stay local.',
+              ),
+              const Divider(height: 1),
+              SwitchListTile.adaptive(
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 4,
+                ),
+                secondary: const Icon(Icons.play_circle_outline_rounded),
+                title: const Text('Rewarded / video ads'),
+                subtitle: const Text(
+                  'Short video prompts before some movie playback.',
+                ),
+                value: AppState.rewardedVideoAdsEnabled.value,
+                onChanged: (enabled) {
+                  DiagnosticLog.add(
+                    'settings rewarded video ads ${enabled ? 'enabled' : 'disabled'}',
+                  );
+                  AppState.setRewardedVideoAdsEnabled(enabled);
+                },
+              ),
+              const Divider(height: 1),
+              SwitchListTile.adaptive(
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 4,
+                ),
+                secondary: const Icon(Icons.open_in_full_rounded),
+                title: const Text('Interstitial ads'),
+                subtitle: const Text(
+                  'Occasional full-screen ads while browsing.',
+                ),
+                value: AppState.interstitialAdsEnabled.value,
+                onChanged: (enabled) {
+                  DiagnosticLog.add(
+                    'settings interstitial ads ${enabled ? 'enabled' : 'disabled'}',
+                  );
+                  AppState.setInterstitialAdsEnabled(enabled);
+                },
+              ),
+              const Divider(height: 1),
+              SwitchListTile.adaptive(
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 4,
+                ),
+                secondary: const Icon(Icons.view_day_outlined),
+                title: const Text('Banner ads'),
+                subtitle: const Text(
+                  'Compact banner above the bottom navigation.',
+                ),
+                value: AppState.bannerAdsEnabled.value,
+                onChanged: (enabled) {
+                  DiagnosticLog.add(
+                    'settings banner ads ${enabled ? 'enabled' : 'disabled'}',
+                  );
+                  AppState.setBannerAdsEnabled(enabled);
+                },
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -3157,7 +3296,7 @@ class _SettingsPageState extends State<SettingsPage> {
             const Divider(height: 1),
             const _ExperimentalInfoTile(
               icon: Icons.tune_rounded,
-                title: 'Advanced P2P playback',
+              title: 'Advanced P2P playback',
               subtitle:
                   'Use this only for sources you are allowed to access. Source health and bandwidth can vary.',
             ),
@@ -3580,19 +3719,215 @@ class _SettingsPageState extends State<SettingsPage> {
     _snack(okCount > 0 ? 'Connector reachable.' : 'Connector needs attention.');
   }
 
+  Future<_ReleaseUpdatesSnapshot> _loadReleaseUpdatesSnapshot() async {
+    final installInfo = await _installInfoFuture;
+    final versionName = _stringValue(installInfo['versionName']);
+    final versionCode = _stringValue(installInfo['versionCode']);
+    final channel = releaseChannelForVersion(versionName);
+    final latest = await ReleaseUpdatesClient().latestForChannel(channel);
+    return _ReleaseUpdatesSnapshot(
+      installedVersion: versionName.isEmpty ? 'Unknown' : versionName,
+      installedCode: versionCode,
+      channel: channel,
+      latest: latest,
+    );
+  }
+
+  Future<void> _refreshReleaseUpdates() async {
+    if (_checkingReleaseUpdatesNotifier.value) return;
+    final future = _loadReleaseUpdatesSnapshot();
+    _checkingReleaseUpdatesNotifier.value = true;
+    _releaseUpdatesFuture = future;
+    _releaseUpdatesRefreshTickNotifier.value++;
+    try {
+      late final _ReleaseUpdatesSnapshot snapshot;
+      await Future.wait<void>([
+        future.then((value) {
+          snapshot = value;
+        }),
+        Future<void>.delayed(const Duration(milliseconds: 850)),
+      ]);
+      if (!mounted) return;
+      _snack(
+        snapshot.latest.fromFallback
+            ? 'Showing saved release notes.'
+            : 'Update check complete.',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      _snack('Update check finished with local notes.');
+    } finally {
+      if (mounted) {
+        _checkingReleaseUpdatesNotifier.value = false;
+      }
+    }
+  }
+
+  Future<void> _showReleaseChangelog(ReleaseUpdateInfo release) async {
+    final body = release.body.trim().isEmpty
+        ? fallbackChangelog(release.channel)
+        : release.body.trim();
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          release.channel == ReleaseUpdateChannel.nightly
+              ? 'Nightly changelog'
+              : 'Release changelog',
+        ),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: SingleChildScrollView(child: ReleaseChangelogView(body: body)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUpdatesContent() {
+    _releaseUpdatesFuture ??= _loadReleaseUpdatesSnapshot();
+    return ValueListenableBuilder<int>(
+      valueListenable: _releaseUpdatesRefreshTickNotifier,
+      builder: (context, _, __) {
+        return ValueListenableBuilder<bool>(
+          valueListenable: AppState.releaseCheckOnLaunchEnabled,
+          builder: (context, checkOnLaunch, _) {
+            return ValueListenableBuilder<bool>(
+              valueListenable: AppState.releaseMessageOnLaunchEnabled,
+              builder: (context, showMessageOnLaunch, __) {
+                return Column(
+                  children: [
+                    FutureBuilder<_ReleaseUpdatesSnapshot>(
+                      future: _releaseUpdatesFuture,
+                      builder: (context, snapshot) {
+                        final data = snapshot.data;
+                        final loading =
+                            snapshot.connectionState != ConnectionState.done &&
+                            data == null;
+                        final channel =
+                            data?.channel ?? ReleaseUpdateChannel.stable;
+                        final release =
+                            data?.latest ?? fallbackReleaseInfo(channel);
+                        final summary = data == null
+                            ? 'Installed: checking...\nLatest: checking...\nNotifications: ${showMessageOnLaunch ? 'Enabled' : 'Off'}'
+                            : _releaseSummaryText(data, showMessageOnLaunch);
+                        return _SettingsCard(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            summary,
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .bodySmall
+                                                ?.copyWith(height: 1.28),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 14),
+                                FilledButton(
+                                  onPressed: loading
+                                      ? null
+                                      : () => _showReleaseChangelog(release),
+                                  child: const Text('View changelog'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    _GeneralSwitchCard(
+                      title: 'Check for updates on launch',
+                      subtitle:
+                          'Check the latest release notes whenever you open Juicr.',
+                      value: checkOnLaunch,
+                      onChanged: AppState.setReleaseCheckOnLaunchEnabled,
+                    ),
+                    const SizedBox(height: 12),
+                    _GeneralSwitchCard(
+                      title: 'Show update message on launch',
+                      subtitle:
+                          'Display a quiet in-app message when this channel changes.',
+                      value: showMessageOnLaunch,
+                      onChanged: checkOnLaunch
+                          ? AppState.setReleaseMessageOnLaunchEnabled
+                          : null,
+                    ),
+                    const SizedBox(height: 12),
+                    ValueListenableBuilder<bool>(
+                      valueListenable: _checkingReleaseUpdatesNotifier,
+                      builder: (context, checking, _) {
+                        return _UpdateCheckButton(
+                          checking: checking,
+                          onPressed: _refreshReleaseUpdates,
+                        );
+                      },
+                    ),
+                  ],
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _releaseSummaryText(
+    _ReleaseUpdatesSnapshot data,
+    bool showMessageOnLaunch,
+  ) {
+    final release = data.latest;
+    return [
+      'Installed: ${data.installedLabel}',
+      'Latest: ${release.displayVersion}',
+      'Last checked: ${_formatReleaseTimestamp(release.checkedAt)}',
+      if (release.publishedAt != null)
+        'Last release: ${_formatReleaseTimestamp(release.publishedAt!)}',
+      if (release.fromFallback) 'Status: showing saved release notes',
+      'Notifications: ${showMessageOnLaunch ? 'Enabled' : 'Off'}',
+    ].join('\n');
+  }
+
+  String _formatReleaseTimestamp(DateTime value) {
+    final local = value.toLocal();
+    final month = _monthName(local.month);
+    final hour = local.hour == 0 || local.hour == 12 ? 12 : local.hour % 12;
+    final minute = local.minute.toString().padLeft(2, '0');
+    final period = local.hour >= 12 ? 'PM' : 'AM';
+    return '$month ${local.day}, ${local.year} $hour:$minute $period';
+  }
+
   Widget _buildAboutDiagnosticsContent() {
     return Column(
       children: [
         FutureBuilder<Map<String, Object?>>(
           future: _installInfoFuture,
           builder: (context, snapshot) {
+            final colorScheme = Theme.of(context).colorScheme;
             final installInfo = snapshot.data ?? const <String, Object?>{};
             final versionName = _stringValue(installInfo['versionName']);
             final versionCode = _stringValue(installInfo['versionCode']);
-            final packageName = _stringValue(installInfo['packageName']);
-            final firstInstalled = _formatInstallTimestamp(
-              installInfo['firstInstallTime'],
-            );
             final lastUpdated = _formatInstallTimestamp(
               installInfo['lastUpdateTime'],
             );
@@ -3602,103 +3937,150 @@ class _SettingsPageState extends State<SettingsPage> {
                 '($versionCode)',
             ].join(' ');
             return _SettingsCard(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const _SettingsCardSection(
-                    title: 'App',
-                    child: SizedBox.shrink(),
-                  ),
-                  _StaticSettingsValueTile(
-                    icon: Icons.movie_filter_outlined,
-                    title: 'App name',
-                    value: 'Juicr',
-                  ),
-                  const Divider(height: 1),
-                  _StaticSettingsValueTile(
-                    icon: Icons.verified_outlined,
-                    title: 'App version',
-                    value: versionLabel.trim().isEmpty
-                        ? 'Unknown'
-                        : versionLabel.trim(),
-                  ),
-                  const Divider(height: 1),
-                  _StaticSettingsValueTile(
-                    icon: Icons.inventory_2_outlined,
-                    title: 'Package name',
-                    value: packageName.isEmpty ? 'Unknown' : packageName,
-                  ),
-                  const Divider(height: 1),
-                  _StaticSettingsValueTile(
-                    icon: Icons.download_done_outlined,
-                    title: 'First installed',
-                    value: firstInstalled,
-                  ),
-                  const Divider(height: 1),
-                  _StaticSettingsValueTile(
-                    icon: Icons.system_update_alt_outlined,
-                    title: 'Last updated',
-                    value: lastUpdated,
-                  ),
-                  const Divider(height: 1),
-                  _ActionTile(
-                    icon: Icons.copy_all_rounded,
-                    title: 'Copy app version',
-                    subtitle: 'Copy version and package details for support.',
-                    onTap: _copyAppVersion,
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
-        const SizedBox(height: 12),
-        _SettingsCard(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(16, 16, 16, 12),
-                child: Row(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(18),
+                          child: Image.asset(
+                            'android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png',
+                            width: 58,
+                            height: 58,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Juicr',
+                              style: Theme.of(context).textTheme.headlineSmall
+                                  ?.copyWith(fontWeight: FontWeight.w900),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Version ${versionLabel.trim().isEmpty ? 'Unknown' : versionLabel.trim()}',
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(
+                                    color: colorScheme.onSurfaceVariant,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
                     Text(
-                      'Diagnostics',
-                      style: TextStyle(fontWeight: FontWeight.w900),
+                      'Your media, freshly pressed.',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: colorScheme.onSurface.withValues(alpha: 0.74),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Divider(height: 1),
+                    const SizedBox(height: 14),
+                    Text(
+                      'About Juicr',
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'An Android app for the sources you choose. Browse, save, resume, and play without turning your media setup into a control room.',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: colorScheme.onSurface.withValues(alpha: 0.72),
+                        height: 1.32,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Last updated: $lastUpdated',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ],
                 ),
               ),
-              const Divider(height: 1),
-              _StaticSettingsValueTile(
-                icon: Icons.badge_outlined,
-                title: 'Current session',
-                value: DiagnosticLog.sessionId,
+            );
+          },
+        ),
+        const SizedBox(height: 14),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            'Quick links',
+            style: Theme.of(context).textTheme.labelLarge?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        GridView.count(
+          crossAxisCount: 2,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          mainAxisSpacing: 10,
+          crossAxisSpacing: 10,
+          childAspectRatio: 1.95,
+          children: [
+            _AboutQuickLinkTile(
+              title: 'Website',
+              subtitle: 'Official site and downloads',
+              onTap: () => _openQuickLink('Website', 'https://juicr.app'),
+            ),
+            _AboutQuickLinkTile(
+              title: 'Support',
+              subtitle: 'Email support',
+              onTap: () =>
+                  _openQuickLink('Support', 'mailto:support@juicr.app'),
+            ),
+            _AboutQuickLinkTile(
+              title: 'Source',
+              subtitle: 'Code, releases, and issues',
+              onTap: () => _openQuickLink(
+                'Source',
+                'https://github.com/Team-Juicr/Juicr',
               ),
-              const Divider(height: 1),
-              _StaticSettingsValueTile(
-                icon: Icons.restore_rounded,
-                title: 'Previous session exit',
-                value: DiagnosticLog.previousSessionExit,
-              ),
-              const Divider(height: 1),
-              _StaticSettingsValueTile(
-                icon: Icons.android_rounded,
-                title: 'Previous Android exit reason',
-                value: DiagnosticLog.previousAndroidExitReason,
-              ),
-              const Divider(height: 1),
-              _StaticSettingsValueTile(
-                icon: Icons.update_rounded,
-                title: 'Install changed before launch',
-                value: DiagnosticLog.previousInstallChanged ? 'Yes' : 'No',
-              ),
-              const Divider(height: 1),
+            ),
+            _AboutQuickLinkTile(
+              title: 'Donate',
+              subtitle: 'Support ongoing app upkeep',
+              onTap: () =>
+                  _openQuickLink('Donate', 'https://ko-fi.com/xc3fff0e'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        _SettingsCard(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               const _ExperimentalInfoTile(
                 icon: Icons.privacy_tip_outlined,
-                title:
-                    'Recent diagnostics stay on this device until you copy or send a report.',
+                title: 'Diagnostics stay private',
                 subtitle:
-                    'Juicr hides stream URLs, manifest URLs, and long secret-looking values before reports leave the app.',
+                    'Reports are redacted before sending and avoid private source, account, and playback details.',
+              ),
+              const Divider(height: 1),
+              _ActionTile(
+                icon: Icons.copy_all_rounded,
+                title: 'Copy app version',
+                subtitle: 'Copy version and package details for support.',
+                onTap: _copyAppVersion,
               ),
               const Divider(height: 1),
               _ActionTile(
@@ -5736,6 +6118,28 @@ class _SettingsPageState extends State<SettingsPage> {
               AppReveal(
                 delay: const Duration(milliseconds: 320),
                 child: _SettingsHomeTile(
+                  icon: Icons.update_rounded,
+                  title: 'Updates',
+                  subtitle: 'Release checks and changelog',
+                  onTap: (tileContext) => _openSettingsSection(
+                    title: 'Updates',
+                    child: _buildUpdatesContent(),
+                    framed: false,
+                    sourceContext: tileContext,
+                    actions: [
+                      IconButton(
+                        tooltip: 'Updates guide',
+                        onPressed: _showUpdatesHelpSheet,
+                        icon: const Icon(Icons.menu_book_outlined),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              SizedBox(height: compactLandscape ? 8 : 12),
+              AppReveal(
+                delay: const Duration(milliseconds: 355),
+                child: _SettingsHomeTile(
                   icon: Icons.info_outline_rounded,
                   title: 'About & diagnostics',
                   subtitle: 'App version and diagnostic reports',
@@ -5744,6 +6148,13 @@ class _SettingsPageState extends State<SettingsPage> {
                     child: _buildAboutDiagnosticsContent(),
                     framed: false,
                     sourceContext: tileContext,
+                    actions: [
+                      IconButton(
+                        tooltip: 'About & diagnostics guide',
+                        onPressed: _showAboutDiagnosticsHelpSheet,
+                        icon: const Icon(Icons.menu_book_outlined),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -6825,17 +7236,6 @@ class _AddOnsManagerSheet extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: colorScheme.onSurface.withValues(alpha: 0.22),
-                  borderRadius: BorderRadius.circular(999),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
             Text(
               'Manage add-ons',
               style: Theme.of(
@@ -7159,17 +7559,6 @@ class _ProviderHealthSampleSheetState
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Center(
-                child: Container(
-                  width: 44,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.onSurface.withValues(alpha: 0.22),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 18),
               Text('Sample title', style: theme.textTheme.headlineSmall),
               const SizedBox(height: 8),
               Text(
@@ -7867,17 +8256,6 @@ class _PersonalServerEditorSheetState
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: colorScheme.onSurface.withValues(alpha: 0.22),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 18),
               Text(
                 title,
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
@@ -8937,34 +9315,25 @@ class _SettingsSectionPage extends StatelessWidget {
   }
 }
 
-class _SettingsCardSection extends StatelessWidget {
-  const _SettingsCardSection({required this.title, required this.child});
+class _ReleaseUpdatesSnapshot {
+  const _ReleaseUpdatesSnapshot({
+    required this.installedVersion,
+    required this.installedCode,
+    required this.channel,
+    required this.latest,
+  });
 
-  final String title;
-  final Widget child;
+  final String installedVersion;
+  final String installedCode;
+  final ReleaseUpdateChannel channel;
+  final ReleaseUpdateInfo latest;
 
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-          child: Row(
-            children: [
-              Text(
-                title,
-                style: Theme.of(
-                  context,
-                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
-        child,
-      ],
-    );
+  String get installedLabel {
+    final parts = <String>[installedVersion];
+    if (installedCode.isNotEmpty && installedCode != '0') {
+      parts.add('($installedCode)');
+    }
+    return parts.join(' ');
   }
 }
 
@@ -10230,11 +10599,6 @@ class _GeneralHelpSheet extends StatelessWidget {
         'Available when device accent is off. It changes highlights, icons, buttons, card tint, and subtle borders.',
       ),
       (
-        Icons.translate_rounded,
-        'Language',
-        'Reserved for the upcoming app-language selector. It sits with display and readability settings because it changes how the app reads.',
-      ),
-      (
         Icons.format_size_rounded,
         'Text size',
         'Changes Juicr\'s text size without changing your Android system text size.',
@@ -10247,7 +10611,7 @@ class _GeneralHelpSheet extends StatelessWidget {
       (
         Icons.grid_view_rounded,
         'Home density',
-        'Changes Home spacing and poster size. Larger posters feel calmer; compact keeps more titles on screen. Home can restore recent rows first, then refresh quietly when online.',
+        'Changes Home spacing and poster size. Larger posters feel calmer; compact keeps more titles on screen while Home follows the shared daily curation order.',
       ),
       (
         Icons.home_rounded,
@@ -10277,7 +10641,7 @@ class _GeneralHelpSheet extends StatelessWidget {
       (
         Icons.wallpaper_outlined,
         'Player loading backdrop',
-        'Chooses the native player loading background: no artwork, the scan pulse, or a blurred media backdrop while Juicr prepares playback. Dialogs still take priority over player controls.',
+        'Chooses the native player loading background: no artwork, a calm pulse, or a blurred media backdrop while Juicr prepares playback.',
       ),
       (
         Icons.warning_amber_rounded,
@@ -10302,7 +10666,7 @@ class _GeneralHelpSheet extends StatelessWidget {
       (
         Icons.restart_alt_rounded,
         'Reset appearance',
-        'Restores the visual defaults: system theme, green accent, accent-tinted cards, scan loading backdrop, normal poster tone, matched system bars, and standard layout.',
+        'Restores the visual defaults: system theme, green accent, accent-tinted cards, normal poster tone, matched system bars, and standard layout.',
       ),
       (
         Icons.phone_android_rounded,
@@ -10322,15 +10686,6 @@ class _GeneralHelpSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: colorScheme.onSurface.withValues(alpha: 0.28),
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
-            const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -10552,15 +10907,6 @@ class _PlaybackHelpSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: colorScheme.onSurface.withValues(alpha: 0.28),
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
-            const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -10667,15 +11013,6 @@ class _BatteryDataHelpSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: colorScheme.onSurface.withValues(alpha: 0.28),
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
-            const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -10883,15 +11220,6 @@ class _DefaultSourceHelpSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: colorScheme.onSurface.withValues(alpha: 0.28),
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
-            const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -11092,15 +11420,6 @@ class _AddOnsHelpSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: colorScheme.onSurface.withValues(alpha: 0.28),
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
-            const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -11213,15 +11532,6 @@ class _PersonalServersHelpSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: colorScheme.onSurface.withValues(alpha: 0.28),
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
-            const SizedBox(height: 12),
             Row(
               children: [
                 Expanded(
@@ -11293,6 +11603,11 @@ class _AdvanceHelpSheet extends StatelessWidget {
         Icons.tune_rounded,
         'Advanced playback',
         'Unlocks power-user controls for Media3, libVLC, retry timing, progress tracking, fallback order, and playback recovery.',
+      ),
+      (
+        Icons.ads_click_rounded,
+        'Ad choices',
+        'Keeps optional ad controls on this device. These switches are local preferences and no longer depend on the account page.',
       ),
       (
         Icons.hourglass_bottom_rounded,
@@ -11417,19 +11732,197 @@ class _AdvanceHelpSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: colorScheme.onSurface.withValues(alpha: 0.28),
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
-            const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
                 'Advanced guide',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: items.length,
+                separatorBuilder: (_, __) => Divider(
+                  height: 1,
+                  color: colorScheme.outlineVariant.withValues(alpha: 0.6),
+                ),
+                itemBuilder: (context, index) {
+                  final item = items[index];
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: JuicrVisual.iconBadge(
+                      context,
+                      icon: item.$1,
+                      boxSize: 38,
+                      iconSize: 18,
+                      radius: 14,
+                      shadowAlpha: 0.12,
+                    ),
+                    title: Text(
+                      item.$2,
+                      style: const TextStyle(fontWeight: FontWeight.w900),
+                    ),
+                    subtitle: Text(item.$3),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _UpdatesHelpSheet extends StatelessWidget {
+  const _UpdatesHelpSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    const items = [
+      (
+        Icons.system_update_alt_rounded,
+        'Release channel',
+        'Stable builds follow official releases. Nightly builds follow the development channel and are meant for public testing before the next stable release.',
+      ),
+      (
+        Icons.article_outlined,
+        'Changelog',
+        'View changelog opens the notes for the release Juicr is currently tracking. Stable and nightly builds can show different notes.',
+      ),
+      (
+        Icons.event_repeat_rounded,
+        'Check on launch',
+        'When enabled, Juicr quietly checks for updated release notes when the app opens.',
+      ),
+      (
+        Icons.notifications_none_rounded,
+        'Update message',
+        'When enabled, Juicr can show a quiet in-app message after the tracked release changes.',
+      ),
+      (
+        Icons.refresh_rounded,
+        'Manual check',
+        'Check for updates refreshes the saved release snapshot now. If the network is unavailable, Juicr keeps the last safe notes it already has.',
+      ),
+    ];
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          18,
+          10,
+          18,
+          JuicrVisual.bottomSheetBottomBreathingRoom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Updates guide',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: items.length,
+                separatorBuilder: (_, __) => Divider(
+                  height: 1,
+                  color: colorScheme.outlineVariant.withValues(alpha: 0.6),
+                ),
+                itemBuilder: (context, index) {
+                  final item = items[index];
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: JuicrVisual.iconBadge(
+                      context,
+                      icon: item.$1,
+                      boxSize: 38,
+                      iconSize: 18,
+                      radius: 14,
+                      shadowAlpha: 0.12,
+                    ),
+                    title: Text(
+                      item.$2,
+                      style: const TextStyle(fontWeight: FontWeight.w900),
+                    ),
+                    subtitle: Text(item.$3),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AboutDiagnosticsHelpSheet extends StatelessWidget {
+  const _AboutDiagnosticsHelpSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    const items = [
+      (
+        Icons.info_outline_rounded,
+        'About Juicr',
+        'Shows the installed app version, the current package, and the short project description used across Juicr surfaces.',
+      ),
+      (
+        Icons.link_rounded,
+        'Quick links',
+        'Website opens downloads and project information, Source opens the public repository, Support opens email, and Donate opens the support page.',
+      ),
+      (
+        Icons.copy_rounded,
+        'Copy app version',
+        'Copies the app version and package name when support needs a quick environment check.',
+      ),
+      (
+        Icons.bug_report_outlined,
+        'Copy diagnostic report',
+        'Copies temporary playback and app state evidence for troubleshooting. Reports are written to avoid private playback details.',
+      ),
+      (
+        Icons.cloud_upload_outlined,
+        'Send diagnostic report',
+        'Creates a private support ticket from this device when support needs more context than a copied report.',
+      ),
+      (
+        Icons.privacy_tip_outlined,
+        'Privacy boundary',
+        'Diagnostics keep raw links, tokens, headers, local endpoints, private account details, and source identities out of the report.',
+      ),
+    ];
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          18,
+          10,
+          18,
+          JuicrVisual.bottomSheetBottomBreathingRoom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'About & diagnostics guide',
                 style: Theme.of(
                   context,
                 ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
@@ -11529,19 +12022,6 @@ class _OptionSheet<T> extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.onSurface.withValues(alpha: 0.22),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
               Text(
                 title,
                 style: Theme.of(
@@ -12562,6 +13042,93 @@ class _ActionTile extends StatelessWidget {
       subtitle: Text(subtitle),
       trailing: const Icon(Icons.chevron_right_rounded),
       onTap: onTap,
+    );
+  }
+}
+
+class _AboutQuickLinkTile extends StatelessWidget {
+  const _AboutQuickLinkTile({
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: JuicrVisual.flatCardColor(colorScheme),
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      shadowColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(JuicrVisual.cardRadius),
+        side: BorderSide(color: JuicrVisual.flatCardBorder(colorScheme)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: colorScheme.primary,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 5),
+              Text(
+                subtitle,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: colorScheme.onSurface.withValues(alpha: 0.68),
+                  height: 1.18,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _UpdateCheckButton extends StatelessWidget {
+  const _UpdateCheckButton({required this.checking, required this.onPressed});
+
+  final bool checking;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      enabled: !checking,
+      label: checking ? 'Checking for updates' : 'Check for updates',
+      child: SizedBox(
+        width: double.infinity,
+        child: FilledButton(
+          onPressed: checking ? null : onPressed,
+          style: FilledButton.styleFrom(
+            minimumSize: const Size(0, 40),
+            fixedSize: const Size.fromHeight(40),
+          ),
+          child: Text(checking ? 'Checking' : 'Check for updates'),
+        ),
+      ),
     );
   }
 }

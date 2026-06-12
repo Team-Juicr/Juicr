@@ -165,7 +165,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
       await AppState.init(prefs: prefs);
       AccountLibrarySyncService.install();
       unawaited(RuntimeAppPolicyService.refresh());
-      unawaited(AppState.syncSignedInLibrary());
+      unawaited(AppState.syncSignedInLibrary(replaceWithRemoteSnapshot: true));
       final appStateMs = appStateStopwatch.elapsedMilliseconds;
       final diagnosticsStopwatch = Stopwatch()..start();
       await DiagnosticLog.initPersistentSession(prefs: prefs);

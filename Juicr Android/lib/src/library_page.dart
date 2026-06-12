@@ -2630,7 +2630,7 @@ class _LibrarySectionCard extends StatelessWidget {
       context: context,
       builder: (sheetContext) {
         return SingleChildScrollView(
-          padding: juicrBottomSheetPadding(sheetContext, left: 0, right: 0),
+          padding: juicrBottomSheetPadding(sheetContext),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -2640,14 +2640,16 @@ class _LibrarySectionCard extends StatelessWidget {
                   subtitle: section.subtitle,
                   icon: section.icon,
                   selected: selectedSection == section,
-                  onTap: () => Navigator.of(sheetContext).pop(section),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop(section);
+                  },
                 ),
             ],
           ),
         );
       },
     );
-    if (selected != null) onChanged(selected);
+    if (selected != null && selected != selectedSection) onChanged(selected);
   }
 }
 

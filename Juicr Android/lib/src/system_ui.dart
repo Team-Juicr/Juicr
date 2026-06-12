@@ -23,15 +23,15 @@ Future<void> restoreJuicrSystemUi({bool force = false}) {
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Color(0x00000000),
-      systemNavigationBarColor: Color(0xFF000000),
+      systemNavigationBarColor: Color(0x00000000),
+      systemNavigationBarDividerColor: Color(0x00000000),
       statusBarIconBrightness: Brightness.light,
       systemNavigationBarIconBrightness: Brightness.light,
+      systemNavigationBarContrastEnforced: false,
+      systemStatusBarContrastEnforced: false,
     ),
   );
-  return SystemChrome.setEnabledSystemUIMode(
-    SystemUiMode.manual,
-    overlays: SystemUiOverlay.values,
-  );
+  return SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 }
 
 void scheduleJuicrSystemUiRestore() {

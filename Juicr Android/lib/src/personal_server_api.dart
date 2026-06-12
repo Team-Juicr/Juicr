@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'app_state.dart';
 import 'catalog_item.dart';
+import 'diagnostic_log.dart';
 import 'playback_provider.dart';
 
 class PersonalServerApi {
@@ -62,9 +63,15 @@ class PersonalServerApi {
   }) async {
     final connection = _connectionFor(item);
     if (connection == null) return null;
+    final playableItem = await _playableItemForPlayback(
+      connection,
+      item,
+      season: season,
+      episode: episode,
+    );
     final source = connection.type == PersonalServerType.plex
-        ? await _plexPlaybackSource(connection, item)
-        : await _jellyfinStylePlaybackSource(connection, item);
+        ? await _plexPlaybackSource(connection, playableItem)
+        : await _jellyfinStylePlaybackSource(connection, playableItem);
     if (source == null) return null;
     return PlaybackResult(
       sources: [source],
@@ -135,6 +142,60 @@ class PersonalServerApi {
     return _sortItems(
       buckets.expand((bucket) => bucket).toList(growable: false),
       sort,
+    );
+  }
+
+  Future<CatalogItem> _playableItemForPlayback(
+    PersonalServerConnection connection,
+    CatalogItem item, {
+    int? season,
+    int? episode,
+  }) async {
+    if (item.type != MediaType.series && item.type != MediaType.animation) {
+      return item;
+    }
+    if ((item.personalServerSeriesItemId ?? '').trim().isNotEmpty) {
+      return item;
+    }
+    final requestedSeason = season ?? 1;
+    final requestedEpisode = episode ?? 1;
+    final details = connection.type == PersonalServerType.plex
+        ? await _plexMeta(connection, item)
+        : await _jellyfinStyleMeta(connection, item);
+    final episodes = details?.videos ?? const <EpisodeItem>[];
+    if (episodes.isEmpty) return item;
+    final selected =
+        _episodeForSlot(episodes, requestedSeason, requestedEpisode) ??
+        _firstPlayableEpisode(episodes);
+    if (selected == null || selected.id.trim().isEmpty) return item;
+    return CatalogItem(
+      type: item.type,
+      id: '${item.id}:${selected.season}:${selected.episode}',
+      name: item.name,
+      poster: selected.thumbnail ?? item.poster,
+      background: item.background,
+      logo: item.logo,
+      year: item.year,
+      releaseDate: item.releaseDate,
+      tmdbId: item.tmdbId,
+      imdbId: item.imdbId,
+      genres: item.genres,
+      description: selected.description ?? item.description,
+      imdbRating: item.imdbRating,
+      voteCount: item.voteCount,
+      adult: item.adult,
+      isUpcoming: item.isUpcoming,
+      isLocalCatalogItem: item.isLocalCatalogItem,
+      localPlaybackLocked: item.localPlaybackLocked,
+      localCatalogId: item.localCatalogId,
+      localCatalogItemId: item.localCatalogItemId,
+      localCatalogName: item.localCatalogName,
+      localMediaKind: item.localMediaKind,
+      localSourceLabel: item.localSourceLabel,
+      localRelinkNeededCount: item.localRelinkNeededCount,
+      personalServerTypeId: item.personalServerTypeId,
+      personalServerItemId: selected.id.trim(),
+      personalServerSeriesItemId: item.personalServerItemId,
     );
   }
 
@@ -295,26 +356,85 @@ class PersonalServerApi {
     required int skip,
     String? search,
   }) async {
+    final query = _jellyfinStyleCatalogQuery(
+      type: type,
+      sort: sort,
+      skip: skip,
+      search: search,
+    );
+    final primary = await _jellyfinStyleCatalogPage(
+      connection,
+      type: type,
+      query: query,
+    );
+    if (!_jellyfinStyleCatalogFallbackNeeded(primary, search: search)) {
+      return _sortItems(primary.items, sort);
+    }
+
+    DiagnosticLog.add(
+      'personal catalog fallback start type=${connection.type.id} media=${type.compatTypeValue} primary=${primary.items.length} total=${primary.totalRecordCount ?? -1}',
+    );
+    final fallback =
+        await _jellyfinStyleCatalogPage(
+          connection,
+          type: type,
+          query: <String, String>{...query, 'UserId': connection.userId},
+          useGlobalItemsEndpoint: true,
+        ).catchError(
+          (_) => const _PersonalServerCatalogPage(items: <CatalogItem>[]),
+        );
+    final merged = _mergePersonalServerCatalogPages([primary, fallback]);
+    DiagnosticLog.add(
+      'personal catalog fallback result type=${connection.type.id} media=${type.compatTypeValue} primary=${primary.items.length} fallback=${fallback.items.length} merged=${merged.length}',
+    );
+    return _sortItems(merged, sort);
+  }
+
+  Map<String, String> _jellyfinStyleCatalogQuery({
+    required MediaType type,
+    required CatalogSort sort,
+    required int skip,
+    String? search,
+  }) {
     final includeTypes = type == MediaType.movie ? 'Movie' : 'Series';
-    final query = <String, String>{
+    final trimmedSearch = (search ?? '').trim();
+    return <String, String>{
       'Recursive': 'true',
       'IncludeItemTypes': includeTypes,
       'StartIndex': skip.toString(),
       'Limit': pageSize.toString(),
-      'Fields': 'Overview,Genres,PremiereDate,ProductionYear',
-      if ((search ?? '').trim().isNotEmpty) 'SearchTerm': search!.trim(),
+      'SortBy': _jellyfinStyleSortBy(sort),
+      'SortOrder': _jellyfinStyleSortOrder(sort),
+      'EnableTotalRecordCount': 'true',
+      'Fields':
+          'Overview,Genres,PremiereDate,ProductionYear,CommunityRating,RunTimeTicks,DateCreated',
+      if (trimmedSearch.isNotEmpty) 'SearchTerm': trimmedSearch,
     };
+  }
+
+  Future<_PersonalServerCatalogPage> _jellyfinStyleCatalogPage(
+    PersonalServerConnection connection, {
+    required MediaType type,
+    required Map<String, String> query,
+    bool useGlobalItemsEndpoint = false,
+  }) async {
+    final endpointPath = useGlobalItemsEndpoint
+        ? '/Items'
+        : '/Users/${Uri.encodeComponent(connection.userId)}/Items';
     final decoded = await _getJson(
       _endpoint(
         connection.serverUrl,
-        '/Users/${Uri.encodeComponent(connection.userId)}/Items',
+        endpointPath,
       ).replace(queryParameters: query),
       headers: _mediaBrowserHeaders(connection),
     );
-    return _sortItems([
-      for (final raw in _mapList(decoded['Items']))
-        _jellyfinStyleCatalogItem(connection, raw, type: type),
-    ], sort);
+    return _PersonalServerCatalogPage(
+      items: [
+        for (final raw in _mapList(decoded['Items']))
+          _jellyfinStyleCatalogItem(connection, raw, type: type),
+      ],
+      totalRecordCount: _intValue(decoded['TotalRecordCount']),
+    );
   }
 
   CatalogItem _jellyfinStyleCatalogItem(
@@ -330,6 +450,7 @@ class PersonalServerApi {
       poster: _jellyfinStyleImageUrl(connection, id, 'Primary'),
       background: _jellyfinStyleImageUrl(connection, id, 'Backdrop'),
       year: (raw['ProductionYear'] ?? raw['PremiereDate'])?.toString(),
+      imdbRating: raw['CommunityRating']?.toString(),
       genres: _stringList(raw['Genres']),
       description: raw['Overview']?.toString(),
       personalServerTypeId: connection.type.id,
@@ -472,6 +593,38 @@ class PersonalServerApi {
   }
 }
 
+class _PersonalServerCatalogPage {
+  const _PersonalServerCatalogPage({
+    required this.items,
+    this.totalRecordCount,
+  });
+
+  final List<CatalogItem> items;
+  final int? totalRecordCount;
+}
+
+EpisodeItem? _episodeForSlot(
+  List<EpisodeItem> episodes,
+  int season,
+  int episode,
+) {
+  for (final item in episodes) {
+    if (item.season == season && item.episode == episode) return item;
+  }
+  return null;
+}
+
+EpisodeItem? _firstPlayableEpisode(List<EpisodeItem> episodes) {
+  if (episodes.isEmpty) return null;
+  final sorted = episodes.toList(growable: false)
+    ..sort((left, right) {
+      final seasonCompare = left.season.compareTo(right.season);
+      if (seasonCompare != 0) return seasonCompare;
+      return left.episode.compareTo(right.episode);
+    });
+  return sorted.first;
+}
+
 List<CatalogItem> _sortItems(List<CatalogItem> items, CatalogSort sort) {
   final sorted = items.toList(growable: false);
   sorted.sort((left, right) {
@@ -496,6 +649,55 @@ List<CatalogItem> _sortItems(List<CatalogItem> items, CatalogSort sort) {
     };
   });
   return sorted;
+}
+
+bool _jellyfinStyleCatalogFallbackNeeded(
+  _PersonalServerCatalogPage page, {
+  String? search,
+}) {
+  if ((search ?? '').trim().isNotEmpty) return false;
+  if (page.items.length > 1) return false;
+  final total = page.totalRecordCount;
+  return total == null || total > page.items.length;
+}
+
+List<CatalogItem> _mergePersonalServerCatalogPages(
+  List<_PersonalServerCatalogPage> pages,
+) {
+  final seen = <String>{};
+  final merged = <CatalogItem>[];
+  for (final page in pages) {
+    for (final item in page.items) {
+      final key =
+          '${item.type.compatTypeValue}:${item.personalServerTypeId ?? ''}:${item.personalServerItemId ?? item.id}';
+      if (seen.add(key)) merged.add(item);
+    }
+  }
+  return merged;
+}
+
+String _jellyfinStyleSortBy(CatalogSort sort) {
+  return switch (sort) {
+    CatalogSort.year ||
+    CatalogSort.newest ||
+    CatalogSort.nowPlaying ||
+    CatalogSort.airingToday ||
+    CatalogSort.onTv ||
+    CatalogSort.upcoming => 'ProductionYear,PremiereDate,SortName',
+    CatalogSort.oldest => 'ProductionYear,PremiereDate,SortName',
+    CatalogSort.alphaAsc || CatalogSort.alphaDesc => 'SortName',
+    CatalogSort.topRated ||
+    CatalogSort.imdbRating ||
+    CatalogSort.hiddenGems ||
+    CatalogSort.top => 'CommunityRating,SortName',
+  };
+}
+
+String _jellyfinStyleSortOrder(CatalogSort sort) {
+  return switch (sort) {
+    CatalogSort.oldest || CatalogSort.alphaAsc => 'Ascending',
+    _ => 'Descending',
+  };
 }
 
 bool _isAnimationTaggedPersonalItem(CatalogItem item) {

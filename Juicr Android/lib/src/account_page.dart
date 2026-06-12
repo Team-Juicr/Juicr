@@ -358,7 +358,7 @@ class _AccountPageState extends State<AccountPage> {
     }
     final messenger = ScaffoldMessenger.of(context);
     await AppState.clearAccountSession();
-    DiagnosticLog.add('account sign out reset guest ad choices');
+    DiagnosticLog.add('account sign out cleared local session');
     AppState.shellTab.value = 3;
     if (!mounted) return;
     setState(() => _signingOut = false);
@@ -551,6 +551,20 @@ class _AccountPageState extends State<AccountPage> {
     _snack('Favorites removed.');
   }
 
+  Future<void> _clearLibraryLists() async {
+    final confirmed = await _confirmAction(
+      title: 'Clear all lists?',
+      message:
+          'This removes every custom Library list while keeping saved titles.',
+      confirmLabel: 'Clear',
+    );
+    if (confirmed != true) return;
+    DiagnosticLog.add('account action clear library lists pressed');
+    AppState.clearLibraryLists();
+    await AppState.pushSignedInLibrarySnapshot(reason: 'clear_library_lists');
+    _snack('Library lists cleared.');
+  }
+
   Future<void> _clearSearchHistory() async {
     final confirmed = await _confirmAction(
       title: 'Clear search history?',
@@ -646,16 +660,10 @@ class _AccountPageState extends State<AccountPage> {
                     _AccountDataActionsSection(
                       onClearContinueWatching: _clearContinueWatching,
                       onClearFavorites: _clearFavorites,
+                      onClearLibraryLists: _clearLibraryLists,
                       onClearSearchHistory: _clearSearchHistory,
                       onClearCompletedWatching: _clearCompletedWatching,
                     ),
-                    const SizedBox(height: 12),
-                    if (signedIn)
-                      const _AccountAdChoicesSection()
-                    else
-                      _SignInRequiredCard(
-                        onSignIn: () => showAccountAuthSheet(context),
-                      ),
                     if (signedIn) ...[
                       const SizedBox(height: 12),
                       FilledButton.icon(
@@ -691,52 +699,6 @@ class _AccountPageState extends State<AccountPage> {
               },
             );
           },
-        ),
-      ),
-    );
-  }
-}
-
-class _SignInRequiredCard extends StatelessWidget {
-  const _SignInRequiredCard({required this.onSignIn});
-
-  final VoidCallback onSignIn;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return DecoratedBox(
-      decoration: JuicrVisual.softPanel(colorScheme),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.tune_rounded, size: 20, color: colorScheme.primary),
-                const SizedBox(width: 8),
-                const Text(
-                  'Account tools',
-                  style: TextStyle(fontWeight: FontWeight.w900),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Sign in to change ad choices and notification settings. Guest mode stays free and continues with ads.',
-              style: TextStyle(
-                color: colorScheme.onSurface.withValues(alpha: 0.74),
-                height: 1.25,
-              ),
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: onSignIn,
-              icon: const Icon(Icons.login_rounded),
-              label: const Text('Sign in to change ad choices'),
-            ),
-          ],
         ),
       ),
     );
@@ -1089,67 +1051,6 @@ class _EmojiChoice extends StatelessWidget {
   }
 }
 
-class _AccountAdChoicesSection extends StatelessWidget {
-  const _AccountAdChoicesSection();
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: Listenable.merge([
-        AppState.rewardedVideoAdsEnabled,
-        AppState.interstitialAdsEnabled,
-        AppState.bannerAdsEnabled,
-      ]),
-      builder: (context, _) {
-        return _AccountSwitchCard(
-          icon: Icons.ads_click_rounded,
-          title: 'Ad choices',
-          subtitle:
-              'Juicr is free for everyone. Signed-in accounts can turn ads off on this device.',
-          switches: [
-            _AccountSwitchItem(
-              icon: Icons.play_circle_outline_rounded,
-              title: 'Rewarded / video ads',
-              subtitle: 'Short video prompts before some movie playback.',
-              value: AppState.rewardedVideoAdsEnabled.value,
-              onChanged: (enabled) {
-                DiagnosticLog.add(
-                  'account rewarded video ads ${enabled ? 'enabled' : 'disabled'}',
-                );
-                AppState.setRewardedVideoAdsEnabled(enabled);
-              },
-            ),
-            _AccountSwitchItem(
-              icon: Icons.open_in_full_rounded,
-              title: 'Interstitial ads',
-              subtitle: 'Occasional full-screen ads while browsing.',
-              value: AppState.interstitialAdsEnabled.value,
-              onChanged: (enabled) {
-                DiagnosticLog.add(
-                  'account interstitial ads ${enabled ? 'enabled' : 'disabled'}',
-                );
-                AppState.setInterstitialAdsEnabled(enabled);
-              },
-            ),
-            _AccountSwitchItem(
-              icon: Icons.view_day_outlined,
-              title: 'Banner ads',
-              subtitle: 'Compact banner above the bottom navigation.',
-              value: AppState.bannerAdsEnabled.value,
-              onChanged: (enabled) {
-                DiagnosticLog.add(
-                  'account banner ads ${enabled ? 'enabled' : 'disabled'}',
-                );
-                AppState.setBannerAdsEnabled(enabled);
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
 class _AccountNotificationsSection extends StatelessWidget {
   const _AccountNotificationsSection();
 
@@ -1205,12 +1106,14 @@ class _AccountDataActionsSection extends StatelessWidget {
   const _AccountDataActionsSection({
     required this.onClearContinueWatching,
     required this.onClearFavorites,
+    required this.onClearLibraryLists,
     required this.onClearSearchHistory,
     required this.onClearCompletedWatching,
   });
 
   final VoidCallback onClearContinueWatching;
   final VoidCallback onClearFavorites;
+  final VoidCallback onClearLibraryLists;
   final VoidCallback onClearSearchHistory;
   final VoidCallback onClearCompletedWatching;
 
@@ -1233,6 +1136,12 @@ class _AccountDataActionsSection extends StatelessWidget {
           title: 'Remove all favorites',
           subtitle: 'Remove every saved Library favorite.',
           onTap: onClearFavorites,
+        ),
+        _AccountActionItem(
+          icon: Icons.bookmarks_outlined,
+          title: 'Clear all lists',
+          subtitle: 'Remove every custom Library list.',
+          onTap: onClearLibraryLists,
         ),
         _AccountActionItem(
           icon: Icons.manage_search_rounded,
@@ -1439,7 +1348,7 @@ class _GuestHero extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              'Juicr stays free. Sign in only when you want account features like ad choices and future leaderboard opt-in.',
+              'Juicr stays free. Sign in only when you want account sync, Lists, and future leaderboard opt-in.',
               style: TextStyle(
                 color: colorScheme.onSurface.withValues(alpha: 0.72),
                 height: 1.25,

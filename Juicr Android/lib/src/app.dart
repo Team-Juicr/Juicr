@@ -9,6 +9,8 @@ import 'app_shell.dart';
 import 'diagnostic_log.dart';
 import 'first_run_welcome_page.dart';
 import 'notification_orchestrator.dart';
+import 'release_changelog_view.dart';
+import 'release_updates.dart';
 import 'stream_api.dart';
 import 'system_ui.dart';
 import 'visual_style.dart';
@@ -51,6 +53,7 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
       _maybeShowCrashPrompt();
       unawaited(_refreshProviderHealthAfterStartup());
       unawaited(_checkNotificationsAfterStartup());
+      unawaited(_maybeCheckReleaseOnLaunch());
     });
   }
 
@@ -81,6 +84,7 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
     if (state == AppLifecycleState.resumed) {
       scheduleJuicrSystemUiRestore();
       DiagnosticLog.markSessionRunning('resumed');
+      unawaited(AppState.syncSignedInLibrary(replaceWithRemoteSnapshot: true));
       unawaited(_notificationOrchestrator.check(reason: 'resumed'));
     } else if (state == AppLifecycleState.hidden ||
         state == AppLifecycleState.paused ||
@@ -150,6 +154,78 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
     await Future<void>.delayed(const Duration(milliseconds: 1800));
     if (!mounted) return;
     await _notificationOrchestrator.check(reason: 'startup');
+  }
+
+  Future<void> _maybeCheckReleaseOnLaunch() async {
+    await Future<void>.delayed(const Duration(milliseconds: 2600));
+    if (!mounted || !AppState.releaseCheckOnLaunchEnabled.value) return;
+    try {
+      final installInfo = await DiagnosticLog.installInfo();
+      final versionName = (installInfo['versionName'] ?? '').toString().trim();
+      final channel = releaseChannelForVersion(versionName);
+      final release = await ReleaseUpdatesClient().latestForChannel(channel);
+      if (!mounted ||
+          release.fromFallback ||
+          !AppState.releaseMessageOnLaunchEnabled.value) {
+        return;
+      }
+      final installed = _normalizeReleaseVersion(versionName);
+      final latest = _normalizeReleaseVersion(release.displayVersion);
+      if (installed.isEmpty || latest.isEmpty || installed == latest) return;
+      final context = _navigatorKey.currentContext;
+      if (context == null) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            channel == ReleaseUpdateChannel.nightly
+                ? 'A newer nightly is available: ${release.displayVersion}.'
+                : 'A newer release is available: ${release.displayVersion}.',
+          ),
+          action: SnackBarAction(
+            label: 'Changelog',
+            onPressed: () => _showLaunchReleaseChangelog(release),
+          ),
+        ),
+      );
+    } catch (error) {
+      DiagnosticLog.add('release launch check skipped reason=$error');
+    }
+  }
+
+  String _normalizeReleaseVersion(String value) {
+    var text = value.trim().toLowerCase();
+    if (text.startsWith('v')) text = text.substring(1);
+    final plusIndex = text.indexOf('+');
+    if (plusIndex >= 0) text = text.substring(0, plusIndex);
+    return text.trim();
+  }
+
+  Future<void> _showLaunchReleaseChangelog(ReleaseUpdateInfo release) async {
+    final dialogContext = _navigatorKey.currentContext;
+    if (!mounted || dialogContext == null) return;
+    final body = release.body.trim().isEmpty
+        ? fallbackChangelog(release.channel)
+        : release.body.trim();
+    await showDialog<void>(
+      context: dialogContext,
+      builder: (context) => AlertDialog(
+        title: Text(
+          release.channel == ReleaseUpdateChannel.nightly
+              ? 'Nightly changelog'
+              : 'Release changelog',
+        ),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: SingleChildScrollView(child: ReleaseChangelogView(body: body)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _sendCrashReport() async {
@@ -416,12 +492,15 @@ SystemUiOverlayStyle _systemOverlayStyle({
   final icons = isDark || style == 'black' ? Brightness.light : Brightness.dark;
   return SystemUiOverlayStyle(
     statusBarColor: style == 'transparent' ? Colors.transparent : background,
-    systemNavigationBarColor: background,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarDividerColor: Colors.transparent,
     statusBarIconBrightness: icons,
     statusBarBrightness: icons == Brightness.light
         ? Brightness.dark
         : Brightness.light,
     systemNavigationBarIconBrightness: icons,
+    systemNavigationBarContrastEnforced: false,
+    systemStatusBarContrastEnforced: false,
   );
 }
 
@@ -528,8 +607,13 @@ ThemeData _darkTheme({
       elevation: 0,
       systemOverlayStyle: SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarDividerColor: Colors.transparent,
         statusBarIconBrightness: Brightness.light,
         statusBarBrightness: Brightness.dark,
+        systemNavigationBarIconBrightness: Brightness.light,
+        systemNavigationBarContrastEnforced: false,
+        systemStatusBarContrastEnforced: false,
       ),
       titleTextStyle: const TextStyle(
         color: Colors.white,
@@ -680,8 +764,13 @@ ThemeData _lightTheme({
       elevation: 0,
       systemOverlayStyle: SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarDividerColor: Colors.transparent,
         statusBarIconBrightness: Brightness.dark,
         statusBarBrightness: Brightness.light,
+        systemNavigationBarIconBrightness: Brightness.dark,
+        systemNavigationBarContrastEnforced: false,
+        systemStatusBarContrastEnforced: false,
       ),
       titleTextStyle: TextStyle(
         color: _juicrLightText,

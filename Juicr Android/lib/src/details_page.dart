@@ -1170,8 +1170,10 @@ class _DetailsPageState extends State<DetailsPage>
     EpisodeItem? startEpisode,
   }) async {
     final launchStopwatch = Stopwatch()..start();
-    final season = startEpisode?.season ?? 1;
-    final episode = startEpisode?.episode ?? 1;
+    final effectiveStartEpisode =
+        startEpisode ?? _firstPlayableEpisode(episodes);
+    final season = effectiveStartEpisode?.season ?? 1;
+    final episode = effectiveStartEpisode?.episode ?? 1;
     final basePlaybackKey = '${item.id}:$season:$episode';
     try {
       var playbackKey = _verifiedPlaybackKeyFor(basePlaybackKey);
@@ -1195,7 +1197,7 @@ class _DetailsPageState extends State<DetailsPage>
               item,
               season: season,
               episode: episode,
-              episodeItem: startEpisode,
+              episodeItem: effectiveStartEpisode,
             );
       playbackKey ??= _playbackCacheKeyForResult(basePlaybackKey, result);
       if (!mounted) return;
@@ -1204,7 +1206,7 @@ class _DetailsPageState extends State<DetailsPage>
           : await _configFuture;
       if (!mounted) return;
       await _openResolvedPlayback(
-        startEpisode == null ? title : '$title S$season E$episode',
+        effectiveStartEpisode == null ? title : '$title S$season E$episode',
         result,
         adBlock: config?.adBlock ?? AdBlockConfig.disabled,
         resolveNativeProvider: (providerId) => _api.resolveEpisodeNativeSources(
@@ -1600,6 +1602,17 @@ class _DetailsPageState extends State<DetailsPage>
       if (item.season == season && item.episode == episode) return item;
     }
     return null;
+  }
+
+  EpisodeItem? _firstPlayableEpisode(List<EpisodeItem> episodes) {
+    if (episodes.isEmpty) return null;
+    final sorted = episodes.toList(growable: false)
+      ..sort((left, right) {
+        final seasonCompare = left.season.compareTo(right.season);
+        if (seasonCompare != 0) return seasonCompare;
+        return left.episode.compareTo(right.episode);
+      });
+    return sorted.first;
   }
 
   Future<NativePlayerNextEpisode?> _buildNativeNextEpisode(
