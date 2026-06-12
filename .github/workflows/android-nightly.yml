@@ -16,9 +16,6 @@ on:
         required: true
         type: boolean
         default: true
-  schedule:
-    - cron: "0 16 * * *"
-
 permissions:
   contents: write
 
@@ -248,19 +245,6 @@ jobs:
             echo
             echo "Nightly builds are for public testing before the next stable release. Use the universal APK when unsure which device build to install."
             echo
-            echo "### Android"
-            echo
-            echo "- Universal"
-            echo "- arm64-v8a"
-            echo "- armeabi-v7a"
-            echo "- x86_64"
-            echo
-            echo "### Android TV"
-            echo
-            echo "- Universal"
-            echo "- arm64-v8a"
-            echo "- armeabi-v7a"
-            echo "- x86_64"
           } > nightly-notes.md
 
           cat nightly-notes.md
