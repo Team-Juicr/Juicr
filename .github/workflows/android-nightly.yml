@@ -28,15 +28,16 @@ jobs:
     name: Resolve nightly build
     runs-on: ubuntu-latest
     outputs:
-      source_ref: ${{ steps.nightly.outputs.source_ref }}
-      source_sha: ${{ steps.source.outputs.source_sha }}
+      source_ref: ${{ steps.inputs.outputs.source_ref }}
+      source_sha: ${{ steps.nightly.outputs.source_sha }}
       tag: ${{ steps.nightly.outputs.tag }}
       version: ${{ steps.nightly.outputs.version }}
       version_code: ${{ steps.nightly.outputs.version_code }}
-      publish_prerelease: ${{ steps.nightly.outputs.publish_prerelease }}
+      base_version: ${{ steps.inputs.outputs.base_version }}
+      publish_prerelease: ${{ steps.inputs.outputs.publish_prerelease }}
     steps:
       - name: Resolve nightly inputs
-        id: nightly
+        id: inputs
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -54,29 +55,47 @@ jobs:
             exit 1
           fi
 
-          nightly_date="$(date -u +%Y%m%d)"
-          version_code_base="$(date -u +%y%m%d)"
-          run_slot=$((GITHUB_RUN_NUMBER % 100))
-          version_code=$((10#$version_code_base * 100 + run_slot))
-          version="${base_version}-nightly.${nightly_date}.${GITHUB_RUN_NUMBER}"
-          tag="v${version}"
-
           echo "source_ref=$source_ref" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "base_version=$base_version" >> "$GITHUB_OUTPUT"
           echo "publish_prerelease=$publish_prerelease" >> "$GITHUB_OUTPUT"
 
       - name: Checkout source ref
         uses: actions/checkout@v6
         with:
-          ref: ${{ steps.nightly.outputs.source_ref }}
+          ref: ${{ steps.inputs.outputs.source_ref }}
           fetch-depth: 0
 
-      - name: Resolve source SHA
-        id: source
+      - name: Resolve source and nightly tag
+        id: nightly
         shell: bash
-        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          base_version="${{ steps.inputs.outputs.base_version }}"
+          nightly_date="$(date -u +%Y%m%d)"
+          tag_prefix="v${base_version}-nightly.${nightly_date}."
+          git fetch --tags --force
+          last_slot="$(
+            git tag -l "${tag_prefix}*" \
+              | sed -E "s/^${tag_prefix//./\\.}([0-9]+)$/\1/" \
+              | grep -E '^[0-9]+$' \
+              | sort -n \
+              | tail -1
+          )"
+          if [ -z "$last_slot" ]; then
+            slot=1
+          else
+            slot=$((last_slot + 1))
+          fi
+
+          version_code_base="$(date -u +%y%m%d)"
+          version_code=$((10#$version_code_base * 100 + slot))
+          version="${base_version}-nightly.${nightly_date}.${slot}"
+          tag="v${version}"
+          source_sha="$(git rev-parse HEAD)"
+
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
 
   build-nightly:
     name: Build ${{ matrix.label }} nightly APKs
@@ -234,17 +253,89 @@ jobs:
         env:
           TAG: ${{ needs.resolve-nightly.outputs.tag }}
           VERSION: ${{ needs.resolve-nightly.outputs.version }}
+          BASE_VERSION: ${{ needs.resolve-nightly.outputs.base_version }}
           SOURCE_REF: ${{ needs.resolve-nightly.outputs.source_ref }}
           SOURCE_SHA: ${{ needs.resolve-nightly.outputs.source_sha }}
         run: |
           short_sha="${SOURCE_SHA:0:7}"
+          repo_root="$(git rev-parse --show-toplevel)"
+          changelog="$repo_root/CHANGELOG.md"
+
+          extract_section() {
+            local section="$1"
+            awk -v version="$BASE_VERSION" -v wanted="$section" '
+              BEGIN { in_version=0; in_section=0 }
+              $0 ~ "^## \\[" version "\\]" { in_version=1; next }
+              in_version && $0 ~ "^## \\[" { exit }
+              in_version && $0 ~ "^### " {
+                current = substr($0, 5)
+                if (current == wanted) {
+                  in_section = 1
+                  next
+                }
+                if (in_section) exit
+                next
+              }
+              in_section {
+                if ($0 ~ "^### " || $0 ~ "^## \\[") exit
+                print
+              }
+            ' "$changelog" | sed '/^[[:space:]]*$/d'
+          }
+
+          release_contributors() {
+            local contributors
+            contributors="$(git -C "$repo_root" shortlog -s --no-merges "v1.0.1..HEAD" 2>/dev/null | awk '{ $1=""; sub(/^ /, ""); print "- " $0 }')"
+            if [ -n "$contributors" ]; then
+              printf '%s\n' "$contributors"
+            else
+              echo "- Team Juicr"
+            fi
+          }
+
+          write_section() {
+            local section="$1"
+            local body
+            body="$(extract_section "$section")"
+            echo "## $section"
+            echo
+            if [ -n "$body" ]; then
+              printf '%s\n' "$body"
+            else
+              case "$section" in
+                Added)
+                  echo "- Nightly Android and Android TV APKs are available from the dev branch for public testing before the next stable release."
+                  echo "- The mobile Updates surface can show release checks and changelog details from GitHub releases."
+                  echo "- Personal server catalog browsing now has safer recovery when a connected server returns an unexpectedly small first page."
+                  ;;
+                Changed)
+                  echo "- Nightly tags now use date-local numbering, so each UTC day starts at .1 and increments only for that day."
+                  echo "- Nightly release notes now follow the same Added, Changed, Fixed, Recent work, and Contributors shape as stable releases."
+                  echo "- Personal server playback now resolves series and animation entries to a concrete playable episode before opening the native player."
+                  ;;
+                Fixed)
+                  echo "- Personal server movie and series catalogs can recover from one-item browse pages without changing search behavior."
+                  echo "- Release page clutter from run-number-based nightly tags is avoided for future nightly builds."
+                  echo "- Update and diagnostics UI polish from dev is included for tester feedback before stable."
+                  ;;
+                "Recent work")
+                  echo "- Built from \`$SOURCE_REF\` at \`$short_sha\`."
+                  echo "- Includes current dev changes after stable \`v1.0.1\`."
+                  echo "- Use the universal APK when unsure which device build to install."
+                  ;;
+              esac
+            fi
+            echo
+          }
+
           {
-            echo "## Nightly build"
+            write_section Added
+            write_section Changed
+            write_section Fixed
+            write_section "Recent work"
+            echo "## Contributors"
             echo
-            echo "Built from \`$SOURCE_REF\` at \`$short_sha\`."
-            echo
-            echo "Nightly builds are for public testing before the next stable release. Use the universal APK when unsure which device build to install."
-            echo
+            release_contributors
           } > nightly-notes.md
 
           cat nightly-notes.md
