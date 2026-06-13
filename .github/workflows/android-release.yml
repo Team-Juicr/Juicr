@@ -236,7 +236,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download release APK artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: juicr-${{ needs.resolve-release.outputs.tag }}-*-release-apks
           path: release-assets/${{ needs.resolve-release.outputs.tag }}

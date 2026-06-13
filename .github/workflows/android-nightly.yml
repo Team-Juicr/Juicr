@@ -242,7 +242,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download nightly APK artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: juicr-${{ needs.resolve-nightly.outputs.tag }}-*-nightly-apks
           path: nightly-assets/${{ needs.resolve-nightly.outputs.tag }}
