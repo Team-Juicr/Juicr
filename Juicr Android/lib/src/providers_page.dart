@@ -8872,7 +8872,7 @@ class _AddonRouteEvidenceNotice extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     return Semantics(
       label:
-          'Add-on route evidence records only media type, route status, safe counts, and checked time. Private source, connection, and account details stay out.',
+          'Add-on route evidence records only media type, route status, safe counts, and checked time. URLs, hashes, trackers, headers, tokens, and account details stay out.',
       child: ExcludeSemantics(
         child: DecoratedBox(
           decoration: JuicrVisual.elevatedCardDecoration(
@@ -8907,7 +8907,7 @@ class _AddonRouteEvidenceNotice extends StatelessWidget {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        'After a playback test, Juicr keeps only the route status, media type, safe counts, and checked time. Private source, connection, and account details stay out.',
+                        'After a playback test, Juicr keeps only the route status, media type, safe counts, and checked time. URLs, hashes, trackers, headers, tokens, and account details stay out.',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color:
                                   colorScheme.onSurface.withValues(alpha: 0.66),
