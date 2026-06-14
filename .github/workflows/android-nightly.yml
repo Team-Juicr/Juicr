@@ -78,7 +78,8 @@ jobs:
               | sed -E "s/^${tag_prefix//./\\.}([0-9]+)$/\1/" \
               | grep -E '^[0-9]+$' \
               | sort -n \
-              | tail -1
+              | tail -1 \
+              || true
           )"
           if [ -z "$last_slot" ]; then
             slot=1
