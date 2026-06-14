@@ -169,9 +169,12 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
           !AppState.releaseMessageOnLaunchEnabled.value) {
         return;
       }
-      final installed = _normalizeReleaseVersion(versionName);
-      final latest = _normalizeReleaseVersion(release.displayVersion);
-      if (installed.isEmpty || latest.isEmpty || installed == latest) return;
+      if (!isReleaseUpdateAvailable(
+        installedVersion: versionName,
+        latestVersion: release.displayVersion,
+      )) {
+        return;
+      }
       final context = _navigatorKey.currentContext;
       if (context == null) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -190,14 +193,6 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
     } catch (error) {
       DiagnosticLog.add('release launch check skipped reason=$error');
     }
-  }
-
-  String _normalizeReleaseVersion(String value) {
-    var text = value.trim().toLowerCase();
-    if (text.startsWith('v')) text = text.substring(1);
-    final plusIndex = text.indexOf('+');
-    if (plusIndex >= 0) text = text.substring(0, plusIndex);
-    return text.trim();
   }
 
   Future<void> _showLaunchReleaseChangelog(ReleaseUpdateInfo release) async {

@@ -10,6 +10,7 @@ import 'catalog_empty_state.dart';
 import 'catalog_item.dart';
 import 'details_page.dart';
 import 'diagnostic_log.dart';
+import 'language_options.dart';
 import 'motion.dart';
 import 'stream_api.dart';
 import 'visual_style.dart';
@@ -521,6 +522,7 @@ class _CatalogPageState extends State<CatalogPage>
   String _year = _allYearsLabel;
   String _genre = 'All genres';
   _CatalogOriginOption _origin = const _CatalogOriginOption.all();
+  JuicrLanguageOption _language = const JuicrLanguageOption.any();
   _CatalogScopeOption _scope = const _CatalogScopeOption.all();
   String _search = '';
   Timer? _searchDebounce;
@@ -603,6 +605,12 @@ class _CatalogPageState extends State<CatalogPage>
         type == MediaType.animation;
   }
 
+  bool _supportsLanguageFilter(MediaType type) {
+    return type == MediaType.movie ||
+        type == MediaType.series ||
+        type == MediaType.animation;
+  }
+
   bool _supportsYearFilter(MediaType type, {CatalogSort? sort}) {
     final targetSort = sort ?? _sort;
     return type != MediaType.liveTv &&
@@ -658,6 +666,39 @@ class _CatalogPageState extends State<CatalogPage>
       ]);
     }
     return _originOptionsWithActiveSelection(scopedOptions);
+  }
+
+  List<JuicrLanguageOption> _languageOptionsFor(StreamConfig? config) {
+    final options = config?.catalogLanguages ?? juicrCatalogLanguageOptions;
+    return options.length > 2 ? options : juicrCatalogLanguageOptions;
+  }
+
+  JuicrLanguageOption _languageOptionFor(String? code, StreamConfig? config) {
+    return juicrLanguageOptionForCodeIn(code, _languageOptionsFor(config));
+  }
+
+  Future<StreamConfig?> _browseSheetConfig() async {
+    final current = _latestConfig;
+    if ((current?.catalogLanguages.length ?? 0) > 2) return current;
+    final cached = StreamApi.cachedConfig;
+    if ((cached?.catalogLanguages.length ?? 0) > 2) {
+      _latestConfig = cached;
+      return cached;
+    }
+    StreamConfig? config;
+    try {
+      config = await _api.config();
+    } catch (_) {
+      config = null;
+    }
+    if (!mounted || config == null) return _latestConfig;
+    _latestConfig = config;
+    _configFuture = Future<StreamConfig?>.value(config);
+    DiagnosticLog.add(
+      'catalog config loaded for browse sheet languages=${config.catalogLanguages.length}',
+    );
+    setState(() {});
+    return config;
   }
 
   List<_CatalogOriginOption> _originOptionsWithActiveSelection(
@@ -1317,6 +1358,8 @@ class _CatalogPageState extends State<CatalogPage>
           decoded['year'] != _year ||
           decoded['genre'] != _effectiveGenre(_latestConfig) ||
           decoded['origin'] != _effectiveOriginFor(_type).code ||
+          decoded['language'] !=
+              (_supportsLanguageFilter(_type) ? _language.code : '') ||
           decoded['scope'] != _effectiveScopeFor(_type).displayLabel) {
         return false;
       }
@@ -1392,6 +1435,7 @@ class _CatalogPageState extends State<CatalogPage>
       'year': _year,
       'genre': _effectiveGenre(_latestConfig),
       'origin': _effectiveOriginFor(_type).code,
+      'language': _supportsLanguageFilter(_type) ? _language.code : '',
       'scope': _effectiveScopeFor(_type).displayLabel,
       'skip': _skip,
       'hasMore': _hasMore,
@@ -1417,8 +1461,13 @@ class _CatalogPageState extends State<CatalogPage>
     _genre = options.contains(preferredGenre) ? preferredGenre : options.first;
     final preferredOrigin = preference.originFor(preferredType);
     _origin = _originOptionForCode(preferredType, preferredOrigin);
+    _language = juicrLanguageOptionForCode(
+      _supportsLanguageFilter(preferredType)
+          ? preference.languageFor(preferredType)
+          : '',
+    );
     DiagnosticLog.add(
-      'browse filter restored type=${_type.compatTypeValue} sort=${_sort.id} genre=$_genre origin=${_origin.code}',
+      'browse filter restored type=${_type.compatTypeValue} sort=${_sort.id} genre=$_genre origin=${_origin.code} language=${_language.code}',
     );
   }
 
@@ -1429,11 +1478,13 @@ class _CatalogPageState extends State<CatalogPage>
       year: _year,
       genre: _effectiveGenre(_latestConfig),
       origin: _rememberedOriginCodeFor(_type),
+      language: _supportsLanguageFilter(_type) ? _language.code : '',
     );
   }
 
-  void _openBrowseSheet(BuildContext context) {
-    final config = _latestConfig;
+  Future<void> _openBrowseSheet(BuildContext context) async {
+    final config = await _browseSheetConfig();
+    if (!mounted || !context.mounted) return;
     final typeOptions = _typeOptionsFor(config);
     final filterOptions = _filterOptionsFor(config);
     final scopeOptions = _scopeOptionsFor(_type);
@@ -1452,10 +1503,12 @@ class _CatalogPageState extends State<CatalogPage>
       year: _year,
       genre: _effectiveGenre(config),
       origin: _effectiveOriginFor(_type),
+      language: _languageOptionFor(_language.code, config),
       scope: _effectiveScopeFor(_type),
       genres: filterOptions,
       genreOptionsByType: genreOptionsByType,
       originOptions: _originOptionsFor(_type),
+      languageOptions: _languageOptionsFor(config),
       scopeOptions: scopeOptions,
       years: _yearOptions(config),
       yearSelectionAvailable: _yearSelectionAvailable(config),
@@ -1468,6 +1521,7 @@ class _CatalogPageState extends State<CatalogPage>
       onYearChanged: _setYear,
       onGenreChanged: _setGenre,
       onOriginChanged: _setOrigin,
+      onLanguageChanged: _setLanguage,
       onScopeChanged: _setScope,
     )._showBrowseSheet(context);
   }
@@ -2193,11 +2247,14 @@ class _CatalogPageState extends State<CatalogPage>
     final activeYear = _activeYearFilter;
     final activeGenre = _effectiveGenre(_latestConfig);
     final activeOrigin = _effectiveOriginFor(_type);
+    final activeLanguage = _supportsLanguageFilter(_type)
+        ? juicrCatalogLanguageCode(_language.code)
+        : '';
     final activeScope = _effectiveScopeFor(_type);
-    final timerKey = 'catalog:${requestToken}:$currentSkip';
+    final timerKey = 'catalog:$requestToken:$currentSkip';
     DiagnosticLog.start(
       timerKey,
-      'catalog loadMore type=${_type.compatTypeValue} sort=${_sort.id} year=${activeYear ?? ""} genre=$activeGenre origin=${activeOrigin.code} scope=${activeScope.displayLabel} search="$_search" skip=$currentSkip',
+      'catalog loadMore type=${_type.compatTypeValue} sort=${_sort.id} year=${activeYear ?? ""} genre=$activeGenre origin=${activeOrigin.code} language=$activeLanguage scope=${activeScope.displayLabel} search="$_search" skip=$currentSkip',
     );
     setState(() {
       _loading = true;
@@ -2212,12 +2269,16 @@ class _CatalogPageState extends State<CatalogPage>
         genre: activeGenre,
         year: activeYear,
         originCountry: activeOrigin.code,
+        originalLanguage: activeLanguage,
         company: activeScope.company,
         collection: activeScope.collection,
         search: _search,
         deepSearch: deepSearch,
         preferDefaultCatalog:
-            activeYear != null || !activeOrigin.isAll || !activeScope.isAll,
+            activeYear != null ||
+            !activeOrigin.isAll ||
+            activeLanguage.isNotEmpty ||
+            !activeScope.isAll,
       );
       if (!mounted || requestToken != _requestToken) return;
       final resultItems = _catalogItemsForRequestedType(result.items, _type);
@@ -2246,6 +2307,7 @@ class _CatalogPageState extends State<CatalogPage>
         sort: _search.isNotEmpty ? CatalogSort.top : _sort,
         year: activeYear,
         originCountry: activeOrigin.code,
+        originalLanguage: activeLanguage,
         scope: activeScope,
         nextSkip: _skip,
         stride: result.skipDelta ?? StreamApi.pageSize,
@@ -2315,7 +2377,7 @@ class _CatalogPageState extends State<CatalogPage>
           .toList(growable: false);
       if (posters.isEmpty) return;
       DiagnosticLog.add(
-        'catalog poster prefetch count=${posters.length} type=${_type.compatTypeValue} skip=${_skip}',
+        'catalog poster prefetch count=${posters.length} type=${_type.compatTypeValue} skip=$_skip',
       );
       for (final poster in posters) {
         unawaited(
@@ -2337,6 +2399,7 @@ class _CatalogPageState extends State<CatalogPage>
     required CatalogSort sort,
     String? year,
     required String originCountry,
+    required String originalLanguage,
     required _CatalogScopeOption scope,
     required int nextSkip,
     required int stride,
@@ -2362,6 +2425,7 @@ class _CatalogPageState extends State<CatalogPage>
           genre: requestGenre,
           year: year,
           originCountry: originCountry,
+          originalLanguage: originalLanguage,
           company: scope.company,
           collection: scope.collection,
           search: requestSearch,
@@ -2369,6 +2433,7 @@ class _CatalogPageState extends State<CatalogPage>
           preferDefaultCatalog:
               (year != null && year.trim().isNotEmpty) ||
               originCountry.isNotEmpty ||
+              originalLanguage.isNotEmpty ||
               !scope.isAll,
         );
         if (!mounted || prefetched == null) return;
@@ -2387,6 +2452,7 @@ class _CatalogPageState extends State<CatalogPage>
           genre: requestGenre,
           year: year,
           originCountry: originCountry,
+          originalLanguage: originalLanguage,
           company: scope.company,
           collection: scope.collection,
           search: requestSearch,
@@ -2394,6 +2460,7 @@ class _CatalogPageState extends State<CatalogPage>
           preferDefaultCatalog:
               (year != null && year.trim().isNotEmpty) ||
               originCountry.isNotEmpty ||
+              originalLanguage.isNotEmpty ||
               !scope.isAll,
         );
       }());
@@ -2435,6 +2502,9 @@ class _CatalogPageState extends State<CatalogPage>
           ? carriedOrigin
           : preference.originFor(type);
       _origin = _originOptionForCode(type, preferredOrigin);
+      _language = juicrLanguageOptionForCode(
+        _supportsLanguageFilter(type) ? preference.languageFor(type) : '',
+      );
     });
     _primeOriginOptions();
     _rememberBrowseFilterPreference();
@@ -2495,7 +2565,27 @@ class _CatalogPageState extends State<CatalogPage>
     DiagnosticLog.add(
       'filter origin changed ${_origin.code} -> ${origin.code}',
     );
-    setState(() => _origin = origin);
+    setState(() {
+      _origin = origin;
+      if (!origin.isAll) {
+        _language = const JuicrLanguageOption.any();
+      }
+    });
+    _rememberBrowseFilterPreference();
+    _reload(preserveVisibleItems: false);
+  }
+
+  void _setLanguage(JuicrLanguageOption language) {
+    if (_language == language) return;
+    DiagnosticLog.add(
+      'filter language changed ${_language.code} -> ${language.code}',
+    );
+    setState(() {
+      _language = language;
+      if (!language.isAny) {
+        _origin = const _CatalogOriginOption.all();
+      }
+    });
     _rememberBrowseFilterPreference();
     _reload(preserveVisibleItems: false);
   }
@@ -2915,10 +3005,12 @@ class _CatalogPageState extends State<CatalogPage>
                       year: _year,
                       genre: activeGenre,
                       origin: _effectiveOriginFor(_type),
+                      language: _languageOptionFor(_language.code, config),
                       scope: activeScope,
                       genres: filterOptions,
                       genreOptionsByType: genreOptionsByType,
                       originOptions: _originOptionsFor(_type),
+                      languageOptions: _languageOptionsFor(config),
                       scopeOptions: scopeOptions,
                       years: yearOptions,
                       yearSelectionAvailable: yearSelectionAvailable,
@@ -2931,6 +3023,7 @@ class _CatalogPageState extends State<CatalogPage>
                       onYearChanged: _setYear,
                       onGenreChanged: _setGenre,
                       onOriginChanged: _setOrigin,
+                      onLanguageChanged: _setLanguage,
                       onScopeChanged: _setScope,
                     ),
                   ),
@@ -4134,10 +4227,12 @@ class _BrowseControlCard extends StatelessWidget {
     required this.year,
     required this.genre,
     required this.origin,
+    required this.language,
     required this.scope,
     required this.genres,
     required this.genreOptionsByType,
     required this.originOptions,
+    required this.languageOptions,
     required this.scopeOptions,
     required this.years,
     required this.yearSelectionAvailable,
@@ -4149,6 +4244,7 @@ class _BrowseControlCard extends StatelessWidget {
     required this.onYearChanged,
     required this.onGenreChanged,
     required this.onOriginChanged,
+    required this.onLanguageChanged,
     required this.onScopeChanged,
   });
 
@@ -4158,10 +4254,12 @@ class _BrowseControlCard extends StatelessWidget {
   final String year;
   final String genre;
   final _CatalogOriginOption origin;
+  final JuicrLanguageOption language;
   final _CatalogScopeOption scope;
   final List<String> genres;
   final Map<MediaType, List<String>> genreOptionsByType;
   final List<_CatalogOriginOption> originOptions;
+  final List<JuicrLanguageOption> languageOptions;
   final List<_CatalogScopeOption> scopeOptions;
   final List<String> years;
   final bool yearSelectionAvailable;
@@ -4173,6 +4271,7 @@ class _BrowseControlCard extends StatelessWidget {
   final ValueChanged<String> onYearChanged;
   final ValueChanged<String> onGenreChanged;
   final ValueChanged<_CatalogOriginOption> onOriginChanged;
+  final ValueChanged<JuicrLanguageOption> onLanguageChanged;
   final ValueChanged<_CatalogScopeOption> onScopeChanged;
 
   @override
@@ -4290,6 +4389,7 @@ class _BrowseControlCard extends StatelessWidget {
     final hasYear =
         year != 'Unknown' && year != _CatalogPageState._allYearsLabel;
     final hasOrigin = !origin.isAll;
+    final hasLanguage = !language.isAny;
     final hasScope = !scope.isAll;
     final parts = <String>[];
     if (hasGenre && hasYear && hasOrigin) {
@@ -4299,6 +4399,7 @@ class _BrowseControlCard extends StatelessWidget {
       if (hasYear) parts.add(year);
     }
     if (hasOrigin) parts.add(origin.shortLabel);
+    if (hasLanguage) parts.add(language.shortLabel);
     if (hasScope) parts.add(scope.shortLabel);
     return parts.join(' - ');
   }
@@ -4358,6 +4459,12 @@ class _BrowseControlCard extends StatelessWidget {
         type == MediaType.animation;
   }
 
+  bool _supportsLanguageFilter(MediaType type) {
+    return type == MediaType.movie ||
+        type == MediaType.series ||
+        type == MediaType.animation;
+  }
+
   IconData _typeIcon(MediaType type) {
     return switch (type) {
       MediaType.movie => Icons.movie_creation_outlined,
@@ -4409,6 +4516,15 @@ class _BrowseControlCard extends StatelessWidget {
         (displayOriginOptions.contains(origin)
             ? origin
             : const _CatalogOriginOption.all());
+    final displayLanguage = _supportsLanguageFilter(displayType)
+        ? (currentType != null && currentType != type
+              ? const JuicrLanguageOption.any()
+              : language)
+        : const JuicrLanguageOption.any();
+    final displayHasLanguage =
+        _supportsLanguageFilter(displayType) && !displayLanguage.isAny;
+    final displayHasOrigin =
+        _supportsOriginFilter(displayType) && !displayOrigin.isAll;
     final allScopeOptions = displayType == MediaType.movie
         ? scopeOptions
         : scopeOptions
@@ -4546,7 +4662,28 @@ class _BrowseControlCard extends StatelessWidget {
                         );
                       },
                     ),
-                    if (_supportsOriginFilter(displayType))
+                    if (_supportsLanguageFilter(displayType) &&
+                        !displayHasOrigin)
+                      _BrowseSummaryTile(
+                        icon: Icons.translate_rounded,
+                        title: 'Language',
+                        value: displayLanguage.label,
+                        onTap: () {
+                          _openNestedBrowsePicker<JuicrLanguageOption>(
+                            context,
+                            sheetContext: sheetContext,
+                            title: 'Language',
+                            value: displayLanguage,
+                            values: languageOptions,
+                            labelFor: (language) => language.label,
+                            iconFor: (_) => Icons.translate_rounded,
+                            onSelected: onLanguageChanged,
+                            onBack: (_) => onOpenBrowseSheet(),
+                          );
+                        },
+                      ),
+                    if (_supportsOriginFilter(displayType) &&
+                        !displayHasLanguage)
                       _BrowseSummaryTile(
                         icon: Icons.public_rounded,
                         title: 'Origin',

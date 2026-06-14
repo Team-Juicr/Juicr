@@ -1,3 +1,5 @@
+import 'language_options.dart';
+
 enum PlaybackSourceClass { direct, debrid, external, p2p, unsupported }
 
 extension PlaybackSourceClassInfo on PlaybackSourceClass {
@@ -109,6 +111,7 @@ class PlaybackSource {
     required this.url,
     this.type,
     this.quality,
+    this.language,
     this.sourceClass = PlaybackSourceClass.direct,
     this.headers = const <String, String>{},
     this.subtitles = const <PlaybackSubtitle>[],
@@ -129,6 +132,8 @@ class PlaybackSource {
       url: (json['url'] ?? '').toString(),
       type: json['type']?.toString(),
       quality: json['quality']?.toString(),
+      language: (json['language'] ?? json['lang'] ?? json['audioLanguage'])
+          ?.toString(),
       sourceClass: PlaybackSourceClassInfo.fromWireName(
         (json['sourceClass'] ?? json['source_class'])?.toString(),
       ),
@@ -148,6 +153,7 @@ class PlaybackSource {
       'url': sourceClass == PlaybackSourceClass.p2p ? '[p2p-hidden]' : url,
       if (type != null && type!.isNotEmpty) 'type': type,
       if (quality != null && quality!.isNotEmpty) 'quality': quality,
+      if (language != null && language!.isNotEmpty) 'language': language,
       'sourceClass': sourceClass.wireName,
       if (headers.isNotEmpty) 'headers': headers,
       if (subtitles.isNotEmpty)
@@ -161,6 +167,7 @@ class PlaybackSource {
   final String url;
   final String? type;
   final String? quality;
+  final String? language;
   final PlaybackSourceClass sourceClass;
   final Map<String, String> headers;
   final List<PlaybackSubtitle> subtitles;
@@ -174,6 +181,7 @@ class PlaybackSource {
     String? url,
     String? type,
     String? quality,
+    String? language,
     PlaybackSourceClass? sourceClass,
     Map<String, String>? headers,
     List<PlaybackSubtitle>? subtitles,
@@ -185,6 +193,7 @@ class PlaybackSource {
       url: url ?? this.url,
       type: type ?? this.type,
       quality: quality ?? this.quality,
+      language: language ?? this.language,
       sourceClass: sourceClass ?? this.sourceClass,
       headers: headers ?? this.headers,
       subtitles: subtitles ?? this.subtitles,
@@ -397,6 +406,10 @@ int playbackQualityRank(String label) {
 }
 
 String? playbackSourceLanguageLabel(PlaybackSource source) {
+  final explicitLanguage = juicrCatalogLanguageCode(source.language);
+  if (explicitLanguage.isNotEmpty) {
+    return juicrLanguageLabelForCode(explicitLanguage);
+  }
   final haystack = '${source.name} ${source.quality ?? ''} ${source.url}'
       .toLowerCase();
   const candidates = <String, String>{
@@ -422,13 +435,17 @@ String? playbackSourceLanguageLabel(PlaybackSource source) {
   for (final entry in candidates.entries) {
     if (haystack.contains(entry.key)) return entry.value;
   }
-  return null;
+  return 'Language unknown';
 }
 
 int playbackLanguageRank(String? language) {
   final normalized = language?.toLowerCase();
   if (normalized == 'english') return 0;
-  if (normalized == null || normalized == 'unknown') return 1;
+  if (normalized == null ||
+      normalized == 'language unknown' ||
+      normalized == 'unknown') {
+    return 1;
+  }
   return 2;
 }
 

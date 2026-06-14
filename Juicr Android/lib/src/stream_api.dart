@@ -8,6 +8,7 @@ import 'app_state.dart';
 import 'catalog_item.dart';
 import 'copy_normalization.dart';
 import 'diagnostic_log.dart';
+import 'language_options.dart';
 import 'p2p_stream_bridge.dart';
 import 'personal_server_api.dart';
 import 'playback_provider.dart';
@@ -827,6 +828,7 @@ class StreamConfig {
     this.addonCatalogTypes = const <String>[],
     this.addonYearsByType = const <String, List<String>>{},
     this.catalogOriginCountriesByType = const <String, List<String>>{},
+    this.catalogLanguages = juicrCatalogLanguageOptions,
     required this.years,
     required this.features,
     this.sourcePolicy = const <String, dynamic>{},
@@ -850,6 +852,7 @@ class StreamConfig {
       catalogOriginCountriesByType: _stringListMap(
         json['catalogOriginCountriesByType'],
       ),
+      catalogLanguages: juicrLanguageOptionsFromJson(json['catalogLanguages']),
       years: _stringList(json['years']),
       features: json['features'] is Map<String, dynamic>
           ? Map<String, dynamic>.from(json['features'] as Map<String, dynamic>)
@@ -874,6 +877,7 @@ class StreamConfig {
   final List<String> addonCatalogTypes;
   final Map<String, List<String>> addonYearsByType;
   final Map<String, List<String>> catalogOriginCountriesByType;
+  final List<JuicrLanguageOption> catalogLanguages;
   final List<String> years;
   final Map<String, dynamic> features;
   final Map<String, dynamic> sourcePolicy;
@@ -1071,7 +1075,10 @@ class StreamApi {
   Future<RuntimeAppPolicy?> runtimeAppPolicy() async {
     try {
       final response = await _client
-          .get(Uri.parse('$baseUrl/runtime/app-policy'), headers: _hostedHeaders)
+          .get(
+            Uri.parse('$baseUrl/runtime/app-policy'),
+            headers: _hostedHeaders,
+          )
           .timeout(const Duration(seconds: 10));
       if (response.statusCode != 200) return null;
       final decoded = _decodeResponse(response, 'Runtime app policy');
@@ -1940,6 +1947,7 @@ class StreamApi {
     String? genre,
     String? year,
     String? originCountry,
+    String? originalLanguage,
     String? company,
     String? collection,
     String? search,
@@ -1952,6 +1960,7 @@ class StreamApi {
           sort,
           year: year,
           originCountry: originCountry,
+          originalLanguage: originalLanguage,
           company: company,
           collection: collection,
         );
@@ -1962,6 +1971,7 @@ class StreamApi {
       genre: genre,
       year: year,
       originCountry: originCountry,
+      originalLanguage: originalLanguage,
       company: company,
       collection: collection,
       search: search,
@@ -1971,14 +1981,14 @@ class StreamApi {
     final cachedCatalog = _catalogCache[cacheKey];
     if (cachedCatalog != null) {
       DiagnosticLog.add(
-        'catalog cache hit type=${type.compatTypeValue} sort=${sort.id} skip=$skip year=${year ?? ""} genre=${genre ?? ""} origin=${originCountry ?? ""} search="${(search ?? '').trim()}" count=${cachedCatalog.items.length} hasMore=${cachedCatalog.hasMore ?? false}',
+        'catalog cache hit type=${type.compatTypeValue} sort=${sort.id} skip=$skip year=${year ?? ""} genre=${genre ?? ""} origin=${originCountry ?? ""} language=${originalLanguage ?? ""} search="${(search ?? '').trim()}" count=${cachedCatalog.items.length} hasMore=${cachedCatalog.hasMore ?? false}',
       );
       return cachedCatalog;
     }
     final inFlightCatalog = _catalogInFlight[cacheKey];
     if (inFlightCatalog != null) {
       DiagnosticLog.add(
-        'catalog in-flight hit type=${type.compatTypeValue} sort=${sort.id} skip=$skip year=${year ?? ""} genre=${genre ?? ""} origin=${originCountry ?? ""} search="${(search ?? '').trim()}"',
+        'catalog in-flight hit type=${type.compatTypeValue} sort=${sort.id} skip=$skip year=${year ?? ""} genre=${genre ?? ""} origin=${originCountry ?? ""} language=${originalLanguage ?? ""} search="${(search ?? '').trim()}"',
       );
       return inFlightCatalog;
     }
@@ -1991,6 +2001,7 @@ class StreamApi {
       genre: genre,
       year: year,
       originCountry: originCountry,
+      originalLanguage: originalLanguage,
       company: company,
       collection: collection,
       search: search,
@@ -2012,6 +2023,7 @@ class StreamApi {
     String? genre,
     String? year,
     String? originCountry,
+    String? originalLanguage,
     String? company,
     String? collection,
     String? search,
@@ -2024,6 +2036,7 @@ class StreamApi {
           sort,
           year: year,
           originCountry: originCountry,
+          originalLanguage: originalLanguage,
           company: company,
           collection: collection,
         );
@@ -2034,6 +2047,7 @@ class StreamApi {
       genre: genre,
       year: year,
       originCountry: originCountry,
+      originalLanguage: originalLanguage,
       company: company,
       collection: collection,
       search: search,
@@ -2055,6 +2069,7 @@ class StreamApi {
         genre: genre,
         year: year,
         originCountry: originCountry,
+        originalLanguage: originalLanguage,
         company: company,
         collection: collection,
         search: search,
@@ -2074,6 +2089,7 @@ class StreamApi {
     String? genre,
     String? year,
     String? originCountry,
+    String? originalLanguage,
     String? company,
     String? collection,
     String? search,
@@ -2085,10 +2101,12 @@ class StreamApi {
     final cleanYear = year?.trim();
     final hasYearFilter = cleanYear != null && cleanYear.isNotEmpty;
     final cleanGenre = genre?.trim() ?? '';
+    final cleanOriginalLanguage = _normalizeOriginalLanguage(originalLanguage);
     final focusedCatalogFilter =
         cleanedSearch.isNotEmpty ||
         hasYearFilter ||
         (originCountry?.trim().isNotEmpty == true) ||
+        cleanOriginalLanguage.isNotEmpty ||
         (company?.trim().isNotEmpty == true) ||
         (collection?.trim().isNotEmpty == true) ||
         (cleanGenre.isNotEmpty &&
@@ -2178,6 +2196,7 @@ class StreamApi {
         genre: genre,
         year: year,
         originCountry: originCountry,
+        originalLanguage: cleanOriginalLanguage,
         company: company,
         collection: collection,
         search: search,
@@ -2227,6 +2246,7 @@ class StreamApi {
       genre: genre,
       year: year,
       originCountry: originCountry,
+      originalLanguage: cleanOriginalLanguage,
       company: company,
       collection: collection,
       search: search,
@@ -2259,6 +2279,7 @@ class StreamApi {
     String? genre,
     String? year,
     String? originCountry,
+    String? originalLanguage,
     String? company,
     String? collection,
     String? search,
@@ -2275,6 +2296,7 @@ class StreamApi {
           genre: genre,
           year: year,
           originCountry: originCountry,
+          originalLanguage: originalLanguage,
           company: company,
           collection: collection,
           search: search,
@@ -2314,8 +2336,14 @@ class StreamApi {
         RegExp(r'^\d{4}$').hasMatch(normalizedGenre)) {
       return;
     }
-    final key = '${type.compatTypeValue}:${sort.id}:$normalizedGenre';
-    if (_builtInGenreScanCache.remove(key) != null) {
+    final keyPrefix = '${type.compatTypeValue}:${sort.id}:$normalizedGenre:';
+    final matchingKeys = _builtInGenreScanCache.keys
+        .where((key) => key.startsWith(keyPrefix))
+        .toList(growable: false);
+    for (final key in matchingKeys) {
+      _builtInGenreScanCache.remove(key);
+    }
+    if (matchingKeys.isNotEmpty) {
       DiagnosticLog.add(
         'catalog built-in genre scan cache dropped type=${type.compatTypeValue} sort=${sort.id} reason=retry',
       );
@@ -2531,6 +2559,7 @@ class StreamApi {
     String? genre,
     String? year,
     String? originCountry,
+    String? originalLanguage,
     String? company,
     String? collection,
     String? search,
@@ -2545,6 +2574,7 @@ class StreamApi {
       (genre ?? '').trim(),
       (year ?? '').trim(),
       (originCountry ?? '').trim().toUpperCase(),
+      _normalizeOriginalLanguage(originalLanguage),
       (company ?? '').trim().toLowerCase(),
       (collection ?? '').trim().toLowerCase(),
       (search ?? '').trim().toLowerCase(),
@@ -2711,12 +2741,14 @@ class StreamApi {
     String? genre,
     String? year,
     String? originCountry,
+    String? originalLanguage,
     String? company,
     String? collection,
     String? search,
     required bool softFail,
   }) async {
     final cleanedSearch = search?.trim() ?? '';
+    final cleanOriginalLanguage = _normalizeOriginalLanguage(originalLanguage);
     final selectedYear = year?.trim().isNotEmpty == true
         ? year!.trim()
         : genre != null && RegExp(r'^\d{4}$').hasMatch(genre.trim())
@@ -2739,6 +2771,7 @@ class StreamApi {
         skip: skip,
         year: selectedYear,
         originCountry: originCountry,
+        originalLanguage: cleanOriginalLanguage,
         company: company,
         collection: collection,
         softFail: softFail,
@@ -2784,6 +2817,7 @@ class StreamApi {
               query['genre'] = selectedGenre;
             }
             _applyOriginCountryFilter(query, originCountry);
+            _applyOriginalLanguageFilter(query, cleanOriginalLanguage);
           }
 
           final uri = Uri.parse(
@@ -2850,17 +2884,20 @@ class StreamApi {
     required String genre,
     String? year,
     String? originCountry,
+    String? originalLanguage,
     String? company,
     String? collection,
     required bool softFail,
   }) async {
     final normalizedGenre = genre.trim().toLowerCase();
+    final cleanOriginalLanguage = _normalizeOriginalLanguage(originalLanguage);
     final cacheKey = [
       type.compatTypeValue,
       sort.id,
       normalizedGenre,
       (year ?? '').trim(),
       (originCountry ?? '').trim().toUpperCase(),
+      cleanOriginalLanguage,
       (company ?? '').trim().toLowerCase(),
       (collection ?? '').trim().toLowerCase(),
     ].join(':');
@@ -2906,6 +2943,7 @@ class StreamApi {
           collection: collection,
         );
         _applyOriginCountryFilter(query, originCountry);
+        _applyOriginalLanguageFilter(query, cleanOriginalLanguage);
         if (year != null && year.trim().isNotEmpty) {
           query['year'] = year.trim();
         }
@@ -3115,11 +3153,13 @@ class StreamApi {
     CatalogSort sort, {
     String? year,
     String? originCountry,
+    String? originalLanguage,
     String? company,
     String? collection,
   }) {
     return (year != null && year.trim().isNotEmpty) ||
         (originCountry != null && originCountry.trim().isNotEmpty) ||
+        (originalLanguage != null && originalLanguage.trim().isNotEmpty) ||
         (company != null && company.trim().isNotEmpty) ||
         (collection != null && collection.trim().isNotEmpty);
   }
@@ -3130,6 +3170,7 @@ class StreamApi {
     required int skip,
     required String year,
     String? originCountry,
+    String? originalLanguage,
     String? company,
     String? collection,
     required bool softFail,
@@ -3144,6 +3185,7 @@ class StreamApi {
     var scanExhausted = false;
     var scannedRaw = 0;
     final today = _todayReleaseDate();
+    final cleanOriginalLanguage = _normalizeOriginalLanguage(originalLanguage);
 
     for (
       var page = 1;
@@ -3165,6 +3207,7 @@ class StreamApi {
           collection: collection,
         );
         _applyOriginCountryFilter(query, originCountry);
+        _applyOriginalLanguageFilter(query, cleanOriginalLanguage);
         final uri = Uri.parse(
           '$baseUrl/catalog',
         ).replace(queryParameters: query);
@@ -3957,6 +4000,7 @@ class StreamApi {
                 url: p2pDescriptor.syntheticUrl,
                 type: 'p2p',
                 quality: _streamQuality(stream),
+                language: _streamLanguage(stream),
                 sourceClass: PlaybackSourceClass.p2p,
                 subtitles: _mapList(
                   stream['subtitles'],
@@ -3979,6 +4023,7 @@ class StreamApi {
                   url: url,
                   type: _streamType(url),
                   quality: _streamQuality(stream),
+                  language: _streamLanguage(stream),
                   sourceClass: sourceClass,
                   headers: headers,
                   subtitles: _mapList(
@@ -4007,6 +4052,7 @@ class StreamApi {
                 url: externalUrl,
                 type: _streamType(externalUrl),
                 quality: _streamQuality(stream),
+                language: _streamLanguage(stream),
                 sourceClass: sourceClass,
                 headers: headers,
                 subtitles: _mapList(
@@ -4750,6 +4796,25 @@ void _applyOriginCountryFilter(
   if (cleanOrigin != null && RegExp(r'^[A-Z]{2}$').hasMatch(cleanOrigin)) {
     query['originCountry'] = cleanOrigin;
   }
+}
+
+void _applyOriginalLanguageFilter(
+  Map<String, String> query,
+  String? originalLanguage,
+) {
+  final cleanLanguage = _normalizeOriginalLanguage(originalLanguage);
+  if (cleanLanguage.isNotEmpty) {
+    query['originalLanguage'] = cleanLanguage;
+  }
+}
+
+String _normalizeOriginalLanguage(String? originalLanguage) {
+  final cleanLanguage = originalLanguage?.trim().toLowerCase();
+  if (cleanLanguage == null ||
+      !RegExp(r'^[a-z]{2,3}$').hasMatch(cleanLanguage)) {
+    return '';
+  }
+  return cleanLanguage;
 }
 
 String _sortId(CatalogSort sort) {
@@ -5545,6 +5610,15 @@ String? _streamQuality(Map<String, dynamic> stream) {
     caseSensitive: false,
   ).firstMatch(title);
   return match?.group(1)?.toUpperCase();
+}
+
+String? _streamLanguage(Map<String, dynamic> stream) {
+  final rawLanguage =
+      (stream['language'] ?? stream['lang'] ?? stream['audioLanguage'])
+          ?.toString()
+          .trim();
+  if (rawLanguage == null || rawLanguage.isEmpty) return null;
+  return rawLanguage;
 }
 
 String? _streamType(String url) {

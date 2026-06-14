@@ -776,6 +776,13 @@ class _SettingsPageState extends State<SettingsPage> {
     AppState.updateNativePlaybackOverrides(next);
   }
 
+  void _updateSubtitleBackgroundRadius(
+    NativePlaybackOverrides overrides,
+    double value,
+  ) {
+    _updateNativeOverrides(overrides.copyWith(subtitleBackgroundRadius: value));
+  }
+
   void _updatePlayerBehavior(PlayerBehaviorSettings next) {
     AppState.updatePlayerBehaviorSettings(next);
   }
@@ -1507,10 +1514,26 @@ class _SettingsPageState extends State<SettingsPage> {
       builder: (context) => _OptionSheet<String>(
         title: 'Subtitle auto-select',
         options: const [
-          _OptionItem(value: 'off', label: 'Off'),
-          _OptionItem(value: 'default', label: 'Default language'),
-          _OptionItem(value: 'last', label: 'Last used'),
-          _OptionItem(value: 'forced', label: 'Forced only'),
+          _OptionItem(
+            value: 'off',
+            label: 'Off',
+            subtitle: 'Start playback without choosing subtitles.',
+          ),
+          _OptionItem(
+            value: 'default',
+            label: 'Default language',
+            subtitle: 'Prefer your selected subtitle language when available.',
+          ),
+          _OptionItem(
+            value: 'last',
+            label: 'Last used',
+            subtitle: 'Reuse the subtitle track saved for this title.',
+          ),
+          _OptionItem(
+            value: 'forced',
+            label: 'Forced only',
+            subtitle: 'Use only forced captions when a source includes them.',
+          ),
         ],
         selected: settings.subtitleAutoSelect,
       ),
@@ -2435,13 +2458,11 @@ class _SettingsPageState extends State<SettingsPage> {
                                 divisions: 8,
                                 labelBuilder: (value) =>
                                     value >= 32 ? 'Pill' : '${value.round()}',
-                                onChanged: (value) => _updateNativeOverrides(
-                                  overrides.copyWith(
-                                    subtitleBackgroundRadius: value >= 32
-                                        ? 999
-                                        : value,
-                                  ),
-                                ),
+                                onChanged: (value) =>
+                                    _updateSubtitleBackgroundRadius(
+                                      overrides,
+                                      value >= 32 ? 999 : value,
+                                    ),
                               ),
                               _SettingsColorTile(
                                 icon: Icons.format_color_text_rounded,
@@ -10993,7 +11014,7 @@ class _BatteryDataHelpSheet extends StatelessWidget {
       (
         Icons.privacy_tip_outlined,
         'Privacy boundary',
-        'Juicr does not log Wi-Fi names, IP addresses, peers, playable URLs, account details, tokens, or headers for these checks.',
+        'Juicr hides stream URLs, manifest URLs, and long secret-looking values. Juicr does not log Wi-Fi names, IP addresses, peers, playable URLs, account details, tokens, or headers for these checks.',
       ),
       (
         Icons.shield_outlined,

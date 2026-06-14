@@ -21,6 +21,7 @@ import 'native_media_bridge.dart';
 import 'p2p_indexer_connectors.dart';
 import 'p2p_stream_bridge.dart';
 import 'playback_provider.dart';
+import 'skip_segments.dart';
 import 'source_ranking.dart';
 import 'stream_api.dart';
 import 'system_ui.dart';
@@ -136,6 +137,8 @@ class NativePlayerPage extends StatefulWidget {
     this.progressItem,
     this.playbackKey,
     this.progressSubtitle,
+    this.skipSegmentSeason,
+    this.skipSegmentEpisode,
     this.nextEpisodeLabel,
     this.onNextEpisode,
     this.enableProviderWarmup = true,
@@ -152,6 +155,8 @@ class NativePlayerPage extends StatefulWidget {
   final CatalogItem? progressItem;
   final String? playbackKey;
   final String? progressSubtitle;
+  final int? skipSegmentSeason;
+  final int? skipSegmentEpisode;
   final String? nextEpisodeLabel;
   final Future<NativePlayerNextEpisode?> Function()? onNextEpisode;
   final bool enableProviderWarmup;
@@ -193,6 +198,8 @@ class NativePlayerNextEpisode {
     this.progressItem,
     this.playbackKey,
     this.progressSubtitle,
+    this.skipSegmentSeason,
+    this.skipSegmentEpisode,
     this.nextEpisodeLabel,
     this.onNextEpisode,
     this.limitToFirstQualityPass = false,
@@ -207,6 +214,8 @@ class NativePlayerNextEpisode {
   final CatalogItem? progressItem;
   final String? playbackKey;
   final String? progressSubtitle;
+  final int? skipSegmentSeason;
+  final int? skipSegmentEpisode;
   final String? nextEpisodeLabel;
   final Future<NativePlayerNextEpisode?> Function()? onNextEpisode;
   final bool limitToFirstQualityPass;
@@ -789,9 +798,16 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   CatalogItem? _progressItem;
   String? _playbackKey;
   String? _progressSubtitle;
+  int? _skipSegmentSeason;
+  int? _skipSegmentEpisode;
   String? _nextEpisodeLabel;
   Future<NativePlayerNextEpisode?> Function()? _nextEpisodeResolver;
   final StreamApi _feedbackApi = StreamApi();
+  final PlaybackSkipSegmentClient _skipSegmentClient =
+      PlaybackSkipSegmentClient();
+  List<PlaybackSkipSegment> _skipSegments = const <PlaybackSkipSegment>[];
+  int _skipSegmentLoadGeneration = 0;
+  Duration _skipSegmentLookupDuration = Duration.zero;
 
   _NativePlaybackController? _controller;
   bool _loading = true;
@@ -802,12 +818,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   bool _playbackWaitMessagePausedPlayback = false;
   String? _gestureLabel;
   IconData? _gestureIcon;
+  bool _gestureHintVisible = false;
+  bool _gestureHintScheduled = false;
   double _brightnessPreview = 0.5;
   double _volumePreview = 0.5;
   bool _pipSupported = false;
   bool _androidAutoPipArmed = false;
   bool _keepScreenOn = false;
   Timer? _hideControlsTimer;
+  Timer? _gestureHintTimer;
   Timer? _stallWatchdogTimer;
   Timer? _openingGuardTimer;
   Timer? _deferredResumeSeekTimer;
@@ -949,6 +968,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _playbackKey = widget.playbackKey;
     _requests = _requestsWithVerifiedSource(widget.sources);
     _progressSubtitle = widget.progressSubtitle;
+    _skipSegmentSeason = widget.skipSegmentSeason;
+    _skipSegmentEpisode = widget.skipSegmentEpisode;
     _nextEpisodeLabel = widget.nextEpisodeLabel;
     _nextEpisodeResolver = widget.onNextEpisode;
     WidgetsBinding.instance.addObserver(this);
@@ -960,6 +981,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _pipChannel.setMethodCallHandler(_handlePipChannelCall);
     _loadPipSupport();
     unawaited(NativeMediaBridge.loadCapabilities());
+    unawaited(_loadSkipSegments());
     _openNextAvailableSource();
   }
 
@@ -979,6 +1001,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _playerClosing = true;
     WidgetsBinding.instance.removeObserver(this);
     _hideControlsTimer?.cancel();
+    _gestureHintTimer?.cancel();
     _stallWatchdogTimer?.cancel();
     _openingGuardTimer?.cancel();
     _cancelDeferredResumeSeek();
@@ -5721,7 +5744,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _subtitleBottomOffset = prefs.subtitleBottomOffset;
       _fitMode = VideoFitMode.fromName(prefs.videoFitMode);
       DiagnosticLog.add(
-        'native preferences restored key=[redacted] quality=${prefs.quality} normalized=${_preferredQuality ?? 'Auto'} speed=${prefs.speed} fit=${_fitMode.name}',
+        'native preferences restored key=[redacted] qualityMode=${_preferredQuality == null ? 'auto' : 'saved'} speedSaved=${prefs.speed != 1} fitSaved=${_fitMode != VideoFitMode.fit}',
       );
     }
 
@@ -6129,6 +6152,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _optionSheetOpen = false;
       _settingsExpanded = false;
       _controlsVisible = false;
+      _clearGestureHintState();
       _locked = false;
     });
     unawaited(_setKeepScreenOn(false));
@@ -6150,6 +6174,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         setState(() {
           _controlsVisible = false;
           _settingsExpanded = false;
+          _clearGestureHintState();
         });
       }
       return;
@@ -6162,11 +6187,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _playbackWaitMessage = message;
         _controlsVisible = false;
         _settingsExpanded = false;
+        _clearGestureHintState();
       });
     } else {
       _playbackWaitMessage = message;
       _controlsVisible = false;
       _settingsExpanded = false;
+      _clearGestureHintState();
     }
   }
 
@@ -6696,16 +6723,31 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
     final duration = controller.duration;
     final position = _resumeAnchoredPlaybackPosition(controller);
-    if (position.inSeconds < 3) return;
-
     if (duration.inSeconds > 0) {
       _lastKnownPlaybackDuration = duration;
+      _maybeReloadSkipSegmentsWithDuration(duration);
     }
+    if (position.inSeconds < 3) return;
     if (position > _lastKnownPlaybackPosition ||
         (_lastKnownPlaybackPosition - position).abs() >
             const Duration(seconds: 10)) {
       _lastKnownPlaybackPosition = position;
     }
+  }
+
+  void _maybeReloadSkipSegmentsWithDuration(Duration duration) {
+    if (!_skipSegmentsSupported ||
+        duration <= Duration.zero ||
+        _skipSegmentLookupDuration > Duration.zero) {
+      return;
+    }
+    if ((_skipSegmentTmdbId == null && _skipSegmentImdbId == null) ||
+        _skipSegmentSeason == null ||
+        _skipSegmentEpisode == null) {
+      return;
+    }
+    _skipSegmentLookupDuration = duration;
+    unawaited(_loadSkipSegments());
   }
 
   Duration _resumeAnchoredPlaybackPosition(
@@ -7645,6 +7687,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         setState(() {
           _loading = true;
           _controlsVisible = false;
+          _clearGestureHintState();
           _settingsExpanded = false;
           _statusMessage = 'Refreshing stream...';
           _playbackWaitMessage = null;
@@ -8048,7 +8091,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (_resumeDialogOpen) return;
     if (!_nativeControlsReady(_controller)) {
       _hideControlsTimer?.cancel();
-      if (_controlsVisible) setState(() => _controlsVisible = false);
+      if (_controlsVisible) {
+        setState(() {
+          _controlsVisible = false;
+          _clearGestureHintState();
+        });
+      }
       return;
     }
     if (_locked) {
@@ -8057,7 +8105,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
     final nextVisible = !_controlsVisible;
-    setState(() => _controlsVisible = nextVisible);
+    setState(() {
+      _controlsVisible = nextVisible;
+      if (!nextVisible) _clearGestureHintState();
+    });
     if (nextVisible) {
       _scheduleControlsHide();
     } else {
@@ -8265,6 +8316,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _optionSheetOpen = false;
       _settingsExpanded = false;
       _controlsVisible = false;
+      _clearGestureHintState();
       _locked = false;
     });
     await WidgetsBinding.instance.endOfFrame;
@@ -8758,6 +8810,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         playbackKey: resolvedNext.playbackKey,
       );
       _progressSubtitle = resolvedNext.progressSubtitle;
+      _skipSegmentSeason = resolvedNext.skipSegmentSeason;
+      _skipSegmentEpisode = resolvedNext.skipSegmentEpisode;
+      _skipSegments = const <PlaybackSkipSegment>[];
       _nextEpisodeLabel = resolvedNext.nextEpisodeLabel;
       _nextEpisodeResolver = resolvedNext.onNextEpisode;
       _nextEpisodeOpening = false;
@@ -8797,6 +8852,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _completionCloseStarted = false;
       _lastKnownPlaybackPosition = Duration.zero;
       _lastKnownPlaybackDuration = Duration.zero;
+      _skipSegmentLookupDuration = Duration.zero;
       _resumeProgressAnchorPosition = Duration.zero;
       _resumeProgressAnchorLogSecond = -1;
       _libVlcContinuousTsDurationAccepted = false;
@@ -8814,7 +8870,73 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _resetPlaybackIntegritySample();
     });
     _restoreNativePreferences();
+    unawaited(_loadSkipSegments());
     unawaited(_openNextAvailableSource());
+  }
+
+  Future<void> _loadSkipSegments() async {
+    final generation = ++_skipSegmentLoadGeneration;
+    if (!_skipSegmentsSupported) {
+      if (mounted) {
+        setState(() {
+          _skipSegments = const <PlaybackSkipSegment>[];
+          _skipSegmentLookupDuration = Duration.zero;
+        });
+      }
+      return;
+    }
+    try {
+      final segments = await _skipSegmentClient.lookup(
+        tmdbId: _skipSegmentTmdbId,
+        imdbId: _skipSegmentImdbId,
+        season: _skipSegmentSeason,
+        episode: _skipSegmentEpisode,
+        duration: _knownSkipSegmentDuration,
+      );
+      if (!mounted || generation != _skipSegmentLoadGeneration) return;
+      setState(() => _skipSegments = segments);
+      _skipSegmentLookupDuration = _knownSkipSegmentDuration ?? Duration.zero;
+      if (segments.isNotEmpty) {
+        DiagnosticLog.add(
+          'skip segment lookup loaded count=${segments.length}',
+        );
+      }
+    } catch (error) {
+      if (!mounted || generation != _skipSegmentLoadGeneration) return;
+      setState(() => _skipSegments = const <PlaybackSkipSegment>[]);
+      DiagnosticLog.add(
+        'skip segment lookup unavailable reason=${_safeDiagnosticError(error)}',
+      );
+    }
+  }
+
+  String? get _skipSegmentImdbId {
+    final metadataId = _progressItem?.imdbId?.trim();
+    if (metadataId != null && metadataId.isNotEmpty) return metadataId;
+    final itemId = _progressItem?.id.trim();
+    if (itemId == null || itemId.isEmpty) return null;
+    return RegExp(r'tt\d+', caseSensitive: false).firstMatch(itemId)?.group(0);
+  }
+
+  int? get _skipSegmentTmdbId {
+    final metadataId = _progressItem?.tmdbId;
+    if (metadataId != null && metadataId > 0) return metadataId;
+    final itemId = _progressItem?.id.trim();
+    if (itemId == null || itemId.isEmpty) return null;
+    final match = RegExp(
+      r'(?:tmdb|moviedb)[:/](\d+)',
+      caseSensitive: false,
+    ).firstMatch(itemId);
+    return int.tryParse(match?.group(1) ?? '');
+  }
+
+  Duration? get _knownSkipSegmentDuration {
+    final controllerDuration = _controller?.duration ?? Duration.zero;
+    if (controllerDuration > Duration.zero) return controllerDuration;
+    if (_lastKnownPlaybackDuration > Duration.zero) {
+      return _lastKnownPlaybackDuration;
+    }
+    return null;
   }
 
   Future<void> _showSubtitleSheet() async {
@@ -9416,7 +9538,144 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     });
   }
 
+  void _clearGestureHintState() {
+    _gestureHintTimer?.cancel();
+    _gestureHintScheduled = false;
+    _gestureHintVisible = false;
+  }
+
+  void _scheduleGestureHintIfNeeded({
+    required bool nativeControlsReady,
+    required bool playbackStarted,
+    required bool hudVisible,
+    required bool compactPlayer,
+  }) {
+    final shouldShow = _shouldShowGestureHint(
+      nativeControlsReady: nativeControlsReady,
+      playbackStarted: playbackStarted,
+      hudVisible: hudVisible,
+      compactPlayer: compactPlayer,
+    );
+    if (_gestureHintVisible == shouldShow || _gestureHintScheduled) {
+      return;
+    }
+    _gestureHintScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        _gestureHintScheduled = false;
+        return;
+      }
+      final shouldShow = _shouldShowGestureHint(
+        nativeControlsReady: nativeControlsReady,
+        playbackStarted: _playbackHasStartedForGestureHint(),
+        hudVisible: _controlsVisible,
+        compactPlayer: compactPlayer,
+      );
+      setState(() {
+        _gestureHintScheduled = false;
+        _gestureHintVisible = shouldShow;
+      });
+    });
+  }
+
+  bool _shouldShowGestureHint({
+    required bool nativeControlsReady,
+    required bool playbackStarted,
+    required bool hudVisible,
+    required bool compactPlayer,
+  }) {
+    return !_loading &&
+        _playbackWaitMessage == null &&
+        playbackStarted &&
+        hudVisible &&
+        nativeControlsReady &&
+        !compactPlayer &&
+        !_locked &&
+        !_settingsExpanded &&
+        !_optionSheetOpen &&
+        !_pictureInPictureActive &&
+        !_systemPipHandoffActive &&
+        !_resumeDialogOpen &&
+        !_playerClosing;
+  }
+
+  bool _playbackHasStartedForGestureHint({Duration? position}) {
+    final controller = _controller;
+    if (controller == null || !controller.isInitialized) return false;
+    if (!controller.isPlaying) return false;
+    final effectivePosition =
+        position ??
+        _bestKnownProgressPosition(controller, _fallbackControlDuration());
+    return effectivePosition >= const Duration(seconds: 2);
+  }
+
+  bool get _skipSegmentsSupported => !_isLiveTvMode;
+
+  _PlayerSkipSegment? _activeSkipSegment(Duration position, Duration duration) {
+    if (!_skipSegmentsSupported) return null;
+    final remoteSegment = activePlaybackSkipSegment(
+      _skipSegments,
+      position,
+      duration,
+    );
+    if (remoteSegment != null) {
+      return _PlayerSkipSegment(
+        label: remoteSegment.label,
+        target: remoteSegment.targetFor(duration),
+      );
+    }
+    if (!allowFixedSkipSegmentFallback(
+      season: _skipSegmentSeason,
+      episode: _skipSegmentEpisode,
+    )) {
+      return null;
+    }
+    if (duration.inMinutes < 15) return null;
+    final seconds = position.inSeconds;
+    final totalSeconds = duration.inSeconds;
+    if (seconds >= 0 && seconds <= 80) {
+      final fallbackTarget = defaultFixedIntroSkipTarget();
+      final target = fallbackTarget < Duration(seconds: totalSeconds - 30)
+          ? fallbackTarget
+          : Duration(seconds: totalSeconds - 30);
+      if (target > position + const Duration(seconds: 5)) {
+        return _PlayerSkipSegment(label: 'Skip intro', target: target);
+      }
+    }
+    final remainingSeconds = totalSeconds - seconds;
+    if (remainingSeconds <= 105 && remainingSeconds > 8) {
+      return _PlayerSkipSegment(
+        label: 'Skip outro',
+        target: Duration(seconds: math.max(0, totalSeconds - 2)),
+      );
+    }
+    return null;
+  }
+
+  Future<void> _skipToSegment(_PlayerSkipSegment segment) async {
+    final controller = _controller;
+    if (controller == null || !controller.isInitialized || _locked) return;
+    await controller.seekTo(segment.target);
+    _lastKnownPlaybackPosition = segment.target;
+    setState(() => _controlsVisible = true);
+    _scheduleControlsHide();
+  }
+
   Future<void> _close([String? result]) async {
+    _hideControlsTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _allowPop = true;
+        _controlsVisible = false;
+        _settingsExpanded = false;
+        _clearGestureHintState();
+      });
+    } else {
+      _allowPop = true;
+      _controlsVisible = false;
+      _settingsExpanded = false;
+      _clearGestureHintState();
+    }
     if (_playerClosing) {
       await _forcePopPlayerRoute(result ?? 'closed');
       return;
@@ -9424,8 +9683,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _playerClosing = true;
     _systemPipHandoffActive = false;
     unawaited(_setAndroidAutoPipOnUserLeave(false));
-    if (mounted) setState(() => _allowPop = true);
-    _hideControlsTimer?.cancel();
     _stopStallWatchdog();
     DiagnosticLog.add(
       'native close saving progress result=${result ?? 'closed'} hasController=${_controller != null}',
@@ -10121,6 +10378,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       setState(() {
         _controlsVisible = false;
         _settingsExpanded = false;
+        _clearGestureHintState();
       });
     });
   }
@@ -10206,6 +10464,24 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                 _pictureInPictureActive ||
                 constraints.maxWidth <= 360 ||
                 constraints.maxHeight <= 240;
+            final fallbackDuration = _fallbackControlDuration();
+            final fallbackPosition = _bestKnownProgressPosition(
+              controller,
+              fallbackDuration,
+            );
+            final playbackStarted = _playbackHasStartedForGestureHint(
+              position: fallbackPosition,
+            );
+            _scheduleGestureHintIfNeeded(
+              nativeControlsReady: nativeControlsReady,
+              playbackStarted: playbackStarted,
+              hudVisible: _controlsVisible,
+              compactPlayer: compactPlayer,
+            );
+            final skipSegment = _activeSkipSegment(
+              fallbackPosition,
+              fallbackDuration,
+            );
             return GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: _settingsExpanded || _loading || controlsSuppressed
@@ -10351,11 +10627,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                         title: _title,
                         nextEpisodeLabel: _nextEpisodeLabel,
                         controller: controller,
-                        fallbackDuration: _fallbackControlDuration(),
-                        fallbackPosition: _bestKnownProgressPosition(
-                          controller,
-                          _fallbackControlDuration(),
-                        ),
+                        fallbackDuration: fallbackDuration,
+                        fallbackPosition: fallbackPosition,
+                        skipSegment: skipSegment,
                         locked: _locked,
                         liveMode: _isLiveTvMode,
                         buffering:
@@ -10382,6 +10656,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                           Duration(seconds: _seekStepSeconds.round()),
                         ),
                         onSeekToFraction: _seekToFraction,
+                        onSkipSegment: skipSegment == null
+                            ? null
+                            : () => unawaited(_skipToSegment(skipSegment)),
                         onToggleLock: _toggleLock,
                         onEnterPip: _handlePictureInPictureButton,
                         onOpenCast: _openScreencast,
@@ -10413,6 +10690,18 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                     ),
                   if (_gestureLabel != null)
                     _GestureOverlay(icon: _gestureIcon, label: _gestureLabel!),
+                  if (!_loading && !controlsSuppressed)
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      reverseDuration: const Duration(milliseconds: 180),
+                      child: _controlsVisible && _gestureHintVisible
+                          ? const _GestureHintOverlay(
+                              key: ValueKey('gesture-hint'),
+                            )
+                          : const SizedBox.shrink(
+                              key: ValueKey('gesture-hint-hidden'),
+                            ),
+                    ),
                 ],
               ),
             );
@@ -11195,6 +11484,7 @@ class _NativePlayerControls extends StatelessWidget {
     required this.controller,
     required this.fallbackDuration,
     required this.fallbackPosition,
+    required this.skipSegment,
     required this.locked,
     required this.liveMode,
     required this.buffering,
@@ -11205,6 +11495,7 @@ class _NativePlayerControls extends StatelessWidget {
     required this.onSeekBackward,
     required this.onSeekForward,
     required this.onSeekToFraction,
+    required this.onSkipSegment,
     required this.onToggleLock,
     required this.onEnterPip,
     required this.onOpenCast,
@@ -11235,6 +11526,7 @@ class _NativePlayerControls extends StatelessWidget {
   final _NativePlaybackController? controller;
   final Duration fallbackDuration;
   final Duration fallbackPosition;
+  final _PlayerSkipSegment? skipSegment;
   final bool locked;
   final bool liveMode;
   final bool buffering;
@@ -11245,6 +11537,7 @@ class _NativePlayerControls extends StatelessWidget {
   final VoidCallback onSeekBackward;
   final VoidCallback onSeekForward;
   final ValueChanged<double> onSeekToFraction;
+  final VoidCallback? onSkipSegment;
   final VoidCallback onToggleLock;
   final VoidCallback onEnterPip;
   final VoidCallback onOpenCast;
@@ -11501,49 +11794,65 @@ class _NativePlayerControls extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (!locked)
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: Padding(
-                          padding: const EdgeInsets.only(right: 2, bottom: 4),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              _SourceActionButton(
-                                onPressed: onSourcePressed,
-                                enabled: sourceSelectionAvailable,
-                                label: sourceActionLabel,
-                                detailLabel: sourceIndicator,
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child:
+                                    skipSegment != null &&
+                                        onSkipSegment != null &&
+                                        !liveMode
+                                    ? _SkipSegmentButton(
+                                        label: skipSegment!.label,
+                                        onPressed: onSkipSegment!,
+                                      )
+                                    : const SizedBox.shrink(),
                               ),
-                              const SizedBox(width: 8),
-                              _SettingsControlPack(
-                                expanded: settingsExpanded,
-                                onToggleSettings: onToggleSettings,
-                              ),
-                              const SizedBox(width: 8),
-                              _PlayerRoundButton(
-                                icon: Icons.cast_rounded,
-                                semanticLabel: 'Cast',
-                                onPressed: onOpenCast,
-                                size: 44,
-                              ),
-                              const SizedBox(width: 8),
-                              _PlayerRoundButton(
-                                icon: Icons.picture_in_picture_alt_rounded,
-                                semanticLabel: 'Picture in picture',
-                                onPressed: onEnterPip,
-                                enabled: pipSupported,
-                                size: 44,
-                              ),
-                              const SizedBox(width: 8),
-                              _PlayerRoundButton(
-                                icon: Icons.lock_open_rounded,
-                                semanticLabel: 'Lock controls',
-                                onPressed: onToggleLock,
-                                size: 44,
-                              ),
-                            ],
-                          ),
+                            ),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _SourceActionButton(
+                                  onPressed: onSourcePressed,
+                                  enabled: sourceSelectionAvailable,
+                                  label: sourceActionLabel,
+                                  detailLabel: sourceIndicator,
+                                ),
+                                const SizedBox(width: 8),
+                                _SettingsControlPack(
+                                  expanded: settingsExpanded,
+                                  onToggleSettings: onToggleSettings,
+                                ),
+                                const SizedBox(width: 8),
+                                _PlayerRoundButton(
+                                  icon: Icons.cast_rounded,
+                                  semanticLabel: 'Cast',
+                                  onPressed: onOpenCast,
+                                  size: 44,
+                                ),
+                                const SizedBox(width: 8),
+                                _PlayerRoundButton(
+                                  icon: Icons.picture_in_picture_alt_rounded,
+                                  semanticLabel: 'Picture in picture',
+                                  onPressed: onEnterPip,
+                                  enabled: pipSupported,
+                                  size: 44,
+                                ),
+                                const SizedBox(width: 8),
+                                _PlayerRoundButton(
+                                  icon: Icons.lock_open_rounded,
+                                  semanticLabel: 'Lock controls',
+                                  onPressed: onToggleLock,
+                                  size: 44,
+                                ),
+                              ],
+                            ),
+                          ],
                         ),
                       )
                     else
@@ -11752,6 +12061,31 @@ class _NextEpisodeButton extends StatelessWidget {
         minimumSize: Size.zero,
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w900),
+        shape: const StadiumBorder(),
+      ),
+    );
+  }
+}
+
+class _SkipSegmentButton extends StatelessWidget {
+  const _SkipSegmentButton({required this.label, required this.onPressed});
+
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton.icon(
+      onPressed: onPressed,
+      icon: const Icon(Icons.double_arrow_rounded, size: 18),
+      label: Text(label),
+      style: TextButton.styleFrom(
+        foregroundColor: Colors.white,
+        backgroundColor: Colors.black.withValues(alpha: 0.46),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        minimumSize: const Size(0, 44),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900),
         shape: const StadiumBorder(),
       ),
     );
@@ -12043,6 +12377,13 @@ class _QualitySheet extends StatelessWidget {
 
 class _QualityAutoSelection {
   const _QualityAutoSelection();
+}
+
+class _PlayerSkipSegment {
+  const _PlayerSkipSegment({required this.label, required this.target});
+
+  final String label;
+  final Duration target;
 }
 
 class _QualityAutoOption extends StatelessWidget {
@@ -12674,6 +13015,7 @@ class _SubtitleSheetState extends State<_SubtitleSheet> {
                   for (final subtitle in widget.subtitles)
                     _SubtitleOption(
                       label: subtitle.label,
+                      subtitle: _subtitleDetailLabel(subtitle),
                       selected: subtitle.id == widget.activeSubtitle?.id,
                       onTap: () => Navigator.of(context).pop(subtitle),
                     ),
@@ -13496,11 +13838,13 @@ class _SubtitleDialogSwatch extends StatelessWidget {
 class _SubtitleOption extends StatelessWidget {
   const _SubtitleOption({
     required this.label,
+    this.subtitle,
     required this.selected,
     required this.onTap,
   });
 
   final String label;
+  final String? subtitle;
   final bool selected;
   final VoidCallback onTap;
 
@@ -13509,10 +13853,22 @@ class _SubtitleOption extends StatelessWidget {
     return JuicrSheetOptionTile(
       padding: const EdgeInsets.only(top: 8),
       label: label,
+      subtitle: subtitle,
       selected: selected,
       onTap: onTap,
     );
   }
+}
+
+String? _subtitleDetailLabel(PlaybackSubtitle subtitle) {
+  final parts = <String>[];
+  final language = subtitle.language.trim();
+  if (language.isNotEmpty) parts.add(language);
+  if (subtitle.isForced) parts.add('Forced');
+  if (subtitle.isDefault) parts.add('Default');
+  final format = subtitle.format.trim();
+  if (format.isNotEmpty) parts.add(format.toUpperCase());
+  return parts.isEmpty ? null : parts.join(' - ');
 }
 
 class _SubtitleOverlay extends StatelessWidget {
@@ -14672,6 +15028,92 @@ class _GestureOverlay extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _GestureHintOverlay extends StatelessWidget {
+  const _GestureHintOverlay({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final padding = MediaQuery.paddingOf(context);
+    return IgnorePointer(
+      child: SizedBox.expand(
+        child: Stack(
+          children: [
+            Positioned(
+              left: padding.left + 36,
+              top: 0,
+              bottom: 0,
+              child: const Center(
+                child: _GestureHintRail(
+                  icon: Icons.brightness_6_rounded,
+                  label: 'Brightness',
+                ),
+              ),
+            ),
+            Positioned(
+              right: padding.right + 36,
+              top: 0,
+              bottom: 0,
+              child: const Center(
+                child: _GestureHintRail(
+                  icon: Icons.volume_up_rounded,
+                  label: 'Volume',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _GestureHintRail extends StatelessWidget {
+  const _GestureHintRail({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: '$label gesture hint',
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.keyboard_arrow_up_rounded,
+            color: Colors.white,
+            size: 22,
+          ),
+          const SizedBox(height: 4),
+          Container(
+            width: 52,
+            height: 52,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.46),
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.30),
+                  blurRadius: 14,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: Icon(icon, color: Colors.white, size: 24),
+          ),
+          const SizedBox(height: 4),
+          const Icon(
+            Icons.keyboard_arrow_down_rounded,
+            color: Colors.white,
+            size: 22,
+          ),
+        ],
       ),
     );
   }

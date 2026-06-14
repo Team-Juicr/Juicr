@@ -164,6 +164,24 @@ class _DetailsPageState extends State<DetailsPage>
     return _loadAnimationMovieMetadataFallback(item, details);
   }
 
+  Future<CatalogItem> _playbackMetadataItem(CatalogItem item) async {
+    if (item.type.isLive ||
+        item.isLocalCatalogItem ||
+        !item.isTmdbBackedItem ||
+        item.imdbId?.trim().isNotEmpty == true) {
+      return item;
+    }
+    try {
+      final details = await _detailsFuture;
+      return _mergeDetailsMetadataArtwork(details.item, item);
+    } catch (error) {
+      DiagnosticLog.add(
+        'details playback metadata skipped id=${item.id} error=${error.runtimeType}',
+      );
+      return item;
+    }
+  }
+
   Future<MetaDetails> _loadDetailsMetadataWithSeriesRetry(
     CatalogItem item,
   ) async {
@@ -416,6 +434,8 @@ class _DetailsPageState extends State<DetailsPage>
     CatalogItem? progressItem,
     String? playbackKey,
     String? progressSubtitle,
+    int? skipSegmentSeason,
+    int? skipSegmentEpisode,
     String? nextEpisodeLabel,
     Future<NativePlayerNextEpisode?> Function()? onNextEpisode,
     bool limitToFirstQualityPass = false,
@@ -437,6 +457,8 @@ class _DetailsPageState extends State<DetailsPage>
           progressItem: progressItem,
           playbackKey: playbackKey,
           progressSubtitle: progressSubtitle,
+          skipSegmentSeason: skipSegmentSeason,
+          skipSegmentEpisode: skipSegmentEpisode,
           nextEpisodeLabel: nextEpisodeLabel,
           onNextEpisode: onNextEpisode,
           limitToFirstQualityPass: limitToFirstQualityPass,
@@ -640,6 +662,8 @@ class _DetailsPageState extends State<DetailsPage>
     CatalogItem? progressItem,
     String? playbackKey,
     String? progressSubtitle,
+    int? skipSegmentSeason,
+    int? skipSegmentEpisode,
     EpisodeItem? nextEpisode,
     List<EpisodeItem> episodeList = const <EpisodeItem>[],
     bool liveMode = false,
@@ -688,6 +712,8 @@ class _DetailsPageState extends State<DetailsPage>
       progressItem: progressItem,
       playbackKey: playbackKey,
       progressSubtitle: progressSubtitle,
+      skipSegmentSeason: skipSegmentSeason,
+      skipSegmentEpisode: skipSegmentEpisode,
       nextEpisodeLabel: nextEpisode == null ? null : 'Next episode',
       onNextEpisode: nextEpisode == null || progressItem == null
           ? null
@@ -850,6 +876,8 @@ class _DetailsPageState extends State<DetailsPage>
     CatalogItem? progressItem,
     String? playbackKey,
     String? progressSubtitle,
+    int? skipSegmentSeason,
+    int? skipSegmentEpisode,
     String? nextEpisodeLabel,
     Future<NativePlayerNextEpisode?> Function()? onNextEpisode,
     bool liveMode = false,
@@ -962,6 +990,8 @@ class _DetailsPageState extends State<DetailsPage>
       progressItem: progressItem,
       playbackKey: playbackKey,
       progressSubtitle: progressSubtitle,
+      skipSegmentSeason: skipSegmentSeason,
+      skipSegmentEpisode: skipSegmentEpisode,
       nextEpisodeLabel: nextEpisodeLabel,
       onNextEpisode: onNextEpisode,
       limitToFirstQualityPass: defaultProviderSelection.cappedColdScan,
@@ -1129,6 +1159,8 @@ class _DetailsPageState extends State<DetailsPage>
           ? null
           : await _configFuture;
       if (!mounted) return;
+      final playbackMetadataItem = await _playbackMetadataItem(item);
+      if (!mounted) return;
       await _openResolvedPlayback(
         title,
         result,
@@ -1141,7 +1173,7 @@ class _DetailsPageState extends State<DetailsPage>
         ),
         logoUrl: item.logo,
         artworkUrl: item.background ?? item.poster,
-        progressItem: item.type.isLive ? null : item,
+        progressItem: item.type.isLive ? null : playbackMetadataItem,
         playbackKey: playbackKey,
         progressSubtitle: item.type.isLive ? null : item.subtitle,
         liveMode: item.type.isLive,
@@ -1205,6 +1237,8 @@ class _DetailsPageState extends State<DetailsPage>
           ? null
           : await _configFuture;
       if (!mounted) return;
+      final playbackMetadataItem = await _playbackMetadataItem(item);
+      if (!mounted) return;
       await _openResolvedPlayback(
         effectiveStartEpisode == null ? title : '$title S$season E$episode',
         result,
@@ -1223,9 +1257,11 @@ class _DetailsPageState extends State<DetailsPage>
         ),
         logoUrl: item.logo,
         artworkUrl: item.background ?? item.poster,
-        progressItem: item,
+        progressItem: playbackMetadataItem,
         playbackKey: playbackKey,
         progressSubtitle: 'S$season E$episode',
+        skipSegmentSeason: season,
+        skipSegmentEpisode: episode,
         nextEpisode: nextEpisode,
         episodeList: episodes,
         rewardedAdReason: 'episode_playback',
@@ -1282,6 +1318,8 @@ class _DetailsPageState extends State<DetailsPage>
           ? null
           : await _configFuture;
       if (!mounted) return;
+      final playbackMetadataItem = await _playbackMetadataItem(item);
+      if (!mounted) return;
       await _openResolvedPlayback(
         title,
         result,
@@ -1300,9 +1338,11 @@ class _DetailsPageState extends State<DetailsPage>
         ),
         logoUrl: item.logo,
         artworkUrl: item.background ?? item.poster,
-        progressItem: item,
+        progressItem: playbackMetadataItem,
         playbackKey: playbackKey,
         progressSubtitle: 'S$season E$episode',
+        skipSegmentSeason: season,
+        skipSegmentEpisode: episode,
         nextEpisode: nextEpisode,
         episodeList: episodes,
         rewardedAdReason: 'episode_playback',
@@ -1715,6 +1755,7 @@ class _DetailsPageState extends State<DetailsPage>
       episode.season,
       episode.episode,
     );
+    final playbackMetadataItem = await _playbackMetadataItem(item);
 
     return NativePlayerNextEpisode(
       title: '${item.name} S${episode.season} E${episode.episode}',
@@ -1732,9 +1773,11 @@ class _DetailsPageState extends State<DetailsPage>
         includeDefault: AppState.defaultSubtitlesEnabled.value,
       ),
       logoUrl: item.logo,
-      progressItem: item,
+      progressItem: playbackMetadataItem,
       playbackKey: playbackKey,
       progressSubtitle: 'S${episode.season} E${episode.episode}',
+      skipSegmentSeason: episode.season,
+      skipSegmentEpisode: episode.episode,
       nextEpisodeLabel: nextEpisode == null ? null : 'Next episode',
       onNextEpisode: nextEpisode == null
           ? null
