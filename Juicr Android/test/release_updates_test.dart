@@ -67,6 +67,8 @@ void main() {
                   'name': 'Juicr 1.0.2-nightly.20260612.1 Nightly',
                   'body': 'Older nightly',
                   'published_at': '2026-06-12T08:00:00Z',
+                  'html_url':
+                      'https://github.com/Team-Juicr/Juicr/releases/tag/v1.0.2-nightly.20260612.1',
                 },
                 {
                   'draft': false,
@@ -75,6 +77,8 @@ void main() {
                   'name': 'Juicr 1.0.2-nightly.20260612.5 Nightly',
                   'body': 'Newer nightly',
                   'published_at': '2026-06-12T10:00:00Z',
+                  'html_url':
+                      'https://github.com/Team-Juicr/Juicr/releases/tag/v1.0.2-nightly.20260612.5',
                 },
               ]),
               200,
@@ -88,7 +92,45 @@ void main() {
 
         expect(release.displayVersion, '1.0.2-nightly.20260612.5');
         expect(release.body, 'Newer nightly');
+        expect(
+          releaseDownloadUri(release).toString(),
+          'https://github.com/Team-Juicr/Juicr/releases/tag/v1.0.2-nightly.20260612.5',
+        );
       },
     );
+
+    test('uses the releases page when a release URL is missing', () {
+      final release = fallbackReleaseInfo(ReleaseUpdateChannel.stable);
+
+      expect(releaseDownloadUri(release), juicrReleasesUri);
+    });
+
+    test('falls back when release URL is not the Juicr GitHub release page',
+        () async {
+      final client = ReleaseUpdatesClient(
+        client: MockClient((request) async {
+          return http.Response(
+            jsonEncode([
+              {
+                'draft': false,
+                'prerelease': false,
+                'tag_name': 'v1.0.2',
+                'name': 'Juicr v1.0.2',
+                'body': 'Stable release',
+                'published_at': '2026-06-12T10:00:00Z',
+                'html_url': 'https://example.com/download.apk',
+              },
+            ]),
+            200,
+          );
+        }),
+      );
+
+      final release =
+          await client.latestForChannel(ReleaseUpdateChannel.stable);
+
+      expect(release.displayVersion, '1.0.2');
+      expect(releaseDownloadUri(release), juicrReleasesUri);
+    });
   });
 }

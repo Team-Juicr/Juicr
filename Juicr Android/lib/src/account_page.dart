@@ -351,10 +351,13 @@ class _AccountPageState extends State<AccountPage> {
     if (_signingOut) return;
     setState(() => _signingOut = true);
     final token = AppState.accountSession.value?.token ?? '';
+    final api = StreamApi();
     try {
-      if (token.isNotEmpty) await StreamApi().signOutAuthSession(token);
+      if (token.isNotEmpty) await api.signOutAuthSession(token);
     } catch (_) {
       // Local sign-out still clears the session if the network is unavailable.
+    } finally {
+      api.close();
     }
     final messenger = ScaffoldMessenger.of(context);
     await AppState.clearAccountSession();
@@ -381,8 +384,7 @@ class _AccountPageState extends State<AccountPage> {
         var deleteAccountData = false;
         return StatefulBuilder(
           builder: (context, setDialogState) {
-            final allChecked =
-                deleteHistory &&
+            final allChecked = deleteHistory &&
                 deleteSaved &&
                 deleteLeaderboard &&
                 deleteAccountData;
@@ -435,9 +437,8 @@ class _AccountPageState extends State<AccountPage> {
                   child: const Text('Cancel'),
                 ),
                 FilledButton(
-                  onPressed: allChecked
-                      ? () => Navigator.of(context).pop(true)
-                      : null,
+                  onPressed:
+                      allChecked ? () => Navigator.of(context).pop(true) : null,
                   child: const Text('Delete account'),
                 ),
               ],
@@ -449,8 +450,9 @@ class _AccountPageState extends State<AccountPage> {
     if (confirmed != true || !mounted) return;
     final token = AppState.accountSession.value?.token ?? '';
     setState(() => _deletingAccount = true);
+    final api = StreamApi();
     try {
-      await StreamApi().deleteAccount(token);
+      await api.deleteAccount(token);
       final messenger = ScaffoldMessenger.of(context);
       AppState.clearLibrary();
       AppState.clearSearchHistory();
@@ -476,6 +478,7 @@ class _AccountPageState extends State<AccountPage> {
           ),
         );
     } finally {
+      api.close();
       if (mounted) setState(() => _deletingAccount = false);
     }
   }
@@ -768,8 +771,8 @@ class _AccountProfileSectionState extends State<_AccountProfileSection> {
                 child: Text(
                   'Choose emoji',
                   style: Theme.of(sheetContext).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w900,
-                  ),
+                        fontWeight: FontWeight.w900,
+                      ),
                 ),
               ),
               const SizedBox(height: 12),

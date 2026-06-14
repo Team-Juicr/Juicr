@@ -13,6 +13,7 @@ class ReleaseUpdateInfo {
     required this.publishedAt,
     required this.checkedAt,
     required this.fromFallback,
+    this.releaseUrl,
   });
 
   final ReleaseUpdateChannel channel;
@@ -22,6 +23,7 @@ class ReleaseUpdateInfo {
   final DateTime? publishedAt;
   final DateTime checkedAt;
   final bool fromFallback;
+  final Uri? releaseUrl;
 
   String get displayVersion {
     final cleanTag = tag.trim();
@@ -30,6 +32,14 @@ class ReleaseUpdateInfo {
     }
     return cleanTag.isEmpty ? 'Unknown' : cleanTag;
   }
+}
+
+final Uri juicrReleasesUri = Uri.parse(
+  'https://github.com/Team-Juicr/Juicr/releases',
+);
+
+Uri releaseDownloadUri(ReleaseUpdateInfo release) {
+  return release.releaseUrl ?? juicrReleasesUri;
 }
 
 class ReleaseUpdatesClient {
@@ -47,15 +57,13 @@ class ReleaseUpdatesClient {
     final checkedAt = DateTime.now();
     final client = _client ?? http.Client();
     try {
-      final response = await client
-          .get(
-            _releasesUri,
-            headers: const {
-              'Accept': 'application/vnd.github+json',
-              'X-GitHub-Api-Version': '2022-11-28',
-            },
-          )
-          .timeout(const Duration(seconds: 8));
+      final response = await client.get(
+        _releasesUri,
+        headers: const {
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      ).timeout(const Duration(seconds: 8));
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw const FormatException('Release lookup failed.');
       }
@@ -98,6 +106,7 @@ class ReleaseUpdatesClient {
     final publishedAt = DateTime.tryParse(
       (json['published_at'] ?? '').toString(),
     )?.toLocal();
+    final releaseUrl = _safeExternalUri((json['html_url'] ?? '').toString());
     return ReleaseUpdateInfo(
       channel: channel,
       name: name.isEmpty ? tag : name,
@@ -106,8 +115,25 @@ class ReleaseUpdatesClient {
       publishedAt: publishedAt,
       checkedAt: checkedAt,
       fromFallback: false,
+      releaseUrl: releaseUrl,
     );
   }
+}
+
+Uri? _safeExternalUri(String value) {
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null || uri.scheme != 'https') return null;
+  if (uri.host.toLowerCase() != 'github.com') return null;
+  final segments = uri.pathSegments;
+  if (segments.length < 5 ||
+      segments[0] != 'Team-Juicr' ||
+      segments[1] != 'Juicr' ||
+      segments[2] != 'releases' ||
+      segments[3] != 'tag' ||
+      segments[4].trim().isEmpty) {
+    return null;
+  }
+  return uri;
 }
 
 int _compareReleaseJsonNewestFirst(

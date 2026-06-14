@@ -241,8 +241,7 @@ class AccountSession {
   factory AccountSession.fromJson(Map<String, dynamic> json) {
     return AccountSession(
       token: (json['token'] ?? '').toString().trim(),
-      expiresAt:
-          DateTime.tryParse((json['expiresAt'] ?? '').toString()) ??
+      expiresAt: DateTime.tryParse((json['expiresAt'] ?? '').toString()) ??
           DateTime.fromMillisecondsSinceEpoch(0),
     );
   }
@@ -359,8 +358,8 @@ class AccountLibrarySyncStatus {
   });
 
   const AccountLibrarySyncStatus.idle()
-    : phase = AccountLibrarySyncPhase.idle,
-      updatedAt = null;
+      : phase = AccountLibrarySyncPhase.idle,
+        updatedAt = null;
 
   final AccountLibrarySyncPhase phase;
   final DateTime? updatedAt;
@@ -427,16 +426,16 @@ enum PersonalServerType {
   emby;
 
   String get id => switch (this) {
-    PersonalServerType.plex => 'plex',
-    PersonalServerType.jellyfin => 'jellyfin',
-    PersonalServerType.emby => 'emby',
-  };
+        PersonalServerType.plex => 'plex',
+        PersonalServerType.jellyfin => 'jellyfin',
+        PersonalServerType.emby => 'emby',
+      };
 
   String get label => switch (this) {
-    PersonalServerType.plex => 'Plex',
-    PersonalServerType.jellyfin => 'Jellyfin',
-    PersonalServerType.emby => 'Emby',
-  };
+        PersonalServerType.plex => 'Plex',
+        PersonalServerType.jellyfin => 'Jellyfin',
+        PersonalServerType.emby => 'Emby',
+      };
 
   static PersonalServerType fromId(String value) {
     return switch (value.trim().toLowerCase()) {
@@ -468,8 +467,7 @@ class PersonalServerConnection {
       password: (json['password'] ?? '').toString(),
       userId: (json['userId'] ?? '').toString(),
       active: json['active'] != false,
-      updatedAt:
-          DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
+      updatedAt: DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
           DateTime.fromMillisecondsSinceEpoch(0),
     );
   }
@@ -487,7 +485,8 @@ class PersonalServerConnection {
     if (serverUrl.trim().isEmpty) return false;
     return switch (type) {
       PersonalServerType.plex => token.trim().isNotEmpty,
-      PersonalServerType.jellyfin || PersonalServerType.emby =>
+      PersonalServerType.jellyfin ||
+      PersonalServerType.emby =>
         username.trim().isNotEmpty &&
             userId.trim().isNotEmpty &&
             (token.trim().isNotEmpty || password.trim().isNotEmpty),
@@ -544,8 +543,7 @@ class LocalCatalog {
       name: (json['name'] ?? 'Local catalog').toString(),
       description: (json['description'] ?? '').toString(),
       itemCount: _intOrNull(json['itemCount']) ?? 0,
-      createdAt:
-          DateTime.tryParse((json['createdAt'] ?? '').toString()) ??
+      createdAt: DateTime.tryParse((json['createdAt'] ?? '').toString()) ??
           DateTime.fromMillisecondsSinceEpoch(0),
     );
   }
@@ -599,11 +597,9 @@ class LocalCatalogItem {
       preferredPlaybackEngine: _safePlaybackEngineOrAuto(
         json['preferredPlaybackEngine'],
       ),
-      createdAt:
-          DateTime.tryParse((json['createdAt'] ?? '').toString()) ??
+      createdAt: DateTime.tryParse((json['createdAt'] ?? '').toString()) ??
           DateTime.fromMillisecondsSinceEpoch(0),
-      updatedAt:
-          DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
+      updatedAt: DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
           DateTime.fromMillisecondsSinceEpoch(0),
     );
   }
@@ -665,11 +661,9 @@ class LocalPickedAssetRef {
       mediaKind: (json['mediaKind'] ?? 'video').toString(),
       relinkNeeded: json['relinkNeeded'] != false,
       proofState: (json['proofState'] ?? 'picker_pending').toString(),
-      createdAt:
-          DateTime.tryParse((json['createdAt'] ?? '').toString()) ??
+      createdAt: DateTime.tryParse((json['createdAt'] ?? '').toString()) ??
           DateTime.fromMillisecondsSinceEpoch(0),
-      updatedAt:
-          DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
+      updatedAt: DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
           DateTime.fromMillisecondsSinceEpoch(0),
     );
   }
@@ -726,8 +720,7 @@ class VerifiedPlaybackSource {
           ? PlaybackSource.fromJson(sourceJson)
           : const PlaybackSource(providerId: '', name: '', url: ''),
       engineId: (json['engineId'] ?? '').toString(),
-      cachedAt:
-          DateTime.tryParse(json['cachedAt']?.toString() ?? '') ??
+      cachedAt: DateTime.tryParse(json['cachedAt']?.toString() ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
       confidence: _intOrNull(json['confidence']) ?? 10,
       successCount: _intOrNull(json['successCount']) ?? 1,
@@ -764,9 +757,8 @@ class VerifiedPlaybackSource {
       confidence: confidence ?? this.confidence,
       successCount: successCount ?? this.successCount,
       failureCount: failureCount ?? this.failureCount,
-      lastFailureReason: clearFailure
-          ? null
-          : lastFailureReason ?? this.lastFailureReason,
+      lastFailureReason:
+          clearFailure ? null : lastFailureReason ?? this.lastFailureReason,
       lastFailureAt: clearFailure ? null : lastFailureAt ?? this.lastFailureAt,
     );
   }
@@ -806,8 +798,8 @@ class LibraryList {
     final rawItems = json['itemIds'] is List
         ? json['itemIds'] as List
         : json['items'] is List
-        ? json['items'] as List
-        : const [];
+            ? json['items'] as List
+            : const [];
     return LibraryList(
       id: (json['id'] ?? '').toString(),
       name: _normalizeLibraryListName((json['name'] ?? '').toString()),
@@ -885,6 +877,7 @@ class AppState {
   static const String _shellTabKey = 'shell_tab';
   static const String _compactLayoutKey = 'compact_layout';
   static const String _reduceMotionKey = 'reduce_motion';
+  static const String _forcePortraitShellKey = 'force_portrait_shell';
   static const String _textSizeKey = 'text_size';
   static const String _navigationStyleKey = 'navigation_style';
   static const String _homeDensityKey = 'home_density';
@@ -949,7 +942,7 @@ class AppState {
   static const String _nativePlayerVolumeKey = 'native_player_volume';
   static const String _nativePlayerBrightnessKey = 'native_player_brightness';
   static const String _playerBehaviorSettingsKey = 'player_behavior_settings';
-  static const int _playerBehaviorSettingsSchemaVersion = 10;
+  static const int _playerBehaviorSettingsSchemaVersion = 11;
   static const String _batteryDataSettingsKey = 'battery_data_settings';
   static const String _userAddonsKey = 'user_addons';
   static const String _p2pIndexerConnectorsKey = 'p2p_indexer_connectors';
@@ -1019,6 +1012,9 @@ class AppState {
   );
   static final ValueNotifier<bool> compactLayout = ValueNotifier<bool>(false);
   static final ValueNotifier<bool> reduceMotion = ValueNotifier<bool>(false);
+  static final ValueNotifier<bool> forcePortraitShell = ValueNotifier<bool>(
+    false,
+  );
   static final ValueNotifier<String> textSize = ValueNotifier<String>(
     'default',
   );
@@ -1080,7 +1076,7 @@ class AppState {
   static final ValueNotifier<RuntimeAppPolicy?> runtimeAppPolicy =
       ValueNotifier<RuntimeAppPolicy?>(null);
   static final ValueNotifier<AccountLibrarySyncStatus>
-  accountLibrarySyncStatus = ValueNotifier<AccountLibrarySyncStatus>(
+      accountLibrarySyncStatus = ValueNotifier<AccountLibrarySyncStatus>(
     const AccountLibrarySyncStatus.idle(),
   );
   static final ValueNotifier<String> leaderboardScope = ValueNotifier<String>(
@@ -1102,24 +1098,24 @@ class AppState {
       ValueNotifier<BrowseFilterPreference>(const BrowseFilterPreference());
 
   static final ValueNotifier<Map<String, ContinueWatchingEntry>>
-  continueWatching = ValueNotifier<Map<String, ContinueWatchingEntry>>(
+      continueWatching = ValueNotifier<Map<String, ContinueWatchingEntry>>(
     <String, ContinueWatchingEntry>{},
   );
   static final ValueNotifier<Map<String, CompletedWatchingEntry>>
-  completedWatching = ValueNotifier<Map<String, CompletedWatchingEntry>>(
+      completedWatching = ValueNotifier<Map<String, CompletedWatchingEntry>>(
     <String, CompletedWatchingEntry>{},
   );
   static final ValueNotifier<Map<String, List<VerifiedPlaybackSource>>>
-  verifiedPlaybackSources =
+      verifiedPlaybackSources =
       ValueNotifier<Map<String, List<VerifiedPlaybackSource>>>(
-        <String, List<VerifiedPlaybackSource>>{},
-      );
+    <String, List<VerifiedPlaybackSource>>{},
+  );
   static final ValueNotifier<List<Map<String, Object?>>>
-  addonRouteAttemptHistory = ValueNotifier<List<Map<String, Object?>>>(
+      addonRouteAttemptHistory = ValueNotifier<List<Map<String, Object?>>>(
     const <Map<String, Object?>>[],
   );
   static final ValueNotifier<Map<String, NativeProviderHealth>>
-  nativeProviderHealth = ValueNotifier<Map<String, NativeProviderHealth>>(
+      nativeProviderHealth = ValueNotifier<Map<String, NativeProviderHealth>>(
     <String, NativeProviderHealth>{},
   );
   static final ValueNotifier<bool> nativePlaybackOverridesEnabled =
@@ -1144,7 +1140,7 @@ class AppState {
   static final ValueNotifier<bool> p2pIndexerConnectorsAcknowledged =
       ValueNotifier<bool>(false);
   static final ValueNotifier<List<PersonalServerConnection>>
-  personalServerConnections = ValueNotifier<List<PersonalServerConnection>>(
+      personalServerConnections = ValueNotifier<List<PersonalServerConnection>>(
     const <PersonalServerConnection>[],
   );
   static final ValueNotifier<List<LocalCatalog>> localCatalogs =
@@ -1189,14 +1185,14 @@ class AppState {
   static String _accountLibrarySyncRevision = '';
   static Timer? _accountLibrarySyncTimer;
   static Timer? _accountLibraryRealtimeSyncTimer;
+  static bool _persistenceListenersInstalled = false;
   static Future<AccountLibrarySyncSnapshotResult?> Function(String token)?
-  _accountLibraryFetch;
+      _accountLibraryFetch;
   static Future<AccountLibrarySyncPushResult> Function(
     String token,
     Map<String, dynamic> snapshot,
     String baseRevision,
-  )?
-  _accountLibraryPush;
+  )? _accountLibraryPush;
   static const List<String> nativeProviderOrder = <String>[
     'vidlink',
     'vidsrc',
@@ -1320,9 +1316,8 @@ class AppState {
     if (counts.isEmpty) return;
 
     final key = mediaKey?.trim();
-    final failures = key == null || key.isEmpty
-        ? null
-        : _nativeProviderFailuresByMedia[key];
+    final failures =
+        key == null || key.isEmpty ? null : _nativeProviderFailuresByMedia[key];
     final next = Map<String, NativeProviderHealth>.from(
       nativeProviderHealth.value,
     );
@@ -1377,13 +1372,12 @@ class AppState {
     Set<String> keepProviderIds = const <String>{},
   }) {
     final keep = keepProviderIds.map(_normalizeNativeProviderId).toSet();
-    final next =
-        Map<String, NativeProviderHealth>.from(
-          nativeProviderHealth.value,
-        )..removeWhere((providerId, health) {
-          return health.status == NativeProviderHealthStatus.checkedNoSample &&
-              !keep.contains(_normalizeNativeProviderId(providerId));
-        });
+    final next = Map<String, NativeProviderHealth>.from(
+      nativeProviderHealth.value,
+    )..removeWhere((providerId, health) {
+        return health.status == NativeProviderHealthStatus.checkedNoSample &&
+            !keep.contains(_normalizeNativeProviderId(providerId));
+      });
     if (next.length == nativeProviderHealth.value.length) return;
     nativeProviderHealth.value = next;
     unawaited(_persistProviderHealth());
@@ -1401,8 +1395,7 @@ class AppState {
     final next = Map<String, NativeProviderHealth>.from(
       nativeProviderHealth.value,
     );
-    final keepPreviousCount =
-        status == NativeProviderHealthStatus.ready ||
+    final keepPreviousCount = status == NativeProviderHealthStatus.ready ||
         status == NativeProviderHealthStatus.slow ||
         status == NativeProviderHealthStatus.limited ||
         status == NativeProviderHealthStatus.protected;
@@ -1437,11 +1430,11 @@ class AppState {
       providerId,
       sourceCount > 0
           ? elapsed > const Duration(seconds: 6)
-                ? NativeProviderHealthStatus.slow
-                : NativeProviderHealthStatus.ready
+              ? NativeProviderHealthStatus.slow
+              : NativeProviderHealthStatus.ready
           : elapsed > const Duration(seconds: 10)
-          ? NativeProviderHealthStatus.protected
-          : NativeProviderHealthStatus.noSource,
+              ? NativeProviderHealthStatus.protected
+              : NativeProviderHealthStatus.noSource,
       sourceCount: sourceCount,
       responseMillis: elapsed.inMilliseconds,
     );
@@ -1508,6 +1501,7 @@ class AppState {
     required AccountProfile profile,
   }) async {
     if (!session.isValid || !profile.isUsable) return;
+    _resetAccountLibrarySyncState(clearRevision: true);
     accountSession.value = session;
     accountProfile.value = profile;
     applyAccountAdPreferences(profile.adPreferences);
@@ -1558,13 +1552,12 @@ class AppState {
 
   static void configureAccountLibrarySync({
     required Future<AccountLibrarySyncSnapshotResult?> Function(String token)
-    fetch,
+        fetch,
     required Future<AccountLibrarySyncPushResult> Function(
       String token,
       Map<String, dynamic> snapshot,
       String baseRevision,
-    )
-    push,
+    ) push,
   }) {
     _accountLibraryFetch = fetch;
     _accountLibraryPush = push;
@@ -1583,8 +1576,7 @@ class AppState {
       String token,
       Map<String, dynamic> snapshot,
       String baseRevision,
-    )?
-    push,
+    )? push,
     bool replaceWithRemoteSnapshot = false,
   }) async {
     final session = accountSession.value;
@@ -1706,8 +1698,7 @@ class AppState {
       String token,
       Map<String, dynamic> snapshot,
       String baseRevision,
-    )
-    pusher,
+    ) pusher,
     required String token,
     required bool preserveLocalSnapshotOnConflict,
   }) async {
@@ -1779,8 +1770,7 @@ class AppState {
     _accountLibraryRealtimeSyncTimer = Timer.periodic(
       const Duration(seconds: 30),
       (_) {
-        final hasPendingLocalUpload =
-            _accountLibrarySyncTimer != null ||
+        final hasPendingLocalUpload = _accountLibrarySyncTimer != null ||
             _accountLibrarySyncPendingUpload;
         if (hasPendingLocalUpload || _accountLibrarySyncApplying) return;
         unawaited(syncSignedInLibrary(replaceWithRemoteSnapshot: true));
@@ -1793,11 +1783,23 @@ class AppState {
     _accountLibraryRealtimeSyncTimer = null;
   }
 
+  static void _resetAccountLibrarySyncState({required bool clearRevision}) {
+    _accountLibrarySyncTimer?.cancel();
+    _accountLibrarySyncTimer = null;
+    _accountLibrarySyncPendingUpload = false;
+    _accountLibrarySyncPendingPushOnly = false;
+    _accountLibrarySyncApplying = false;
+    _accountLibrarySyncApplyingRemote = false;
+    if (clearRevision) {
+      _accountLibrarySyncRevision = '';
+    }
+  }
+
   static Future<void> clearAccountSession() async {
     accountSession.value = null;
     accountProfile.value = null;
-    _accountLibrarySyncRevision = '';
     stopAccountLibraryRealtimeSync();
+    _resetAccountLibrarySyncState(clearRevision: true);
     applyAccountAdPreferences(null);
     await _secureStorage.delete(key: _accountSecureSessionTokenKey);
     await _secureStorage.delete(key: _accountSecureSessionExpiresAtKey);
@@ -1821,7 +1823,8 @@ class AppState {
       }
       final token = (await _secureStorage.read(
         key: _accountSecureSessionTokenKey,
-      ))?.trim();
+      ))
+          ?.trim();
       final expiresAtText = await _secureStorage.read(
         key: _accountSecureSessionExpiresAtKey,
       );
@@ -1868,6 +1871,7 @@ class AppState {
     }
     compactLayout.value = _prefs!.getBool(_compactLayoutKey) ?? false;
     reduceMotion.value = _prefs!.getBool(_reduceMotionKey) ?? false;
+    forcePortraitShell.value = _prefs!.getBool(_forcePortraitShellKey) ?? false;
     textSize.value = _textSizeFromName(_prefs!.getString(_textSizeKey));
     navigationStyle.value = _navigationStyleFromName(
       _prefs!.getString(_navigationStyleKey),
@@ -1926,8 +1930,7 @@ class AppState {
           _prefs!.getBool(_interstitialAdsEnabledKey) ?? true;
       bannerAdsEnabled.value = _prefs!.getBool(_bannerAdsEnabledKey) ?? true;
     }
-    final hasDisabledAdSetting =
-        !rewardedVideoAdsEnabled.value ||
+    final hasDisabledAdSetting = !rewardedVideoAdsEnabled.value ||
         !interstitialAdsEnabled.value ||
         !bannerAdsEnabled.value;
     adDisableRewardUnlocked.value =
@@ -1966,12 +1969,11 @@ class AppState {
               .map(LibraryList.fromJson)
               .where((list) => list.id.trim().isNotEmpty)
               .map((list) {
-                final itemIds = list.itemIds
-                    .where(availableItemIds.contains)
-                    .toList(growable: false);
-                return list.copyWith(itemIds: itemIds);
-              })
-              .toList();
+            final itemIds = list.itemIds
+                .where(availableItemIds.contains)
+                .toList(growable: false);
+            return list.copyWith(itemIds: itemIds);
+          }).toList();
           libraryLists.value = lists;
         }
       } catch (_) {}
@@ -2005,13 +2007,12 @@ class AppState {
       try {
         final decoded = jsonDecode(rawContinue);
         if (decoded is List) {
-          final entries =
-              decoded
-                  .whereType<Map<String, dynamic>>()
-                  .map(ContinueWatchingEntry.fromJson)
-                  .where((entry) => entry.progress > 0 && entry.progress < 0.96)
-                  .toList()
-                ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+          final entries = decoded
+              .whereType<Map<String, dynamic>>()
+              .map(ContinueWatchingEntry.fromJson)
+              .where((entry) => entry.progress > 0 && entry.progress < 0.96)
+              .toList()
+            ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
           continueWatching.value = _dedupeContinueWatchingMap({
             for (final entry in entries) entry.key: entry,
           });
@@ -2024,13 +2025,12 @@ class AppState {
       try {
         final decoded = jsonDecode(rawCompleted);
         if (decoded is List) {
-          final entries =
-              decoded
-                  .whereType<Map<String, dynamic>>()
-                  .map(CompletedWatchingEntry.fromJson)
-                  .where((entry) => entry.key.isNotEmpty)
-                  .toList()
-                ..sort((a, b) => b.completedAt.compareTo(a.completedAt));
+          final entries = decoded
+              .whereType<Map<String, dynamic>>()
+              .map(CompletedWatchingEntry.fromJson)
+              .where((entry) => entry.key.isNotEmpty)
+              .toList()
+            ..sort((a, b) => b.completedAt.compareTo(a.completedAt));
           completedWatching.value = {
             for (final entry in entries.take(500)) entry.key: entry,
           };
@@ -2045,10 +2045,10 @@ class AppState {
         if (decoded is Map<String, dynamic>) {
           verifiedPlaybackSources.value =
               <String, List<VerifiedPlaybackSource>>{
-                for (final entry in decoded.entries)
-                  if (_verifiedSourceListFromJson(entry.value).isNotEmpty)
-                    entry.key: _verifiedSourceListFromJson(entry.value),
-              };
+            for (final entry in decoded.entries)
+              if (_verifiedSourceListFromJson(entry.value).isNotEmpty)
+                entry.key: _verifiedSourceListFromJson(entry.value),
+          };
         }
       } catch (_) {}
     }
@@ -2209,101 +2209,101 @@ class AppState {
     defaultSourceDisclaimerAccepted.value =
         _prefs!.getBool(_defaultSourceDisclaimerAcceptedKey) ?? false;
     final canUseDefaultSources = defaultSourceDisclaimerAccepted.value;
-    defaultCatalogEnabled.value =
-        canUseDefaultSources &&
+    defaultCatalogEnabled.value = canUseDefaultSources &&
         (_prefs!.getBool(_defaultCatalogEnabledKey) ?? false);
-    defaultProvidersEnabled.value =
-        canUseDefaultSources &&
+    defaultProvidersEnabled.value = canUseDefaultSources &&
         (_prefs!.getBool(_defaultProvidersEnabledKey) ?? false);
-    defaultSubtitlesEnabled.value =
-        canUseDefaultSources &&
+    defaultSubtitlesEnabled.value = canUseDefaultSources &&
         (_prefs!.getBool(_defaultSubtitlesEnabledKey) ?? false);
-    defaultTrailersEnabled.value =
-        canUseDefaultSources &&
+    defaultTrailersEnabled.value = canUseDefaultSources &&
         (_prefs!.getBool(_defaultTrailersEnabledKey) ?? false);
     tvSourcesEnabled.value = _prefs!.getBool(_tvSourcesEnabledKey) ?? false;
-    publicIptvEnabled.value =
-        tvSourcesEnabled.value &&
+    publicIptvEnabled.value = tvSourcesEnabled.value &&
         (_prefs!.getBool(_publicIptvEnabledKey) ?? false);
     addonDisclaimerAccepted.value =
         _prefs!.getBool(_addonDisclaimerAcceptedKey) ?? false;
     experimentalDisclaimerAccepted.value =
         _prefs!.getBool(_experimentalDisclaimerAcceptedKey) ?? false;
 
-    themeMode.addListener(_persistThemeMode);
-    pureBlackTheme.addListener(_persistPureBlackTheme);
-    useDeviceAccent.addListener(_persistUseDeviceAccent);
-    accentThemeId.addListener(_persistAccentTheme);
-    customAccentColor.addListener(_persistCustomAccentColor);
-    startupTabMode.addListener(_persistStartupTabMode);
-    startupBehavior.addListener(_persistStartupBehavior);
-    shellTab.addListener(_persistShellTab);
-    compactLayout.addListener(_persistCompactLayout);
-    reduceMotion.addListener(_persistReduceMotion);
-    textSize.addListener(_persistTextSize);
-    navigationStyle.addListener(_persistNavigationStyle);
-    homeDensity.addListener(_persistHomeDensity);
-    artworkMotion.addListener(_persistArtworkMotion);
-    confirmDestructiveActions.addListener(_persistConfirmDestructiveActions);
-    hapticsEnabled.addListener(_persistHapticsEnabled);
-    statusMessageStyle.addListener(_persistStatusMessageStyle);
-    posterImageIntensity.addListener(_persistPosterImageIntensity);
-    systemBarStyle.addListener(_persistSystemBarStyle);
-    firstRunWelcomeSeen.addListener(_persistFirstRunWelcomeSeen);
-    notificationsEnabled.addListener(_persistNotificationsEnabled);
-    notificationDialogsEnabled.addListener(_persistNotificationDialogsEnabled);
-    notificationInterstitialsEnabled.addListener(
-      _persistNotificationInterstitialsEnabled,
-    );
-    releaseCheckOnLaunchEnabled.addListener(_persistReleaseCheckOnLaunch);
-    releaseMessageOnLaunchEnabled.addListener(_persistReleaseMessageOnLaunch);
-    rewardedVideoAdsEnabled.addListener(_persistRewardedVideoAdsEnabled);
-    interstitialAdsEnabled.addListener(_persistInterstitialAdsEnabled);
-    bannerAdsEnabled.addListener(_persistBannerAdsEnabled);
-    adDisableRewardUnlocked.addListener(_persistAdDisableRewardUnlocked);
-    showMatureContent.addListener(_persistShowMatureContent);
-    matureContentChoiceSeen.addListener(_persistMatureContentChoiceSeen);
-    leaderboardScope.addListener(_persistLeaderboardScope);
-    nativeProviderId.addListener(_persistNativeProvider);
-    library.addListener(_persistLibrary);
-    libraryLists.addListener(_persistLibraryLists);
-    searchHistory.addListener(_persistSearchHistory);
-    browseFilterPreference.addListener(_persistBrowseFilterPreference);
-    continueWatching.addListener(_persistContinueWatching);
-    completedWatching.addListener(_persistCompletedWatching);
-    verifiedPlaybackSources.addListener(_persistVerifiedPlaybackSources);
-    addonRouteAttemptHistory.addListener(_persistAddonRouteAttemptHistory);
-    nativePlaybackOverridesEnabled.addListener(
-      _persistNativePlaybackOverridesEnabled,
-    );
-    nativePlaybackOverrides.addListener(_persistNativePlaybackOverrides);
-    playerBehaviorSettings.addListener(_persistPlayerBehaviorSettings);
-    batteryDataSettings.addListener(_persistBatteryDataSettings);
-    userAddons.addListener(_persistUserAddons);
-    p2pIndexerConnectors.addListener(_persistP2pIndexerConnectors);
-    p2pIndexerConnectorsEnabled.addListener(
-      _persistP2pIndexerConnectorsEnabled,
-    );
-    p2pIndexerConnectorsAcknowledged.addListener(
-      _persistP2pIndexerConnectorsAcknowledged,
-    );
-    personalServerConnections.addListener(_persistPersonalServerConnections);
-    localCatalogs.addListener(_persistLocalCatalogs);
-    localCatalogItems.addListener(_persistLocalCatalogItems);
-    localPickedAssetRefs.addListener(_persistLocalPickedAssetRefs);
-    defaultCatalogEnabled.addListener(_persistDefaultCatalogEnabled);
-    defaultProvidersEnabled.addListener(_persistDefaultProvidersEnabled);
-    defaultSubtitlesEnabled.addListener(_persistDefaultSubtitlesEnabled);
-    defaultTrailersEnabled.addListener(_persistDefaultTrailersEnabled);
-    tvSourcesEnabled.addListener(_persistTvSourcesEnabled);
-    publicIptvEnabled.addListener(_persistPublicIptvEnabled);
-    defaultSourceDisclaimerAccepted.addListener(
-      _persistDefaultSourceDisclaimerAccepted,
-    );
-    addonDisclaimerAccepted.addListener(_persistAddonDisclaimerAccepted);
-    experimentalDisclaimerAccepted.addListener(
-      _persistExperimentalDisclaimerAccepted,
-    );
+    if (!_persistenceListenersInstalled) {
+      _persistenceListenersInstalled = true;
+      themeMode.addListener(_persistThemeMode);
+      pureBlackTheme.addListener(_persistPureBlackTheme);
+      useDeviceAccent.addListener(_persistUseDeviceAccent);
+      accentThemeId.addListener(_persistAccentTheme);
+      customAccentColor.addListener(_persistCustomAccentColor);
+      startupTabMode.addListener(_persistStartupTabMode);
+      startupBehavior.addListener(_persistStartupBehavior);
+      shellTab.addListener(_persistShellTab);
+      compactLayout.addListener(_persistCompactLayout);
+      reduceMotion.addListener(_persistReduceMotion);
+      forcePortraitShell.addListener(_persistForcePortraitShell);
+      textSize.addListener(_persistTextSize);
+      navigationStyle.addListener(_persistNavigationStyle);
+      homeDensity.addListener(_persistHomeDensity);
+      artworkMotion.addListener(_persistArtworkMotion);
+      confirmDestructiveActions.addListener(_persistConfirmDestructiveActions);
+      hapticsEnabled.addListener(_persistHapticsEnabled);
+      statusMessageStyle.addListener(_persistStatusMessageStyle);
+      posterImageIntensity.addListener(_persistPosterImageIntensity);
+      systemBarStyle.addListener(_persistSystemBarStyle);
+      firstRunWelcomeSeen.addListener(_persistFirstRunWelcomeSeen);
+      notificationsEnabled.addListener(_persistNotificationsEnabled);
+      notificationDialogsEnabled
+          .addListener(_persistNotificationDialogsEnabled);
+      notificationInterstitialsEnabled.addListener(
+        _persistNotificationInterstitialsEnabled,
+      );
+      releaseCheckOnLaunchEnabled.addListener(_persistReleaseCheckOnLaunch);
+      releaseMessageOnLaunchEnabled.addListener(_persistReleaseMessageOnLaunch);
+      rewardedVideoAdsEnabled.addListener(_persistRewardedVideoAdsEnabled);
+      interstitialAdsEnabled.addListener(_persistInterstitialAdsEnabled);
+      bannerAdsEnabled.addListener(_persistBannerAdsEnabled);
+      adDisableRewardUnlocked.addListener(_persistAdDisableRewardUnlocked);
+      showMatureContent.addListener(_persistShowMatureContent);
+      matureContentChoiceSeen.addListener(_persistMatureContentChoiceSeen);
+      leaderboardScope.addListener(_persistLeaderboardScope);
+      nativeProviderId.addListener(_persistNativeProvider);
+      library.addListener(_persistLibrary);
+      libraryLists.addListener(_persistLibraryLists);
+      searchHistory.addListener(_persistSearchHistory);
+      browseFilterPreference.addListener(_persistBrowseFilterPreference);
+      continueWatching.addListener(_persistContinueWatching);
+      completedWatching.addListener(_persistCompletedWatching);
+      verifiedPlaybackSources.addListener(_persistVerifiedPlaybackSources);
+      addonRouteAttemptHistory.addListener(_persistAddonRouteAttemptHistory);
+      nativePlaybackOverridesEnabled.addListener(
+        _persistNativePlaybackOverridesEnabled,
+      );
+      nativePlaybackOverrides.addListener(_persistNativePlaybackOverrides);
+      playerBehaviorSettings.addListener(_persistPlayerBehaviorSettings);
+      batteryDataSettings.addListener(_persistBatteryDataSettings);
+      userAddons.addListener(_persistUserAddons);
+      p2pIndexerConnectors.addListener(_persistP2pIndexerConnectors);
+      p2pIndexerConnectorsEnabled.addListener(
+        _persistP2pIndexerConnectorsEnabled,
+      );
+      p2pIndexerConnectorsAcknowledged.addListener(
+        _persistP2pIndexerConnectorsAcknowledged,
+      );
+      personalServerConnections.addListener(_persistPersonalServerConnections);
+      localCatalogs.addListener(_persistLocalCatalogs);
+      localCatalogItems.addListener(_persistLocalCatalogItems);
+      localPickedAssetRefs.addListener(_persistLocalPickedAssetRefs);
+      defaultCatalogEnabled.addListener(_persistDefaultCatalogEnabled);
+      defaultProvidersEnabled.addListener(_persistDefaultProvidersEnabled);
+      defaultSubtitlesEnabled.addListener(_persistDefaultSubtitlesEnabled);
+      defaultTrailersEnabled.addListener(_persistDefaultTrailersEnabled);
+      tvSourcesEnabled.addListener(_persistTvSourcesEnabled);
+      publicIptvEnabled.addListener(_persistPublicIptvEnabled);
+      defaultSourceDisclaimerAccepted.addListener(
+        _persistDefaultSourceDisclaimerAccepted,
+      );
+      addonDisclaimerAccepted.addListener(_persistAddonDisclaimerAccepted);
+      experimentalDisclaimerAccepted.addListener(
+        _persistExperimentalDisclaimerAccepted,
+      );
+    }
     preferencesReady.value = true;
   }
 
@@ -2362,6 +2362,11 @@ class AppState {
     shellTab.value = 3;
   }
 
+  static void openUpdatesChangelog() {
+    settingsIntent.value = 'updates-changelog';
+    shellTab.value = 3;
+  }
+
   static void toggleSaved(CatalogItem item) {
     final next = Map<String, CatalogItem>.from(library.value);
     if (next.containsKey(item.id)) {
@@ -2387,9 +2392,8 @@ class AppState {
     final list = LibraryList(
       id: _newLibraryListId(now),
       name: normalizedName,
-      itemIds: initialItem == null
-          ? const <String>[]
-          : <String>[initialItem.id],
+      itemIds:
+          initialItem == null ? const <String>[] : <String>[initialItem.id],
       createdAt: now,
       updatedAt: now,
     );
@@ -2433,21 +2437,19 @@ class AppState {
   static void toggleItemInLibraryList(String listId, CatalogItem item) {
     _ensureLibraryItem(item);
     final now = DateTime.now();
-    libraryLists.value = libraryLists.value
-        .map((list) {
-          if (list.id != listId) return list;
-          final nextItemIds = List<String>.from(list.itemIds);
-          if (nextItemIds.contains(item.id)) {
-            nextItemIds.remove(item.id);
-          } else {
-            nextItemIds.insert(0, item.id);
-          }
-          return list.copyWith(
-            itemIds: LibraryList._dedupeLibraryListItemIds(nextItemIds),
-            updatedAt: now,
-          );
-        })
-        .toList(growable: false);
+    libraryLists.value = libraryLists.value.map((list) {
+      if (list.id != listId) return list;
+      final nextItemIds = List<String>.from(list.itemIds);
+      if (nextItemIds.contains(item.id)) {
+        nextItemIds.remove(item.id);
+      } else {
+        nextItemIds.insert(0, item.id);
+      }
+      return list.copyWith(
+        itemIds: LibraryList._dedupeLibraryListItemIds(nextItemIds),
+        updatedAt: now,
+      );
+    }).toList(growable: false);
   }
 
   static List<CatalogItem> itemsForLibraryList(LibraryList list) {
@@ -2512,9 +2514,8 @@ class AppState {
       'saved': savedItems.map((item) => item.toJson()).toList(),
       'lists': lists.map((list) => list.toJson()).toList(),
       'continueWatching': continueItems.map((entry) => entry.toJson()).toList(),
-      'completedWatching': completedItems
-          .map((entry) => entry.toJson())
-          .toList(),
+      'completedWatching':
+          completedItems.map((entry) => entry.toJson()).toList(),
     });
   }
 
@@ -2536,22 +2537,20 @@ class AppState {
             .map(CatalogItem.fromJson)
             .where((item) => item.id.isNotEmpty && item.name.trim().isNotEmpty)
             .toList();
-    final continueItems =
-        (decoded['continueWatching'] is List
-                ? decoded['continueWatching'] as List
-                : const [])
-            .whereType<Map<String, dynamic>>()
-            .map(ContinueWatchingEntry.fromJson)
-            .where((entry) => entry.key.isNotEmpty && entry.progress > 0)
-            .toList();
-    final completedItems =
-        (decoded['completedWatching'] is List
-                ? decoded['completedWatching'] as List
-                : const [])
-            .whereType<Map<String, dynamic>>()
-            .map(CompletedWatchingEntry.fromJson)
-            .where((entry) => entry.key.isNotEmpty)
-            .toList();
+    final continueItems = (decoded['continueWatching'] is List
+            ? decoded['continueWatching'] as List
+            : const [])
+        .whereType<Map<String, dynamic>>()
+        .map(ContinueWatchingEntry.fromJson)
+        .where((entry) => entry.key.isNotEmpty && entry.progress > 0)
+        .toList();
+    final completedItems = (decoded['completedWatching'] is List
+            ? decoded['completedWatching'] as List
+            : const [])
+        .whereType<Map<String, dynamic>>()
+        .map(CompletedWatchingEntry.fromJson)
+        .where((entry) => entry.key.isNotEmpty)
+        .toList();
     final lists =
         (decoded['lists'] is List ? decoded['lists'] as List : const [])
             .whereType<Map<String, dynamic>>()
@@ -2582,9 +2581,8 @@ class AppState {
           : {for (final list in libraryLists.value) list.id: list};
       for (final list in lists) {
         existingLists[list.id] = list.copyWith(
-          itemIds: list.itemIds
-              .where(savedIds.contains)
-              .toList(growable: false),
+          itemIds:
+              list.itemIds.where(savedIds.contains).toList(growable: false),
         );
       }
       libraryLists.value = existingLists.values.toList(growable: false);
@@ -2594,14 +2592,14 @@ class AppState {
         : Map<String, ContinueWatchingEntry>.from(_continueWatchingSnapshot);
     for (final entry in continueItems) {
       final existing = nextContinue[entry.key];
-      nextContinue[entry.key] = existing == null
-          ? entry
-          : _preferredContinueEntry(existing, entry);
+      nextContinue[entry.key] =
+          existing == null ? entry : _preferredContinueEntry(existing, entry);
     }
     final nextCompleted = {
       if (!replaceSyncedCollections) ...completedWatching.value,
       for (final entry in completedItems) entry.key: entry,
-    }.values.toList()..sort((a, b) => b.completedAt.compareTo(a.completedAt));
+    }.values.toList()
+      ..sort((a, b) => b.completedAt.compareTo(a.completedAt));
     completedWatching.value = {
       for (final entry in nextCompleted.take(500)) entry.key: entry,
     };
@@ -2707,6 +2705,11 @@ class AppState {
   static void setReduceMotion(bool enabled) {
     if (reduceMotion.value == enabled) return;
     reduceMotion.value = enabled;
+  }
+
+  static void setForcePortraitShell(bool enabled) {
+    if (forcePortraitShell.value == enabled) return;
+    forcePortraitShell.value = enabled;
   }
 
   static void setTextSize(String size) {
@@ -3564,8 +3567,7 @@ class AppState {
     if (decoded['scope'] != 'metadata_only') return null;
     final redaction = decoded['redaction'];
     if (redaction is! Map<String, dynamic>) return null;
-    final safeRedaction =
-        redaction['containsFileNames'] == false &&
+    final safeRedaction = redaction['containsFileNames'] == false &&
         redaction['containsFilePaths'] == false &&
         redaction['containsPickedFileHandles'] == false &&
         redaction['containsScopedUris'] == false &&
@@ -3698,8 +3700,7 @@ class AppState {
     if (decoded['scope'] != 'metadata_only') return null;
     final redaction = decoded['redaction'];
     if (redaction is! Map<String, dynamic>) return null;
-    final safeRedaction =
-        redaction['containsFileNames'] == false &&
+    final safeRedaction = redaction['containsFileNames'] == false &&
         redaction['containsFilePaths'] == false &&
         redaction['containsPickedFileHandles'] == false &&
         redaction['containsScopedUris'] == false &&
@@ -4061,9 +4062,8 @@ class AppState {
       final identity = _continueWatchingDisplayIdentityFor(entry);
       if (identity == null) continue;
       final existing = byIdentity[identity];
-      byIdentity[identity] = existing == null
-          ? entry
-          : _preferredContinueEntry(existing, entry);
+      byIdentity[identity] =
+          existing == null ? entry : _preferredContinueEntry(existing, entry);
     }
     return byIdentity.values.toList();
   }
@@ -4261,12 +4261,10 @@ class AppState {
 
     final current = _continueWatchingSnapshot;
     final existing = progressFor(item, playbackKey: playbackKey);
-    final durationSeconds =
-        existing?.durationSeconds ??
+    final durationSeconds = existing?.durationSeconds ??
         (item.type.isPlayableSeries ? 10 * 60 * 60 : 45 * 60);
-    final watchedSeconds = (existing?.watchedSeconds ?? 0)
-        .clamp(0, durationSeconds)
-        .toInt();
+    final watchedSeconds =
+        (existing?.watchedSeconds ?? 0).clamp(0, durationSeconds).toInt();
     final credibleWatchedSeconds = (existing?.credibleWatchedSeconds ?? 0)
         .clamp(0, durationSeconds)
         .toInt();
@@ -4418,9 +4416,10 @@ class AppState {
   static List<VerifiedPlaybackSource> verifiedPlaybackSourcesFor(String? key) {
     if (key == null || key.isEmpty) return const <VerifiedPlaybackSource>[];
     final entries = verifiedPlaybackSources.value[key] ?? const [];
-    final sorted =
-        entries.where((entry) => entry.source.url.isNotEmpty).toList()
-          ..sort(_compareVerifiedPlaybackSources);
+    final sorted = entries
+        .where((entry) => entry.source.url.isNotEmpty)
+        .toList()
+      ..sort(_compareVerifiedPlaybackSources);
     return List<VerifiedPlaybackSource>.unmodifiable(sorted.take(3));
   }
 
@@ -4526,8 +4525,8 @@ class AppState {
     if (key.isEmpty || !verifiedPlaybackSources.value.containsKey(key)) return;
     verifiedPlaybackSources.value =
         Map<String, List<VerifiedPlaybackSource>>.from(
-          verifiedPlaybackSources.value,
-        )..remove(key);
+      verifiedPlaybackSources.value,
+    )..remove(key);
   }
 
   static void _setContinueWatching(Map<String, ContinueWatchingEntry> next) {
@@ -4598,9 +4597,8 @@ class AppState {
       return '${entry.item.type.compatTypeValue}:${contentKey.toLowerCase()}';
     }
     final prefix = '${entry.item.id}:';
-    final identityKey = contentKey.startsWith(prefix)
-        ? entry.item.id
-        : contentKey;
+    final identityKey =
+        contentKey.startsWith(prefix) ? entry.item.id : contentKey;
     return '${entry.item.type.compatTypeValue}:${identityKey.toLowerCase()}';
   }
 
@@ -4666,6 +4664,10 @@ class AppState {
 
   static Future<void> _persistReduceMotion() async {
     await _prefs?.setBool(_reduceMotionKey, reduceMotion.value);
+  }
+
+  static Future<void> _persistForcePortraitShell() async {
+    await _prefs?.setBool(_forcePortraitShellKey, forcePortraitShell.value);
   }
 
   static Future<void> _persistTextSize() async {
@@ -5070,9 +5072,8 @@ class AppState {
       'exportedAt': DateTime.now().toUtc().toIso8601String(),
       'packetEffect': effective ? 'controlled_beta' : 'review_only',
       'runtimeApproval': effective ? 'app_consent_beta_granted' : 'not_granted',
-      'bridgePathSelection': effective
-          ? 'local_http_bridge_beta'
-          : 'not_granted',
+      'bridgePathSelection':
+          effective ? 'local_http_bridge_beta' : 'not_granted',
       'selectedBridgePath': effective ? 'local_http_bridge' : 'not_selected',
       'plainEnglishOutcome': effective
           ? 'Direct and account-backed streams stay first. Advanced P2P can be tested from recognized sources on this Android build after heavy consent.'
@@ -5098,14 +5099,14 @@ class AppState {
           'status': effective
               ? 'controlled_beta_effective'
               : bridge.isAvailable
-              ? 'beta_scaffold_selected'
-              : 'not_selected',
+                  ? 'beta_scaffold_selected'
+                  : 'not_selected',
           'selected': bridge.isAvailable,
           'runtimePath': true,
           'nextGate': bridge.isAvailable
               ? effective
-                    ? 'real device playback proof'
-                    : 'advanced consent and enablement'
+                  ? 'real device playback proof'
+                  : 'advanced consent and enablement'
               : 'local bridge architecture proof',
         },
         <String, Object>{
@@ -5415,17 +5416,17 @@ class AppState {
       'resultsPerQualityBucket': behavior.p2pResultsPerQuality <= 1
           ? 'one'
           : behavior.p2pResultsPerQuality <= 3
-          ? 'two_to_three'
-          : 'four_to_five',
+              ? 'two_to_three'
+              : 'four_to_five',
       'preferredAudioLanguageMode': behavior.p2pPreferredAudioLanguageMode,
       'avoidRiskyFormats': behavior.p2pAvoidRiskyFormats,
       'sizeLimitBucket': behavior.p2pSizeLimitMb <= 0
           ? 'off'
           : behavior.p2pSizeLimitMb <= 2048
-          ? 'up_to_2gb'
-          : behavior.p2pSizeLimitMb <= 4096
-          ? 'up_to_4gb'
-          : 'over_4gb',
+              ? 'up_to_2gb'
+              : behavior.p2pSizeLimitMb <= 4096
+                  ? 'up_to_4gb'
+                  : 'over_4gb',
       'redaction': <String>[
         'streamUrls',
         'externalUrls',
@@ -5668,8 +5669,7 @@ Map<String, NativeProviderHealth> _healthMapFromJson(dynamic value) {
     );
     result[entry.key.toString()] = NativeProviderHealth(
       status: status,
-      updatedAt:
-          DateTime.tryParse(raw['updatedAt']?.toString() ?? '') ??
+      updatedAt: DateTime.tryParse(raw['updatedAt']?.toString() ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
       sourceCount: _intOrNull(raw['sourceCount']),
       responseMillis: _intOrNull(raw['responseMillis']),
@@ -5865,11 +5865,9 @@ class ContinueWatchingEntry {
       watchedSeconds: watchedSeconds,
       credibleWatchedSeconds: credibleWatchedSeconds,
       durationSeconds: durationSeconds,
-      progress:
-          rawProgress ??
+      progress: rawProgress ??
           (watchedSeconds / durationSeconds).clamp(0.02, 0.98).toDouble(),
-      updatedAt:
-          DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
+      updatedAt: DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
           DateTime.now(),
       nativePreferences: json['nativePreferences'] is Map<String, dynamic>
           ? NativePlayerPreferences.fromJson(
@@ -5955,8 +5953,7 @@ class CompletedWatchingEntry {
           int.tryParse((json['credibleWatchedSeconds'] ?? '').toString()) ?? 0,
       durationSeconds:
           int.tryParse((json['durationSeconds'] ?? '').toString()) ?? 0,
-      completedAt:
-          DateTime.tryParse((json['completedAt'] ?? '').toString()) ??
+      completedAt: DateTime.tryParse((json['completedAt'] ?? '').toString()) ??
           DateTime.now(),
       completionCount: math.max(
         1,
@@ -6037,14 +6034,14 @@ class NativePlayerPreferences {
       ),
       subtitleBackgroundColor:
           int.tryParse((json['subtitleBackgroundColor'] ?? '').toString()) ??
-          0xFF000000,
+              0xFF000000,
       subtitleBackgroundRadius: _doubleFromJson(
         json['subtitleBackgroundRadius'],
         fallback: 999,
       ),
       subtitleTextColor:
           int.tryParse((json['subtitleTextColor'] ?? '').toString()) ??
-          0xFFFFFFFF,
+              0xFFFFFFFF,
       subtitleBottomOffset: _doubleFromJson(
         json['subtitleBottomOffset'],
         fallback: 30,
@@ -6114,14 +6111,14 @@ class NativePlaybackOverrides {
       ),
       subtitleBackgroundColor:
           int.tryParse((json['subtitleBackgroundColor'] ?? '').toString()) ??
-          0xFF000000,
+              0xFF000000,
       subtitleBackgroundRadius: _doubleFromJson(
         json['subtitleBackgroundRadius'],
         fallback: 999,
       ),
       subtitleTextColor:
           int.tryParse((json['subtitleTextColor'] ?? '').toString()) ??
-          0xFFFFFFFF,
+              0xFFFFFFFF,
       subtitleBottomOffset: _doubleFromJson(
         json['subtitleBottomOffset'],
         fallback: 30,
@@ -6202,8 +6199,7 @@ class BatteryDataSettings {
       wifiOnlyAdvancedP2p: json['wifiOnlyAdvancedP2p'] != false,
       pauseP2pWhenBackgrounded: json['pauseP2pWhenBackgrounded'] != false,
       stopP2pOnLowBattery: json['stopP2pOnLowBattery'] != false,
-      lowBatteryThresholdPercent:
-          _intOrNull(
+      lowBatteryThresholdPercent: _intOrNull(
             json['lowBatteryThresholdPercent'],
           )?.clamp(10, 40).toInt() ??
           20,
@@ -6259,6 +6255,7 @@ class PlayerBehaviorSettings {
     this.controlsTimeoutSeconds = 3,
     this.preferLastWorkingSource = true,
     this.autoSwitchOnStall = true,
+    this.autoSkipSegments = false,
     this.autoplayNextEpisode = false,
     this.pipOnBackground = false,
     this.confirmBeforeLeaving = false,
@@ -6305,6 +6302,7 @@ class PlayerBehaviorSettings {
   final int controlsTimeoutSeconds;
   final bool preferLastWorkingSource;
   final bool autoSwitchOnStall;
+  final bool autoSkipSegments;
   final bool autoplayNextEpisode;
   final bool pipOnBackground;
   final bool confirmBeforeLeaving;
@@ -6354,18 +6352,18 @@ class PlayerBehaviorSettings {
       retryStyle: (json['retryStyle'] ?? 'balanced').toString(),
       subtitleAutoSelect: (json['subtitleAutoSelect'] ?? 'default').toString(),
       subtitleLanguage: (json['subtitleLanguage'] ?? 'en').toString(),
-      preferredAudioLanguage: (json['preferredAudioLanguage'] ?? 'auto')
-          .toString(),
+      preferredAudioLanguage:
+          (json['preferredAudioLanguage'] ?? 'auto').toString(),
       controlsTimeoutSeconds:
           _intOrNull(json['controlsTimeoutSeconds'])?.clamp(2, 10).toInt() ?? 3,
       preferLastWorkingSource: json['preferLastWorkingSource'] != false,
       autoSwitchOnStall: json['autoSwitchOnStall'] != false,
+      autoSkipSegments: json['autoSkipSegments'] == true,
       autoplayNextEpisode: json['autoplayNextEpisode'] == true,
       pipOnBackground: json['pipOnBackground'] == true,
       confirmBeforeLeaving: json['confirmBeforeLeaving'] == true,
       experimentalControlsEnabled: json['experimentalControlsEnabled'] == true,
-      failureReadSeconds:
-          (version < 2 && rawFailureReadSeconds == 3
+      failureReadSeconds: (version < 2 && rawFailureReadSeconds == 3
                   ? 5
                   : rawFailureReadSeconds)
               ?.clamp(2, 10)
@@ -6375,21 +6373,19 @@ class PlayerBehaviorSettings {
           _intOrNull(json['libVlcWarmupSeconds'])?.clamp(4, 24).toInt() ?? 12,
       libVlcReleaseSettleMs:
           _intOrNull(json['libVlcReleaseSettleMs'])?.clamp(0, 2000).toInt() ??
-          750,
+              750,
       stallWatchdogSeconds:
           _intOrNull(json['stallWatchdogSeconds'])?.clamp(2, 10).toInt() ?? 4,
       libVlcOpenTimeoutSeconds:
           _intOrNull(json['libVlcOpenTimeoutSeconds'])?.clamp(4, 18).toInt() ??
-          8,
-      libVlcContinuousTsVisualGraceSeconds:
-          _intOrNull(
+              8,
+      libVlcContinuousTsVisualGraceSeconds: _intOrNull(
             json['libVlcContinuousTsVisualGraceSeconds'],
           )?.clamp(12, 90).toInt() ??
           45,
       providerWarmupCount:
           _intOrNull(json['providerWarmupCount'])?.clamp(0, 3).toInt() ?? 0,
-      providerResolveTimeoutSeconds:
-          _intOrNull(
+      providerResolveTimeoutSeconds: _intOrNull(
             json['providerResolveTimeoutSeconds'],
           )?.clamp(8, 30).toInt() ??
           16,
@@ -6398,18 +6394,17 @@ class PlayerBehaviorSettings {
           json['progressFallbackClockEnabled'] != false,
       resumeSeekRetrySeconds:
           _intOrNull(json['resumeSeekRetrySeconds'])?.clamp(4, 20).toInt() ??
-          14,
+              14,
       blackVideoWatchdogSeconds:
           _intOrNull(json['blackVideoWatchdogSeconds'])?.clamp(4, 20).toInt() ??
-          8,
+              8,
       autoProviderMemory: _normalizedAutoProviderMemory(
         json['autoProviderMemory'],
       ),
       loadingBackdropStyle: _normalizedLoadingBackdropStyle(
         json['loadingBackdropStyle'],
       ),
-      exoPlayerOpenTimeoutSeconds:
-          _intOrNull(
+      exoPlayerOpenTimeoutSeconds: _intOrNull(
             json['exoPlayerOpenTimeoutSeconds'],
           )?.clamp(4, 18).toInt() ??
           8,
@@ -6418,7 +6413,7 @@ class PlayerBehaviorSettings {
       p2pPlaybackConsentAccepted: _validP2pHeavyConsent(json),
       p2pPlaybackConsentVersion: _validP2pHeavyConsent(json)
           ? _intOrNull(json['p2pPlaybackConsentVersion']) ??
-                kP2pHeavyConsentVersion
+              kP2pHeavyConsentVersion
           : 0,
       p2pPlaybackConsentAcceptedAt: _validP2pHeavyConsent(json)
           ? _nonEmptyString(json['p2pPlaybackConsentAcceptedAt'])
@@ -6427,9 +6422,8 @@ class PlayerBehaviorSettings {
           json['p2pPlaybackEnabled'] == true && _validP2pHeavyConsent(json),
       advancedRuntimeControlsExpanded:
           json['advancedRuntimeControlsExpanded'] == true &&
-          _validP2pHeavyConsent(json),
-      p2pSourcePrioritiesEnabled:
-          json['p2pSourcePrioritiesEnabled'] == true &&
+              _validP2pHeavyConsent(json),
+      p2pSourcePrioritiesEnabled: json['p2pSourcePrioritiesEnabled'] == true &&
           json['p2pPlaybackEnabled'] == true &&
           _validP2pHeavyConsent(json),
       p2pPriorityMode: _normalizedP2pPriorityMode(json['p2pPriorityMode']),
@@ -6458,6 +6452,7 @@ class PlayerBehaviorSettings {
     int? controlsTimeoutSeconds,
     bool? preferLastWorkingSource,
     bool? autoSwitchOnStall,
+    bool? autoSkipSegments,
     bool? autoplayNextEpisode,
     bool? pipOnBackground,
     bool? confirmBeforeLeaving,
@@ -6500,8 +6495,8 @@ class PlayerBehaviorSettings {
         (p2pPlaybackEnabled ?? this.p2pPlaybackEnabled) && validP2pConsent;
     final nextAdvancedRuntimeControlsExpanded =
         (advancedRuntimeControlsExpanded ??
-            this.advancedRuntimeControlsExpanded) &&
-        validP2pConsent;
+                this.advancedRuntimeControlsExpanded) &&
+            validP2pConsent;
     final requestedP2pSourcePrioritiesEnabled =
         p2pSourcePrioritiesEnabled ?? this.p2pSourcePrioritiesEnabled;
     final nextP2pSourcePrioritiesEnabled =
@@ -6525,6 +6520,7 @@ class PlayerBehaviorSettings {
       preferLastWorkingSource:
           preferLastWorkingSource ?? this.preferLastWorkingSource,
       autoSwitchOnStall: autoSwitchOnStall ?? this.autoSwitchOnStall,
+      autoSkipSegments: autoSkipSegments ?? this.autoSkipSegments,
       autoplayNextEpisode: autoplayNextEpisode ?? this.autoplayNextEpisode,
       pipOnBackground: pipOnBackground ?? this.pipOnBackground,
       confirmBeforeLeaving: confirmBeforeLeaving ?? this.confirmBeforeLeaving,
@@ -6539,7 +6535,7 @@ class PlayerBehaviorSettings {
           libVlcOpenTimeoutSeconds ?? this.libVlcOpenTimeoutSeconds,
       libVlcContinuousTsVisualGraceSeconds:
           libVlcContinuousTsVisualGraceSeconds ??
-          this.libVlcContinuousTsVisualGraceSeconds,
+              this.libVlcContinuousTsVisualGraceSeconds,
       providerWarmupCount: providerWarmupCount ?? this.providerWarmupCount,
       providerResolveTimeoutSeconds:
           providerResolveTimeoutSeconds ?? this.providerResolveTimeoutSeconds,
@@ -6574,9 +6570,8 @@ class PlayerBehaviorSettings {
         p2pPreferredAudioLanguageMode ?? this.p2pPreferredAudioLanguageMode,
       ),
       p2pAvoidRiskyFormats: p2pAvoidRiskyFormats ?? this.p2pAvoidRiskyFormats,
-      p2pSizeLimitMb: (p2pSizeLimitMb ?? this.p2pSizeLimitMb)
-          .clamp(0, 65536)
-          .toInt(),
+      p2pSizeLimitMb:
+          (p2pSizeLimitMb ?? this.p2pSizeLimitMb).clamp(0, 65536).toInt(),
     );
   }
 
@@ -6599,6 +6594,7 @@ class PlayerBehaviorSettings {
       'controlsTimeoutSeconds': controlsTimeoutSeconds,
       'preferLastWorkingSource': preferLastWorkingSource,
       'autoSwitchOnStall': autoSwitchOnStall,
+      'autoSkipSegments': autoSkipSegments,
       'autoplayNextEpisode': autoplayNextEpisode,
       'pipOnBackground': pipOnBackground,
       'confirmBeforeLeaving': confirmBeforeLeaving,
@@ -6658,7 +6654,8 @@ String _normalizedLoadingBackdropStyle(dynamic value) {
     'artwork' ||
     'artworkblur' ||
     'background' ||
-    'backgroundblur' => 'artworkBlur',
+    'backgroundblur' =>
+      'artworkBlur',
     _ => 'scan',
   };
 }
@@ -6842,16 +6839,19 @@ CatalogSort _catalogSortFromStoredName(String? value) {
     'z_a' ||
     'z-a' ||
     'alphadesc' ||
-    'alpha_desc' => CatalogSort.alphaDesc,
+    'alpha_desc' =>
+      CatalogSort.alphaDesc,
     'toprated' ||
     'top_rated' ||
     'top-rated' ||
     'rating' ||
-    'rated' => CatalogSort.topRated,
+    'rated' =>
+      CatalogSort.topRated,
     'nowplaying' ||
     'now_playing' ||
     'now-playing' ||
-    'theaters' => CatalogSort.nowPlaying,
+    'theaters' =>
+      CatalogSort.nowPlaying,
     'airing_today' || 'airingtoday' => CatalogSort.airingToday,
     'on_tv' || 'ontv' => CatalogSort.onTv,
     'upcoming' || 'comingsoon' || 'coming_soon' => CatalogSort.upcoming,
@@ -6860,11 +6860,13 @@ CatalogSort _catalogSortFromStoredName(String? value) {
     'hidden_gems' ||
     'hidden-gems' ||
     'obscure' ||
-    'gems' => CatalogSort.hiddenGems,
+    'gems' =>
+      CatalogSort.hiddenGems,
     'imdbrating' ||
     'imdb_rating' ||
     'imdb' ||
-    'featured' => CatalogSort.imdbRating,
+    'featured' =>
+      CatalogSort.imdbRating,
     _ => CatalogSort.top,
   };
 }

@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 import 'account_action_button.dart';
+import 'app_manual_sheet.dart';
 import 'app_state.dart';
 import 'catalog_item.dart';
 import 'diagnostic_log.dart';
@@ -58,6 +59,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final ValueNotifier<int> _releaseUpdatesRefreshTickNotifier = ValueNotifier(
     0,
   );
+  bool _showReleaseChangelogWhenUpdatesReady = false;
   final ValueNotifier<bool> _addonSelectionModeNotifier = ValueNotifier(false);
   final ValueNotifier<Set<String>> _selectedAddonIdsNotifier =
       ValueNotifier<Set<String>>(const <String>{});
@@ -65,7 +67,7 @@ class _SettingsPageState extends State<SettingsPage> {
     const [],
   );
   final ValueNotifier<_ProviderHealthSummaryResult?>
-  _providerHealthSummaryNotifier = ValueNotifier(null);
+      _providerHealthSummaryNotifier = ValueNotifier(null);
   final Map<String, Future<AddonCapabilities>> _addonCapabilityFutures =
       <String, Future<AddonCapabilities>>{};
   final List<ApiProvider> _nativeProviders = const [
@@ -128,11 +130,17 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   void _handleSettingsIntent() {
-    if (!mounted || AppState.settingsIntent.value != 'addons') return;
+    if (!mounted) return;
+    final intent = AppState.settingsIntent.value;
+    if (intent == null) return;
     AppState.settingsIntent.value = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _openAddOnsSection();
+      if (intent == 'addons') {
+        _openAddOnsSection();
+      } else if (intent == 'updates-changelog') {
+        _openUpdatesSection(showChangelogWhenReady: true);
+      }
     });
   }
 
@@ -175,6 +183,26 @@ class _SettingsPageState extends State<SettingsPage> {
           tooltip: 'Manage add-ons',
           onPressed: _showAddOnsManagerSheet,
           icon: const Icon(Icons.settings_rounded),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _openUpdatesSection({
+    BuildContext? sourceContext,
+    bool showChangelogWhenReady = false,
+  }) {
+    _showReleaseChangelogWhenUpdatesReady = showChangelogWhenReady;
+    return _openSettingsSection(
+      title: 'Updates',
+      child: _buildUpdatesContent(),
+      framed: false,
+      sourceContext: sourceContext,
+      actions: [
+        IconButton(
+          tooltip: 'Updates guide',
+          onPressed: _showUpdatesHelpSheet,
+          icon: const Icon(Icons.menu_book_outlined),
         ),
       ],
     );
@@ -261,7 +289,7 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       opened =
           await _quickLinkChannel.invokeMethod<bool>('open', {'url': url}) ??
-          false;
+              false;
     } on MissingPluginException catch (_) {
       opened = false;
     } on PlatformException catch (_) {
@@ -291,11 +319,11 @@ class _SettingsPageState extends State<SettingsPage> {
             '- App settings needed for troubleshooting\n'
             '- Performance timing clues when available\n\n'
             'What is not included:\n'
-            '- Passwords or account tokens\n'
-            '- Playable stream links\n'
+            '- Passwords or account secrets\n'
+            '- Private playback details\n'
             '- Local file names, paths, or picked-file handles\n'
-            '- Private manifest URLs\n'
-            '- Email addresses or long secret-looking values\n\n'
+            '- Private source setup\n'
+            '- Email addresses or private account details\n\n'
             'Juicr does not sell diagnostic data, use it for advertising, or use it to track you across apps or services.\n\n'
             'The report is redacted before sending and the server redacts it again. Tickets are kept temporarily so fixes can be tracked in release notes and changelogs.',
           ),
@@ -671,8 +699,7 @@ class _SettingsPageState extends State<SettingsPage> {
     var untestedCount = 0;
     final healthByProvider = AppState.nativeProviderHealth.value;
     for (final provider in _nativeProviders) {
-      final health =
-          healthByProvider[provider.id] ??
+      final health = healthByProvider[provider.id] ??
           AppState.nativeProviderHealthDetailsFor(provider.id);
       switch (health.status) {
         case NativeProviderHealthStatus.ready:
@@ -717,8 +744,7 @@ class _SettingsPageState extends State<SettingsPage> {
     var untestedCount = 0;
     final healthByProvider = AppState.nativeProviderHealth.value;
     for (final provider in _nativeProviders) {
-      final health =
-          healthByProvider[provider.id] ??
+      final health = healthByProvider[provider.id] ??
           AppState.nativeProviderHealthDetailsFor(provider.id);
       switch (health.status) {
         case NativeProviderHealthStatus.ready:
@@ -903,8 +929,7 @@ class _SettingsPageState extends State<SettingsPage> {
     bool destructive = false,
   }) {
     final normalizedLabel = confirmLabel.trim().toLowerCase();
-    final looksDestructive =
-        destructive ||
+    final looksDestructive = destructive ||
         normalizedLabel == 'clear' ||
         normalizedLabel == 'remove' ||
         normalizedLabel == 'reset' ||
@@ -996,7 +1021,7 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final raw =
           await _externalPlayerChannel.invokeMethod<List<dynamic>>('list') ??
-          const <dynamic>[];
+              const <dynamic>[];
       final players = <_ExternalPlayerApp>[];
       for (final item in raw) {
         if (item is! Map) continue;
@@ -1745,13 +1770,13 @@ class _SettingsPageState extends State<SettingsPage> {
         reverseTransitionDuration: const Duration(milliseconds: 320),
         pageBuilder: (context, animation, secondaryAnimation) =>
             _SettingsSectionPage(
-              title: title,
-              child: child,
-              framed: framed,
-              actions: actions,
-              titleBadgeLabel: titleBadgeLabel,
-              titleBadgeHint: titleBadgeHint,
-            ),
+          title: title,
+          child: child,
+          framed: framed,
+          actions: actions,
+          titleBadgeLabel: titleBadgeLabel,
+          titleBadgeHint: titleBadgeHint,
+        ),
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           return AnimatedBuilder(
             animation: animation,
@@ -1877,9 +1902,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }) {
     if (connection == null) return fallback;
     final server = Uri.tryParse(connection.serverUrl)?.host;
-    final serverLabel = server == null || server.isEmpty
-        ? 'saved server'
-        : server;
+    final serverLabel =
+        server == null || server.isEmpty ? 'saved server' : server;
     final activeLabel = connection.active ? 'Ready to sync later' : 'Saved off';
     return '$serverLabel - $activeLabel. Catalog and playback stay in the personal server lane.';
   }
@@ -1901,6 +1925,7 @@ class _SettingsPageState extends State<SettingsPage> {
         AppState.artworkMotion,
         AppState.confirmDestructiveActions,
         AppState.hapticsEnabled,
+        AppState.forcePortraitShell,
         AppState.playerBehaviorSettings,
         AppState.textSize,
         AppState.navigationStyle,
@@ -1920,6 +1945,7 @@ class _SettingsPageState extends State<SettingsPage> {
         final showMatureContent = AppState.showMatureContent.value;
         final compactLayout = AppState.compactLayout.value;
         final reduceMotion = AppState.reduceMotion.value;
+        final forcePortraitShell = AppState.forcePortraitShell.value;
         final artworkMotion = AppState.artworkMotion.value;
         final confirmDestructiveActions =
             AppState.confirmDestructiveActions.value;
@@ -2143,6 +2169,19 @@ class _SettingsPageState extends State<SettingsPage> {
                       );
                       AppState.setReduceMotion(enabled);
                       setState(() {});
+                    },
+                  ),
+                  const Divider(height: 1),
+                  _GeneralSwitchTile(
+                    title: 'Keep app in portrait',
+                    subtitle:
+                        'Keep browsing screens vertical while the player can still use fullscreen video.',
+                    value: forcePortraitShell,
+                    onChanged: (enabled) {
+                      DiagnosticLog.add(
+                        'settings force portrait shell ${enabled ? 'enabled' : 'disabled'}',
+                      );
+                      AppState.setForcePortraitShell(enabled);
                     },
                   ),
                   const Divider(height: 1),
@@ -2460,9 +2499,9 @@ class _SettingsPageState extends State<SettingsPage> {
                                     value >= 32 ? 'Pill' : '${value.round()}',
                                 onChanged: (value) =>
                                     _updateSubtitleBackgroundRadius(
-                                      overrides,
-                                      value >= 32 ? 999 : value,
-                                    ),
+                                  overrides,
+                                  value >= 32 ? 999 : value,
+                                ),
                               ),
                               _SettingsColorTile(
                                 icon: Icons.format_color_text_rounded,
@@ -2547,6 +2586,20 @@ class _SettingsPageState extends State<SettingsPage> {
                             value: behavior.autoSwitchOnStall,
                             onChanged: (value) => _updatePlayerBehavior(
                               behavior.copyWith(autoSwitchOnStall: value),
+                            ),
+                          ),
+                          SwitchListTile.adaptive(
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                            ),
+                            secondary: const Icon(Icons.skip_next_rounded),
+                            title: const Text('Auto-skip intros and endings'),
+                            subtitle: const Text(
+                              'Skip supported recap, intro, and outro segments automatically when timing is available.',
+                            ),
+                            value: behavior.autoSkipSegments,
+                            onChanged: (value) => _updatePlayerBehavior(
+                              behavior.copyWith(autoSkipSegments: value),
                             ),
                           ),
                         ],
@@ -2815,7 +2868,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     icon: Icons.privacy_tip_outlined,
                     title: 'What stays private',
                     value:
-                        'Network checks store only safe buckets like Wi-Fi, mobile data, offline, or unavailable. No network names, addresses, peers, URLs, tokens, or stream identities are shown.',
+                        'Network checks store only safe buckets like Wi-Fi, mobile data, offline, or unavailable. Private connection, account, and playback details stay hidden.',
                   ),
                   Divider(height: 1),
                   _StaticSettingsValueTile(
@@ -2898,8 +2951,8 @@ class _SettingsPageState extends State<SettingsPage> {
                       _SettingsSliderTile(
                         icon: Icons.network_check_rounded,
                         title: 'Playback timeout',
-                        value: behavior.providerResolveTimeoutSeconds
-                            .toDouble(),
+                        value:
+                            behavior.providerResolveTimeoutSeconds.toDouble(),
                         min: 8,
                         max: 30,
                         divisions: 22,
@@ -3303,8 +3356,8 @@ class _SettingsPageState extends State<SettingsPage> {
             subtitle: Text(
               expanded
                   ? p2pBridgeAvailable
-                        ? 'Advanced P2P controls are visible. Source health can vary.'
-                        : 'Controls are visible, but this build does not include the required playback support.'
+                      ? 'Advanced P2P controls are visible. Source health can vary.'
+                      : 'Controls are visible, but this build does not include the required playback support.'
                   : 'Hidden by default. Turning this on opens P2P consent first.',
             ),
             value: expanded,
@@ -3427,8 +3480,7 @@ class _SettingsPageState extends State<SettingsPage> {
             _ActionTile(
               icon: Icons.swap_vert_rounded,
               title: 'Priority mode',
-              subtitle:
-                  '${_p2pPriorityModeLabel(behavior.p2pPriorityMode)}: '
+              subtitle: '${_p2pPriorityModeLabel(behavior.p2pPriorityMode)}: '
                   '${_p2pPriorityModeSubtitle(behavior.p2pPriorityMode)}',
               onTap: () => _showP2pPriorityModeSheet(behavior),
             ),
@@ -3772,7 +3824,9 @@ class _SettingsPageState extends State<SettingsPage> {
       _snack(
         snapshot.latest.fromFallback
             ? 'Showing saved release notes.'
-            : 'Update check complete.',
+            : snapshot.updateAvailable
+                ? 'Update available.'
+                : 'Update check complete.',
       );
     } catch (_) {
       if (!mounted) return;
@@ -3782,6 +3836,10 @@ class _SettingsPageState extends State<SettingsPage> {
         _checkingReleaseUpdatesNotifier.value = false;
       }
     }
+  }
+
+  Future<void> _openReleaseDownload(_ReleaseUpdatesSnapshot data) {
+    return _openQuickLink('Download', data.downloadUri.toString());
   }
 
   Future<void> _showReleaseChangelog(ReleaseUpdateInfo release) async {
@@ -3829,7 +3887,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         final data = snapshot.data;
                         final loading =
                             snapshot.connectionState != ConnectionState.done &&
-                            data == null;
+                                data == null;
                         final channel =
                             data?.channel ?? ReleaseUpdateChannel.stable;
                         final release =
@@ -3837,6 +3895,14 @@ class _SettingsPageState extends State<SettingsPage> {
                         final summary = data == null
                             ? 'Installed: checking...\nLatest: checking...\nNotifications: ${showMessageOnLaunch ? 'Enabled' : 'Off'}'
                             : _releaseSummaryText(data, showMessageOnLaunch);
+                        if (data != null &&
+                            _showReleaseChangelogWhenUpdatesReady) {
+                          _showReleaseChangelogWhenUpdatesReady = false;
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted) return;
+                            _showReleaseChangelog(release);
+                          });
+                        }
                         return _SettingsCard(
                           child: Padding(
                             padding: const EdgeInsets.all(16),
@@ -3898,9 +3964,19 @@ class _SettingsPageState extends State<SettingsPage> {
                     ValueListenableBuilder<bool>(
                       valueListenable: _checkingReleaseUpdatesNotifier,
                       builder: (context, checking, _) {
-                        return _UpdateCheckButton(
-                          checking: checking,
-                          onPressed: _refreshReleaseUpdates,
+                        return FutureBuilder<_ReleaseUpdatesSnapshot>(
+                          future: _releaseUpdatesFuture,
+                          builder: (context, snapshot) {
+                            final data = snapshot.data;
+                            return _UpdateCheckButton(
+                              checking: checking,
+                              updateAvailable: data?.updateAvailable ?? false,
+                              onPressed: _refreshReleaseUpdates,
+                              onDownloadUpdate: data == null
+                                  ? _refreshReleaseUpdates
+                                  : () => _openReleaseDownload(data),
+                            );
+                          },
                         );
                       },
                     ),
@@ -3982,13 +4058,17 @@ class _SettingsPageState extends State<SettingsPage> {
                           children: [
                             Text(
                               'Juicr',
-                              style: Theme.of(context).textTheme.headlineSmall
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .headlineSmall
                                   ?.copyWith(fontWeight: FontWeight.w900),
                             ),
                             const SizedBox(height: 4),
                             Text(
                               'Version ${versionLabel.trim().isEmpty ? 'Unknown' : versionLabel.trim()}',
-                              style: Theme.of(context).textTheme.bodyMedium
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodyMedium
                                   ?.copyWith(
                                     color: colorScheme.onSurfaceVariant,
                                     fontWeight: FontWeight.w600,
@@ -4003,9 +4083,10 @@ class _SettingsPageState extends State<SettingsPage> {
                       'Your media, freshly pressed.',
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: colorScheme.onSurface.withValues(alpha: 0.74),
-                        fontWeight: FontWeight.w600,
-                      ),
+                            color:
+                                colorScheme.onSurface.withValues(alpha: 0.74),
+                            fontWeight: FontWeight.w600,
+                          ),
                     ),
                     const SizedBox(height: 16),
                     const Divider(height: 1),
@@ -4013,24 +4094,25 @@ class _SettingsPageState extends State<SettingsPage> {
                     Text(
                       'About Juicr',
                       style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w900,
-                      ),
+                            fontWeight: FontWeight.w900,
+                          ),
                     ),
                     const SizedBox(height: 8),
                     Text(
                       'An Android app for the sources you choose. Browse, save, resume, and play without turning your media setup into a control room.',
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: colorScheme.onSurface.withValues(alpha: 0.72),
-                        height: 1.32,
-                      ),
+                            color:
+                                colorScheme.onSurface.withValues(alpha: 0.72),
+                            height: 1.32,
+                          ),
                     ),
                     const SizedBox(height: 12),
                     Text(
                       'Last updated: $lastUpdated',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                        fontWeight: FontWeight.w700,
-                      ),
+                            color: colorScheme.onSurfaceVariant,
+                            fontWeight: FontWeight.w700,
+                          ),
                     ),
                   ],
                 ),
@@ -4044,9 +4126,9 @@ class _SettingsPageState extends State<SettingsPage> {
           child: Text(
             'Quick links',
             style: Theme.of(context).textTheme.labelLarge?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.w900,
-            ),
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w900,
+                ),
           ),
         ),
         const SizedBox(height: 8),
@@ -4172,11 +4254,9 @@ class _SettingsPageState extends State<SettingsPage> {
                       'Before Juicr turns these tools on, check each acknowledgement. This keeps source choices deliberate instead of a quick tap-through.',
                     ),
                     const SizedBox(height: 12),
-                    for (
-                      var index = 0;
-                      index < acknowledgements.length;
-                      index++
-                    )
+                    for (var index = 0;
+                        index < acknowledgements.length;
+                        index++)
                       _SourceConsentAcknowledgementTile(
                         acknowledgement: acknowledgements[index],
                         value: acceptedIndexes.contains(index),
@@ -4189,13 +4269,16 @@ class _SettingsPageState extends State<SettingsPage> {
                           ? 'Thanks. Built-in sources can be enabled now.'
                           : 'Check every acknowledgement to enable sources.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: allAccepted
-                            ? Theme.of(context).colorScheme.primary
-                            : Theme.of(
-                                context,
-                              ).colorScheme.onSurface.withValues(alpha: 0.6),
-                        fontWeight: FontWeight.w800,
-                      ),
+                            color: allAccepted
+                                ? Theme.of(context).colorScheme.primary
+                                : Theme.of(
+                                    context,
+                                  )
+                                    .colorScheme
+                                    .onSurface
+                                    .withValues(alpha: 0.6),
+                            fontWeight: FontWeight.w800,
+                          ),
                     ),
                   ],
                 ),
@@ -4395,8 +4478,8 @@ class _SettingsPageState extends State<SettingsPage> {
               Text(
                 'Choose videos through the system picker. Juicr records only relink-needed local references, not files, paths, picker handles, or playback state.',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
               ),
               const SizedBox(height: 12),
               Flexible(
@@ -4502,7 +4585,7 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final selected =
           await _catalogBuilderPickerChannel.invokeMethod<bool>('openVideo') ??
-          false;
+              false;
       if (!selected) {
         DiagnosticLog.add('local catalog picker cancelled containsPath=false');
         _snack('No video selected for ${item.title}.');
@@ -4752,8 +4835,7 @@ class _SettingsPageState extends State<SettingsPage> {
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
-            final canAccept =
-                acknowledgements.every((accepted) => accepted) &&
+            final canAccept = acknowledgements.every((accepted) => accepted) &&
                 typedPhrase.trim().toUpperCase() == kP2pHeavyConsentPhrase;
             Widget acknowledgement(int index, String title) {
               return CheckboxListTile(
@@ -5104,8 +5186,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     itemCount: AppState.localCatalogItemCount(catalog.id),
                     relinkNeededPickedRefCount:
                         AppState.localPickedAssetRefsForCatalog(
-                          catalog.id,
-                        ).where((ref) => ref.relinkNeeded).length,
+                      catalog.id,
+                    ).where((ref) => ref.relinkNeeded).length,
                     itemPreviews: AppState.localCatalogItemsFor(
                       catalog.id,
                     ).take(2).toList(growable: false),
@@ -5162,8 +5244,8 @@ class _SettingsPageState extends State<SettingsPage> {
         final defaultStatus = enabledDefaults == 5
             ? _AddonStatus.active
             : enabledDefaults > 0
-            ? _AddonStatus.partial
-            : _AddonStatus.off;
+                ? _AddonStatus.partial
+                : _AddonStatus.off;
         final visibleIds = addons.map((addon) => addon.id).toSet();
         final selectedVisibleIds = selectedIds.intersection(visibleIds);
         _pruneAddonCapabilityFutures(addons);
@@ -5233,9 +5315,8 @@ class _SettingsPageState extends State<SettingsPage> {
                         capabilities,
                         failed: capabilityFailed,
                       ),
-                      status: addon.active
-                          ? _AddonStatus.active
-                          : _AddonStatus.off,
+                      status:
+                          addon.active ? _AddonStatus.active : _AddonStatus.off,
                       selectable: selecting,
                       selected: selectedVisibleIds.contains(addon.id),
                       onSelectedChanged: (value) =>
@@ -5333,8 +5414,8 @@ class _SettingsPageState extends State<SettingsPage> {
                         'Jellyfin stays separate from built-ins and add-ons. Juicr will use your server only after you connect it.',
                     status:
                         jellyfinConnection != null && jellyfinConnection.active
-                        ? _AddonStatus.active
-                        : _AddonStatus.off,
+                            ? _AddonStatus.active
+                            : _AddonStatus.off,
                     onTap: () =>
                         _showPersonalServerSheet(PersonalServerType.jellyfin),
                   ),
@@ -5401,8 +5482,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w900,
-                  ),
+                        fontWeight: FontWeight.w900,
+                      ),
                 ),
                 subtitle: Text(_addonSubtitleFallback(addon)),
                 trailing: _ActivePill(
@@ -5497,11 +5578,9 @@ class _SettingsPageState extends State<SettingsPage> {
   ) {
     final lanes = <_AddonLane>{};
     if (!_catalogDetailsSubtitleSingleActiveByPolicy()) return lanes;
-    final streamFallbackCanCoexist =
-        capabilities.usesPlaybackFallbackLane &&
+    final streamFallbackCanCoexist = capabilities.usesPlaybackFallbackLane &&
         _streamResourcesCanCoexistByPolicy();
-    final usesCatalogDetailsLane =
-        !streamFallbackCanCoexist &&
+    final usesCatalogDetailsLane = !streamFallbackCanCoexist &&
         !capabilities.supportsOnlyLiveTvCatalogs &&
         (capabilities.supportsCatalogs || capabilities.supportsMeta);
     if (usesCatalogDetailsLane) lanes.add(_AddonLane.catalog);
@@ -5515,9 +5594,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   bool _catalogDetailsSubtitleSingleActiveByPolicy() {
     return AppState
-            .runtimeAppPolicy
-            .value
-            ?.catalogDetailsSubtitleSingleActive ??
+            .runtimeAppPolicy.value?.catalogDetailsSubtitleSingleActive ??
         true;
   }
 
@@ -5623,9 +5700,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _deleteSelectedUserAddOns() async {
-    final visibleIds = AppState.userAddons.value
-        .map((addon) => addon.id)
-        .toSet();
+    final visibleIds =
+        AppState.userAddons.value.map((addon) => addon.id).toSet();
     final selectedIds = _selectedAddonIdsNotifier.value.intersection(
       visibleIds,
     );
@@ -5697,7 +5773,7 @@ class _SettingsPageState extends State<SettingsPage> {
       builder: (context) => AlertDialog(
         title: const Text('Export add-ons?'),
         content: const Text(
-          'Exported add-ons may include private configuration or account tokens in manifest URLs. Only share this export with people you trust.',
+          'Exported add-ons may include private source configuration. Only share this export with people you trust.',
         ),
         actions: [
           TextButton(
@@ -5717,7 +5793,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final confirmed = await _confirmAction(
       title: 'Import add-ons?',
       message:
-          'Only import add-ons from exports you trust. Imports may include private configuration or account tokens in manifest URLs. Imported add-ons will be added to your current list, and existing add-ons with the same manifest URL will be skipped.',
+          'Only import add-ons from exports you trust. Imports may include private source configuration. Imported add-ons will be added to your current list, and existing matching add-ons will be skipped.',
       confirmLabel: 'Continue',
     );
     if (confirmed != true) return;
@@ -5736,8 +5812,8 @@ class _SettingsPageState extends State<SettingsPage> {
       final rawAddons = decoded is List
           ? decoded
           : decoded is Map<String, dynamic>
-          ? decoded['addons']
-          : null;
+              ? decoded['addons']
+              : null;
       if (rawAddons is! List) {
         return const _ImportAddOnsOutcome(
           imported: 0,
@@ -6008,8 +6084,13 @@ class _SettingsPageState extends State<SettingsPage> {
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         scrolledUnderElevation: 0,
-        actions: const [
-          Padding(
+        actions: [
+          IconButton(
+            tooltip: 'Juicr guide',
+            onPressed: () => showAppManualSheet(context),
+            icon: const Icon(Icons.menu_book_outlined),
+          ),
+          const Padding(
             padding: EdgeInsets.only(right: 8),
             child: AccountActionButton(),
           ),
@@ -6142,19 +6223,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   icon: Icons.update_rounded,
                   title: 'Updates',
                   subtitle: 'Release checks and changelog',
-                  onTap: (tileContext) => _openSettingsSection(
-                    title: 'Updates',
-                    child: _buildUpdatesContent(),
-                    framed: false,
-                    sourceContext: tileContext,
-                    actions: [
-                      IconButton(
-                        tooltip: 'Updates guide',
-                        onPressed: _showUpdatesHelpSheet,
-                        icon: const Icon(Icons.menu_book_outlined),
-                      ),
-                    ],
-                  ),
+                  onTap: (tileContext) =>
+                      _openUpdatesSection(sourceContext: tileContext),
                 ),
               ),
               SizedBox(height: compactLandscape ? 8 : 12),
@@ -6436,16 +6506,14 @@ class _LocalCatalogItemDialogState extends State<_LocalCatalogItemDialog> {
     _titleController.text = initial.title;
     _descriptionController.text = initial.description;
     _tagsController.text = initial.tags.join(', ');
-    final initialKind = initial.mediaKind.trim().isEmpty
-        ? 'movie'
-        : initial.mediaKind.trim();
-    _mediaKind =
-        const <String>{
-          'movie',
-          'episode',
-          'clip',
-          'other',
-        }.contains(initialKind)
+    final initialKind =
+        initial.mediaKind.trim().isEmpty ? 'movie' : initial.mediaKind.trim();
+    _mediaKind = const <String>{
+      'movie',
+      'episode',
+      'clip',
+      'other',
+    }.contains(initialKind)
         ? initialKind
         : 'other';
     if (initial.releaseYear != null) {
@@ -6482,9 +6550,8 @@ class _LocalCatalogItemDialogState extends State<_LocalCatalogItemDialog> {
             .map((tag) => tag.trim())
             .where((tag) => tag.isNotEmpty)
             .toList(growable: false),
-        releaseYear: releaseYear != null && releaseYear > 0
-            ? releaseYear
-            : null,
+        releaseYear:
+            releaseYear != null && releaseYear > 0 ? releaseYear : null,
         runtimeSeconds: runtimeMinutes != null && runtimeMinutes > 0
             ? runtimeMinutes * 60
             : null,
@@ -6633,16 +6700,16 @@ class _CatalogBuilderIntroCard extends StatelessWidget {
                   Text(
                     'Build private shelves',
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
+                          fontWeight: FontWeight.w900,
+                        ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     'Catalog Builder is local-only. Juicr will use the system picker for files you choose, not broad storage permissions, device scanning, or uploads.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurface.withValues(alpha: 0.66),
-                      fontWeight: FontWeight.w600,
-                    ),
+                          color: colorScheme.onSurface.withValues(alpha: 0.66),
+                          fontWeight: FontWeight.w600,
+                        ),
                   ),
                 ],
               ),
@@ -6681,9 +6748,9 @@ class _CatalogBuilderEmptyCard extends StatelessWidget {
             Text(
               'Create a shelf now. Adding picked media files, posters, and Details-style editing comes after this safe local foundation is proven.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurface.withValues(alpha: 0.62),
-                height: 1.28,
-              ),
+                    color: colorScheme.onSurface.withValues(alpha: 0.62),
+                    height: 1.28,
+                  ),
             ),
           ],
         ),
@@ -6734,25 +6801,25 @@ class _CatalogBuilderCountsCard extends StatelessWidget {
                   Text(
                     'Local catalog overview',
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
+                          fontWeight: FontWeight.w900,
+                        ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     '$catalogCount shelves - $itemCount metadata items - '
                     '$relinkNeededCount references need relink',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurface.withValues(alpha: 0.66),
-                      fontWeight: FontWeight.w700,
-                    ),
+                          color: colorScheme.onSurface.withValues(alpha: 0.66),
+                          fontWeight: FontWeight.w700,
+                        ),
                   ),
                   const SizedBox(height: 2),
                   Text(
                     'Counts only. No files, paths, URIs, or picker handles are shown.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurface.withValues(alpha: 0.58),
-                      height: 1.25,
-                    ),
+                          color: colorScheme.onSurface.withValues(alpha: 0.58),
+                          height: 1.25,
+                        ),
                   ),
                 ],
               ),
@@ -6964,16 +7031,16 @@ class _AddOnsIntroCard extends StatelessWidget {
                   Text(
                     'Choose what Juicr can see',
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
+                          fontWeight: FontWeight.w900,
+                        ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     'Catalog/details and subtitle add-ons use one active source at a time. Streams, Live TV, account-backed routes, and P2P can use separate fallback paths.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurface.withValues(alpha: 0.66),
-                      fontWeight: FontWeight.w600,
-                    ),
+                          color: colorScheme.onSurface.withValues(alpha: 0.66),
+                          fontWeight: FontWeight.w600,
+                        ),
                   ),
                 ],
               ),
@@ -7020,16 +7087,16 @@ class _PersonalServersIntroCard extends StatelessWidget {
                   Text(
                     'Bring your own library',
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
+                          fontWeight: FontWeight.w900,
+                        ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     'Connect a server you control. Juicr keeps personal media servers separate from built-ins and add-ons, and uses them only after you save one here.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurface.withValues(alpha: 0.66),
-                      fontWeight: FontWeight.w600,
-                    ),
+                          color: colorScheme.onSurface.withValues(alpha: 0.66),
+                          fontWeight: FontWeight.w600,
+                        ),
                   ),
                 ],
               ),
@@ -7138,15 +7205,13 @@ class _ExternalPlayersSectionState extends State<_ExternalPlayersSection> {
   void _ensureSelectedPlayer() {
     if (_players.isEmpty) return;
     final selectedPackage = widget.selectedPackage;
-    final hasSelected =
-        selectedPackage != null &&
+    final hasSelected = selectedPackage != null &&
         _players.any((player) => player.packageName == selectedPackage);
     if (hasSelected) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _players.isEmpty) return;
       final currentPackage = widget.selectedPackage;
-      final stillMissing =
-          currentPackage == null ||
+      final stillMissing = currentPackage == null ||
           !_players.any((player) => player.packageName == currentPackage);
       if (!stillMissing) return;
       widget.onSelected(_players.first);
@@ -7509,8 +7574,8 @@ class _AddonSelectionToolbar extends StatelessWidget {
               onPressed: totalCount == 0
                   ? null
                   : allSelected
-                  ? onSelectNone
-                  : onSelectAll,
+                      ? onSelectNone
+                      : onSelectAll,
               child: Text(allSelected ? 'None' : 'All'),
             ),
             IconButton(
@@ -7704,10 +7769,10 @@ class _ProviderHealthSummaryCard extends StatelessWidget {
     final color = summary.failed
         ? colorScheme.error
         : summary.blocked
-        ? const Color(0xFFFFB84D)
-        : summary.ready > 0
-        ? const Color(0xFF36D98B)
-        : colorScheme.onSurface.withValues(alpha: 0.58);
+            ? const Color(0xFFFFB84D)
+            : summary.ready > 0
+                ? const Color(0xFF36D98B)
+                : colorScheme.onSurface.withValues(alpha: 0.58);
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: JuicrVisual.softPanel(colorScheme, alpha: 0.34),
@@ -7717,8 +7782,8 @@ class _ProviderHealthSummaryCard extends StatelessWidget {
             summary.failed
                 ? Icons.error_outline_rounded
                 : summary.blocked
-                ? Icons.schedule_rounded
-                : Icons.check_circle_outline_rounded,
+                    ? Icons.schedule_rounded
+                    : Icons.check_circle_outline_rounded,
             color: color,
           ),
           const SizedBox(width: 12),
@@ -7736,9 +7801,9 @@ class _ProviderHealthSummaryCard extends StatelessWidget {
                 Text(
                   summary.message,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.62),
-                    height: 1.25,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.62),
+                        height: 1.25,
+                      ),
                 ),
               ],
             ),
@@ -7822,9 +7887,9 @@ class _ProviderHealthCheckingCardState
             child: Text(
               'Testing built-in playback routes. This can take a moment.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurface.withValues(alpha: 0.62),
-                height: 1.25,
-              ),
+                    color: colorScheme.onSurface.withValues(alpha: 0.62),
+                    height: 1.25,
+                  ),
             ),
           ),
           const SizedBox(height: 12),
@@ -7875,12 +7940,12 @@ class _ProviderHealthLogLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final style = Theme.of(context).textTheme.bodySmall?.copyWith(
-      color: active
-          ? colorScheme.onSurface.withValues(alpha: 0.88)
-          : colorScheme.onSurface.withValues(alpha: 0.58),
-      fontFeatures: const [FontFeature.tabularFigures()],
-      height: 1.35,
-    );
+          color: active
+              ? colorScheme.onSurface.withValues(alpha: 0.88)
+              : colorScheme.onSurface.withValues(alpha: 0.58),
+          fontFeatures: const [FontFeature.tabularFigures()],
+          height: 1.35,
+        );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 1.5),
       child: Row(
@@ -7997,9 +8062,9 @@ class _AddonEditorDialogState extends State<_AddonEditorDialog> {
                 child: Text(
                   _error!,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.error,
-                    fontWeight: FontWeight.w700,
-                  ),
+                        color: Theme.of(context).colorScheme.error,
+                        fontWeight: FontWeight.w700,
+                      ),
                 ),
               ),
             ],
@@ -8049,9 +8114,9 @@ class _AddonEditorNotice extends StatelessWidget {
             child: Text(
               'Only add manifests you trust. Juicr does not review, host, or provide add-on sources.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurface.withValues(alpha: 0.68),
-                fontWeight: FontWeight.w700,
-              ),
+                    color: colorScheme.onSurface.withValues(alpha: 0.68),
+                    fontWeight: FontWeight.w700,
+                  ),
             ),
           ),
         ],
@@ -8109,8 +8174,7 @@ class _PersonalServerEditorSheetState
     if (_saving) return;
     final serverUrl = _serverController.text.trim();
     final serverUri = Uri.tryParse(serverUrl);
-    final validServer =
-        serverUri != null &&
+    final validServer = serverUri != null &&
         serverUri.hasScheme &&
         (serverUri.scheme == 'http' || serverUri.scheme == 'https') &&
         serverUri.host.isNotEmpty;
@@ -8185,12 +8249,10 @@ class _PersonalServerEditorSheetState
         serverUri,
         '/library/sections',
       ).replace(queryParameters: {'X-Plex-Token': secret});
-      final response = await http
-          .get(
-            sectionsUri,
-            headers: {'Accept': 'application/json', 'X-Plex-Token': secret},
-          )
-          .timeout(const Duration(seconds: 10));
+      final response = await http.get(
+        sectionsUri,
+        headers: {'Accept': 'application/json', 'X-Plex-Token': secret},
+      ).timeout(const Duration(seconds: 10));
       if (response.statusCode >= 200 && response.statusCode < 300) {
         return _PersonalServerVerifiedSession(accessKey: secret);
       }
@@ -8280,17 +8342,17 @@ class _PersonalServerEditorSheetState
               Text(
                 title,
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w900,
-                ),
+                      fontWeight: FontWeight.w900,
+                    ),
               ),
               const SizedBox(height: 8),
               Text(
                 helper,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.68),
-                  height: 1.35,
-                  fontWeight: FontWeight.w600,
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.68),
+                      height: 1.35,
+                      fontWeight: FontWeight.w600,
+                    ),
               ),
               const SizedBox(height: 14),
               _PersonalServerPrivacyNotice(type: widget.type),
@@ -8344,9 +8406,9 @@ class _PersonalServerEditorSheetState
                 Text(
                   _error!,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.error,
-                    fontWeight: FontWeight.w800,
-                  ),
+                        color: colorScheme.error,
+                        fontWeight: FontWeight.w800,
+                      ),
                 ),
               ],
               const SizedBox(height: 6),
@@ -8367,15 +8429,14 @@ class _PersonalServerEditorSheetState
                       onPressed: _saving
                           ? null
                           : () => Navigator.of(context).pop(
-                              const _PersonalServerEditorResult(remove: true),
-                            ),
+                                const _PersonalServerEditorResult(remove: true),
+                              ),
                       child: const Text('Remove'),
                     ),
                   const Spacer(),
                   TextButton(
-                    onPressed: _saving
-                        ? null
-                        : () => Navigator.of(context).pop(),
+                    onPressed:
+                        _saving ? null : () => Navigator.of(context).pop(),
                     child: const Text('Cancel'),
                   ),
                   const SizedBox(width: 8),
@@ -8440,10 +8501,10 @@ class _PersonalServerPrivacyNotice extends StatelessWidget {
             child: Text(
               '${type.label} is treated as your personal server. Juicr keeps this connection local to the app and does not send the server address, password, access key, or media links in diagnostics.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurface.withValues(alpha: 0.72),
-                fontWeight: FontWeight.w700,
-                height: 1.3,
-              ),
+                    color: colorScheme.onSurface.withValues(alpha: 0.72),
+                    fontWeight: FontWeight.w700,
+                    height: 1.3,
+                  ),
             ),
           ),
         ],
@@ -8642,9 +8703,9 @@ class _AddonSourceTile extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.68),
-                    fontWeight: FontWeight.w700,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.68),
+                        fontWeight: FontWeight.w700,
+                      ),
                 ),
                 if (capabilityLabels.isNotEmpty) ...[
                   const SizedBox(height: 12),
@@ -8669,27 +8730,27 @@ class _AddonSourceTile extends StatelessWidget {
                 Text(
                   'Browse success is not playback proof. Juicr keeps locked playback types unavailable until a separate proof path exists.',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.6),
-                    height: 1.28,
-                    fontWeight: FontWeight.w600,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.6),
+                        height: 1.28,
+                        fontWeight: FontWeight.w600,
+                      ),
                 ),
                 const SizedBox(height: 12),
                 Text(
                   hint,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.74),
-                    height: 1.32,
-                    fontWeight: FontWeight.w600,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.74),
+                        height: 1.32,
+                        fontWeight: FontWeight.w600,
+                      ),
                 ),
                 const SizedBox(height: 12),
                 Text(
                   'These are manifest capabilities, not playback proof. This is a compatibility hint, not a promise that the add-on provides playable media. Juicr only tries user-chosen manifests and keeps unsupported source classes unavailable.',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.58),
-                    height: 1.28,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.58),
+                        height: 1.28,
+                      ),
                 ),
               ],
             ),
@@ -8731,7 +8792,9 @@ class _AddonSourceTile extends StatelessWidget {
                         name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleMedium
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleMedium
                             ?.copyWith(fontWeight: FontWeight.w900),
                       ),
                       const SizedBox(height: 4),
@@ -8740,9 +8803,10 @@ class _AddonSourceTile extends StatelessWidget {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: colorScheme.onSurface.withValues(alpha: 0.58),
-                          height: 1.25,
-                        ),
+                              color:
+                                  colorScheme.onSurface.withValues(alpha: 0.58),
+                              height: 1.25,
+                            ),
                       ),
                       if (capabilityLabels.isNotEmpty) ...[
                         const SizedBox(height: 8),
@@ -8808,7 +8872,7 @@ class _AddonRouteEvidenceNotice extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     return Semantics(
       label:
-          'Add-on route evidence records only media type, route status, safe counts, and checked time. It does not store URLs, hashes, trackers, headers, tokens, or account details.',
+          'Add-on route evidence records only media type, route status, safe counts, and checked time. Private source, connection, and account details stay out.',
       child: ExcludeSemantics(
         child: DecoratedBox(
           decoration: JuicrVisual.elevatedCardDecoration(
@@ -8836,18 +8900,20 @@ class _AddonRouteEvidenceNotice extends StatelessWidget {
                       Text(
                         'Route evidence',
                         style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                          color: colorScheme.onSurface.withValues(alpha: 0.9),
-                          fontWeight: FontWeight.w900,
-                        ),
+                              color:
+                                  colorScheme.onSurface.withValues(alpha: 0.9),
+                              fontWeight: FontWeight.w900,
+                            ),
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        'After a playback test, Juicr keeps only the route status, media type, safe counts, and checked time. URLs, hashes, trackers, headers, tokens, and account details stay out.',
+                        'After a playback test, Juicr keeps only the route status, media type, safe counts, and checked time. Private source, connection, and account details stay out.',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: colorScheme.onSurface.withValues(alpha: 0.66),
-                          height: 1.28,
-                          fontWeight: FontWeight.w600,
-                        ),
+                              color:
+                                  colorScheme.onSurface.withValues(alpha: 0.66),
+                              height: 1.28,
+                              fontWeight: FontWeight.w600,
+                            ),
                       ),
                     ],
                   ),
@@ -8889,9 +8955,9 @@ class _AddonCapabilityBreakdown extends StatelessWidget {
                 Text(
                   'What this add-on advertises',
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.88),
-                    fontWeight: FontWeight.w900,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.88),
+                        fontWeight: FontWeight.w900,
+                      ),
                 ),
                 const SizedBox(height: 8),
                 Wrap(
@@ -8905,10 +8971,10 @@ class _AddonCapabilityBreakdown extends StatelessWidget {
                 Text(
                   'Catalog/details and subtitles use one active source at a time. Streams, Live TV, account-backed routes, and P2P can stay active as fallback paths.',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.62),
-                    height: 1.28,
-                    fontWeight: FontWeight.w600,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.62),
+                        height: 1.28,
+                        fontWeight: FontWeight.w600,
+                      ),
                 ),
               ],
             ),
@@ -8968,18 +9034,19 @@ class _AddonCompatibilityPill extends StatelessWidget {
                   normalized.contains('locked')
                       ? Icons.lock_outline_rounded
                       : normalized.contains('p2p')
-                      ? Icons.hub_outlined
-                      : normalized.contains('runtime')
-                      ? Icons.tune_rounded
-                      : normalized.contains('account')
-                      ? Icons.manage_accounts_outlined
-                      : normalized.contains('stream')
-                      ? Icons.play_circle_outline_rounded
-                      : normalized.contains('caption')
-                      ? Icons.closed_caption_outlined
-                      : normalized.contains('browse')
-                      ? Icons.travel_explore_rounded
-                      : Icons.check_circle_outline_rounded,
+                          ? Icons.hub_outlined
+                          : normalized.contains('runtime')
+                              ? Icons.tune_rounded
+                              : normalized.contains('account')
+                                  ? Icons.manage_accounts_outlined
+                                  : normalized.contains('stream')
+                                      ? Icons.play_circle_outline_rounded
+                                      : normalized.contains('caption')
+                                          ? Icons.closed_caption_outlined
+                                          : normalized.contains('browse')
+                                              ? Icons.travel_explore_rounded
+                                              : Icons
+                                                  .check_circle_outline_rounded,
                   size: 13,
                   color: color.withValues(alpha: 0.9),
                 ),
@@ -8987,9 +9054,9 @@ class _AddonCompatibilityPill extends StatelessWidget {
                 Text(
                   label,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: color.withValues(alpha: 0.9),
-                    fontWeight: FontWeight.w900,
-                  ),
+                        color: color.withValues(alpha: 0.9),
+                        fontWeight: FontWeight.w900,
+                      ),
                 ),
               ],
             ),
@@ -9036,10 +9103,10 @@ class _AddonHelperText extends StatelessWidget {
               child: Text(
                 text,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.72),
-                  height: 1.25,
-                  fontWeight: FontWeight.w600,
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.72),
+                      height: 1.25,
+                      fontWeight: FontWeight.w600,
+                    ),
               ),
             ),
           ],
@@ -9082,9 +9149,9 @@ class _CapabilityChip extends StatelessWidget {
         child: Text(
           label,
           style: Theme.of(context).textTheme.labelSmall?.copyWith(
-            color: activeColor.withValues(alpha: 0.9),
-            fontWeight: FontWeight.w800,
-          ),
+                color: activeColor.withValues(alpha: 0.9),
+                fontWeight: FontWeight.w800,
+              ),
         ),
       ),
     );
@@ -9127,9 +9194,9 @@ class _ActivePill extends StatelessWidget {
       child: Text(
         label,
         style: Theme.of(context).textTheme.labelMedium?.copyWith(
-          color: color,
-          fontWeight: FontWeight.w900,
-        ),
+              color: color,
+              fontWeight: FontWeight.w900,
+            ),
       ),
     );
   }
@@ -9231,9 +9298,8 @@ class _SettingsHomeTile extends StatelessWidget {
                                         .textTheme
                                         .titleMedium
                                         ?.copyWith(
-                                          fontSize: compactLandscape
-                                              ? 15
-                                              : null,
+                                          fontSize:
+                                              compactLandscape ? 15 : null,
                                           fontWeight: FontWeight.w800,
                                           letterSpacing: -0.1,
                                         ),
@@ -9254,7 +9320,9 @@ class _SettingsHomeTile extends StatelessWidget {
                               subtitle,
                               maxLines: compactLandscape ? 1 : 2,
                               overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodySmall
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
                                   ?.copyWith(
                                     color: colorScheme.onSurface.withValues(
                                       alpha: 0.68,
@@ -9349,6 +9417,16 @@ class _ReleaseUpdatesSnapshot {
   final ReleaseUpdateChannel channel;
   final ReleaseUpdateInfo latest;
 
+  bool get updateAvailable {
+    if (latest.fromFallback) return false;
+    return isReleaseUpdateAvailable(
+      installedVersion: installedVersion,
+      latestVersion: latest.displayVersion,
+    );
+  }
+
+  Uri get downloadUri => releaseDownloadUri(latest);
+
   String get installedLabel {
     final parts = <String>[installedVersion];
     if (installedCode.isNotEmpty && installedCode != '0') {
@@ -9394,10 +9472,11 @@ class _ProviderSelector extends StatelessWidget {
         title: Text(title),
         subtitle: showNativeHealth
             ? autoSelected
-                  ? const _AutoProviderSummary(prominent: false)
-                  : checking
-                  ? _ProviderCheckingSummary(provider: selected)
-                  : _ProviderHealthSummary(provider: selected, health: health!)
+                ? const _AutoProviderSummary(prominent: false)
+                : checking
+                    ? _ProviderCheckingSummary(provider: selected)
+                    : _ProviderHealthSummary(
+                        provider: selected, health: health!)
             : Text(selected.name),
         trailing: const Icon(Icons.keyboard_arrow_down_rounded),
         onTap: () => _showProviderSheet(context),
@@ -9456,15 +9535,14 @@ class _ProviderSelector extends StatelessWidget {
                   Text(
                     'Choose playback option',
                     style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
+                          fontWeight: FontWeight.w900,
+                        ),
                   ),
                   const SizedBox(height: 12),
                   Flexible(
                     child: showNativeHealth
                         ? ValueListenableBuilder<
-                            Map<String, NativeProviderHealth>
-                          >(
+                            Map<String, NativeProviderHealth>>(
                             valueListenable: AppState.nativeProviderHealth,
                             builder: (context, _, __) {
                               return _ProviderSheetList(
@@ -9651,17 +9729,16 @@ class _OverrideSettingsSection extends StatelessWidget {
             curve: Curves.easeOut,
             reverseCurve: Curves.easeIn,
           );
-          final slide =
-              Tween<Offset>(
-                begin: const Offset(0, -0.035),
-                end: Offset.zero,
-              ).animate(
-                CurvedAnimation(
-                  parent: animation,
-                  curve: Curves.easeOutCubic,
-                  reverseCurve: Curves.easeInCubic,
-                ),
-              );
+          final slide = Tween<Offset>(
+            begin: const Offset(0, -0.035),
+            end: Offset.zero,
+          ).animate(
+            CurvedAnimation(
+              parent: animation,
+              curve: Curves.easeOutCubic,
+              reverseCurve: Curves.easeInCubic,
+            ),
+          );
           return ClipRect(
             child: FadeTransition(
               opacity: fade,
@@ -9711,10 +9788,10 @@ class _OverrideSectionDivider extends StatelessWidget {
             child: Text(
               label,
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: colorScheme.onSurface.withValues(alpha: 0.62),
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0.3,
-              ),
+                    color: colorScheme.onSurface.withValues(alpha: 0.62),
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.3,
+                  ),
             ),
           ),
           Expanded(
@@ -9772,10 +9849,10 @@ class _AdvancedPlaybackSectionHeader extends StatelessWidget {
                 Text(
                   subtitle,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.64),
-                    fontWeight: FontWeight.w600,
-                    height: 1.28,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.64),
+                        fontWeight: FontWeight.w600,
+                        height: 1.28,
+                      ),
                 ),
               ],
             ),
@@ -9807,9 +9884,9 @@ class _ExperimentalWarning extends StatelessWidget {
             child: Text(
               'These controls change native player timing. Extreme values can make playback slower, skip working sources, or leave libVLC waiting too long.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurface.withValues(alpha: 0.72),
-                height: 1.32,
-              ),
+                    color: colorScheme.onSurface.withValues(alpha: 0.72),
+                    height: 1.32,
+                  ),
             ),
           ),
         ],
@@ -9855,9 +9932,9 @@ class _ExperimentalInfoTile extends StatelessWidget {
                 Text(
                   subtitle,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.62),
-                    height: 1.28,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.62),
+                        height: 1.28,
+                      ),
                 ),
               ],
             ),
@@ -9920,20 +9997,22 @@ class _SourceConsentAcknowledgementTile extends StatelessWidget {
                         children: [
                           Text(
                             acknowledgement.title,
-                            style: Theme.of(context).textTheme.labelLarge
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelLarge
                                 ?.copyWith(fontWeight: FontWeight.w900),
                           ),
                           const SizedBox(height: 3),
                           Text(
                             acknowledgement.text,
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(
-                                  color: colorScheme.onSurface.withValues(
-                                    alpha: 0.68,
-                                  ),
-                                  height: 1.28,
-                                  fontWeight: FontWeight.w600,
-                                ),
+                            style:
+                                Theme.of(context).textTheme.bodySmall?.copyWith(
+                                      color: colorScheme.onSurface.withValues(
+                                        alpha: 0.68,
+                                      ),
+                                      height: 1.28,
+                                      fontWeight: FontWeight.w600,
+                                    ),
                           ),
                         ],
                       ),
@@ -10057,9 +10136,9 @@ class _StaticSettingsValueTile extends StatelessWidget {
                 Text(
                   value,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.72),
-                    height: 1.28,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.72),
+                        height: 1.28,
+                      ),
                 ),
               ],
             ),
@@ -10195,9 +10274,8 @@ class _SettingsColorTile extends StatelessWidget {
                               : colorScheme.primary,
                           selected: customSelected,
                           custom: true,
-                          customPreviewColor: customSelected
-                              ? selectedColor
-                              : null,
+                          customPreviewColor:
+                              customSelected ? selectedColor : null,
                           onTap: () async {
                             final selected = await showDialog<Color>(
                               context: context,
@@ -10253,8 +10331,7 @@ class _ColorChoiceButton extends StatelessWidget {
         width: 40,
         height: 38,
         decoration: BoxDecoration(
-          color:
-              customFill ??
+          color: customFill ??
               (selected
                   ? visibleColor.withValues(alpha: 0.2)
                   : colorScheme.surfaceContainerHigh),
@@ -10493,9 +10570,8 @@ class _ColorPickerDialogState extends State<_ColorPickerDialog> {
               controller: _hexController,
               textCapitalization: TextCapitalization.characters,
               decoration: InputDecoration(
-                labelText: widget.allowOpacity
-                    ? 'Hex (AARRGGBB)'
-                    : 'Hex (RRGGBB)',
+                labelText:
+                    widget.allowOpacity ? 'Hex (AARRGGBB)' : 'Hex (RRGGBB)',
                 prefixText: '#',
               ),
               onSubmitted: _applyHex,
@@ -10653,6 +10729,11 @@ class _GeneralHelpSheet extends StatelessWidget {
         Icons.motion_photos_off_outlined,
         'Reduce motion',
         'Softens page movement for a calmer, faster-feeling app.',
+      ),
+      (
+        Icons.screen_lock_portrait_rounded,
+        'Keep app in portrait',
+        'Keeps browsing screens vertical even when the device rotates. Fullscreen video can still use the player layout made for watching.',
       ),
       (
         Icons.photo_filter_rounded,
@@ -10887,6 +10968,11 @@ class _PlaybackHelpSheet extends StatelessWidget {
       ),
       (
         Icons.skip_next_rounded,
+        'Auto-skip intros and endings',
+        'When timing is available, Juicr can skip recap, intro, and outro segments without waiting for you to press the skip button. Turn it off if you prefer manual control.',
+      ),
+      (
+        Icons.skip_next_rounded,
         'Autoplay next episode',
         'Starts the next episode automatically near the end when one is available.',
       ),
@@ -11014,7 +11100,7 @@ class _BatteryDataHelpSheet extends StatelessWidget {
       (
         Icons.privacy_tip_outlined,
         'Privacy boundary',
-        'Juicr hides stream URLs, manifest URLs, and long secret-looking values. Juicr does not log Wi-Fi names, IP addresses, peers, playable URLs, account details, tokens, or headers for these checks.',
+        'Juicr keeps private network, playback, source, and account details out of these checks.',
       ),
       (
         Icons.shield_outlined,
@@ -11256,9 +11342,9 @@ class _DefaultSourceHelpSheet extends StatelessWidget {
               child: Text(
                 'Juicr starts without media sources. These switches are optional tools you can enable after checking the source acknowledgements for media responsibility, allowed content, and no bypassing access controls.',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.72),
-                  height: 1.35,
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.72),
+                      height: 1.35,
+                    ),
               ),
             ),
             const SizedBox(height: 12),
@@ -11326,16 +11412,16 @@ class _CatalogBuilderHelpSheet extends StatelessWidget {
                   Text(
                     title,
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
+                          fontWeight: FontWeight.w900,
+                        ),
                   ),
                   const SizedBox(height: 3),
                   Text(
                     body,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurface.withValues(alpha: 0.68),
-                      height: 1.3,
-                    ),
+                          color: colorScheme.onSurface.withValues(alpha: 0.68),
+                          height: 1.3,
+                        ),
                   ),
                 ],
               ),
@@ -11456,9 +11542,9 @@ class _AddOnsHelpSheet extends StatelessWidget {
               child: Text(
                 'Add-ons are third-party manifests you choose to add. Juicr can read what they claim to support, but you decide which sources you trust and enable.',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.72),
-                  height: 1.35,
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.72),
+                      height: 1.35,
+                    ),
               ),
             ),
             const SizedBox(height: 6),
@@ -11467,8 +11553,8 @@ class _AddOnsHelpSheet extends StatelessWidget {
               child: Text(
                 'Juicr reads each manifest and explains what it can do in plain language.',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.68),
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.68),
+                    ),
               ),
             ),
             const SizedBox(height: 12),
@@ -11559,8 +11645,8 @@ class _PersonalServersHelpSheet extends StatelessWidget {
                   child: Text(
                     'Personal servers guide',
                     style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
+                          fontWeight: FontWeight.w900,
+                        ),
                   ),
                 ),
               ],
@@ -11571,9 +11657,9 @@ class _PersonalServersHelpSheet extends StatelessWidget {
               child: Text(
                 'Connect your own library and keep it in its own lane. Juicr provides the app experience; you manage the server and access.',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.72),
-                  height: 1.35,
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.72),
+                      height: 1.35,
+                    ),
               ),
             ),
             const SizedBox(height: 12),
@@ -11925,7 +12011,7 @@ class _AboutDiagnosticsHelpSheet extends StatelessWidget {
       (
         Icons.privacy_tip_outlined,
         'Privacy boundary',
-        'Diagnostics keep raw links, tokens, headers, local endpoints, private account details, and source identities out of the report.',
+        'Diagnostics keep private playback, source, connection, and account details out of the report.',
       ),
     ];
 
@@ -12003,10 +12089,9 @@ class _OptionSheet<T> extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final maxHeight = mediaQuery.size.height * 0.5;
     const chromeHeight = 84.0;
-    final rowHeight =
-        options.any(
-          (option) => option.subtitle != null && option.subtitle!.isNotEmpty,
-        )
+    final rowHeight = options.any(
+      (option) => option.subtitle != null && option.subtitle!.isNotEmpty,
+    )
         ? 78.0
         : 56.0;
     final estimatedListHeight = options.length * rowHeight;
@@ -12035,9 +12120,8 @@ class _OptionSheet<T> extends StatelessWidget {
         ),
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxHeight: wrapsContent
-                ? chromeHeight + estimatedListHeight
-                : maxHeight,
+            maxHeight:
+                wrapsContent ? chromeHeight + estimatedListHeight : maxHeight,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -12111,19 +12195,19 @@ class _ProviderSheetList extends StatelessWidget {
             title: provider.id == AppState.autoNativeProviderId
                 ? const _AutoProviderSummary(prominent: true)
                 : showNativeHealth
-                ? _ProviderHealthSummary(
-                    provider: provider,
-                    health: AppState.nativeProviderHealthDetailsFor(
-                      provider.id,
-                    ),
-                    prominent: true,
-                  )
-                : Text(
-                    provider.name,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
+                    ? _ProviderHealthSummary(
+                        provider: provider,
+                        health: AppState.nativeProviderHealthDetailsFor(
+                          provider.id,
+                        ),
+                        prominent: true,
+                      )
+                    : Text(
+                        provider.name,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
             trailing: provider.id == selected.id
                 ? Icon(Icons.check_circle, color: colorScheme.primary)
                 : Icon(
@@ -12162,14 +12246,13 @@ class _ProviderHealthSummary extends StatelessWidget {
           child: Text(
             provider.name,
             overflow: TextOverflow.ellipsis,
-            style:
-                (prominent
-                        ? theme.textTheme.titleMedium
-                        : theme.textTheme.bodyMedium)
-                    ?.copyWith(
-                      color: providerTextColor,
-                      fontWeight: FontWeight.w800,
-                    ),
+            style: (prominent
+                    ? theme.textTheme.titleMedium
+                    : theme.textTheme.bodyMedium)
+                ?.copyWith(
+              color: providerTextColor,
+              fontWeight: FontWeight.w800,
+            ),
           ),
         ),
         const SizedBox(width: 10),
@@ -12201,11 +12284,10 @@ class _AutoProviderSummary extends StatelessWidget {
           child: Text(
             'Auto',
             overflow: TextOverflow.ellipsis,
-            style:
-                (prominent
-                        ? theme.textTheme.titleMedium
-                        : theme.textTheme.bodyMedium)
-                    ?.copyWith(fontWeight: FontWeight.w800),
+            style: (prominent
+                    ? theme.textTheme.titleMedium
+                    : theme.textTheme.bodyMedium)
+                ?.copyWith(fontWeight: FontWeight.w800),
           ),
         ),
         const SizedBox(width: 10),
@@ -12293,8 +12375,7 @@ class _ProviderHealthPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final status = health.status;
     final color = _providerHealthColor(context, status);
-    final isOutlined =
-        status == NativeProviderHealthStatus.untested ||
+    final isOutlined = status == NativeProviderHealthStatus.untested ||
         status == NativeProviderHealthStatus.checkedNoSample;
     return AnimatedContainer(
       duration: JuicrVisual.snapDuration,
@@ -12308,12 +12389,11 @@ class _ProviderHealthPill extends StatelessWidget {
       child: AnimatedDefaultTextStyle(
         duration: JuicrVisual.snapDuration,
         curve: JuicrVisual.snapCurve,
-        style:
-            Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: color,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 0.1,
-            ) ??
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: color,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 0.1,
+                ) ??
             TextStyle(
               color: color,
               fontWeight: FontWeight.w900,
@@ -12403,8 +12483,7 @@ class _Dot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isOutlined =
-        status == NativeProviderHealthStatus.untested ||
+    final isOutlined = status == NativeProviderHealthStatus.untested ||
         status == NativeProviderHealthStatus.checkedNoSample;
     final size = 9.0 + (pulse * 2);
     return SizedBox.square(
@@ -12452,7 +12531,8 @@ Color? _providerHealthTextColor(
   final colorScheme = Theme.of(context).colorScheme;
   return switch (status) {
     NativeProviderHealthStatus.untested ||
-    NativeProviderHealthStatus.checkedNoSample => null,
+    NativeProviderHealthStatus.checkedNoSample =>
+      null,
     _ => null,
   };
 }
@@ -12466,7 +12546,8 @@ String _providerHealthPillLabel(NativeProviderHealth health) {
     NativeProviderHealthStatus.failing => 'Offline',
     NativeProviderHealthStatus.untested ||
     NativeProviderHealthStatus.checkedNoSample ||
-    NativeProviderHealthStatus.protected => 'Not checked',
+    NativeProviderHealthStatus.protected =>
+      'Not checked',
   };
 }
 
@@ -12520,10 +12601,10 @@ class _SettingsSectionLabel extends StatelessWidget {
           Text(
             label,
             style: Theme.of(context).textTheme.labelLarge?.copyWith(
-              color: colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 0.1,
-            ),
+                  color: colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 0.1,
+                ),
           ),
         ],
       ),
@@ -12547,9 +12628,8 @@ class _ThemeOption extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final iconColor = selected
-        ? colorScheme.primary
-        : colorScheme.onSurfaceVariant;
+    final iconColor =
+        selected ? colorScheme.primary : colorScheme.onSurfaceVariant;
     return Semantics(
       container: true,
       button: true,
@@ -12585,11 +12665,11 @@ class _ThemeOption extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: selected
-                          ? colorScheme.primary
-                          : colorScheme.onSurface,
-                      fontWeight: FontWeight.w900,
-                    ),
+                          color: selected
+                              ? colorScheme.primary
+                              : colorScheme.onSurface,
+                          fontWeight: FontWeight.w900,
+                        ),
                   ),
                 ],
               ),
@@ -12772,9 +12852,9 @@ class _AccentChoice extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: selected ? color : colorScheme.onSurface,
-                    fontWeight: FontWeight.w900,
-                  ),
+                        color: selected ? color : colorScheme.onSurface,
+                        fontWeight: FontWeight.w900,
+                      ),
                 ),
               ],
             ),
@@ -12861,9 +12941,9 @@ class _GeneralSwitchTile extends StatelessWidget {
                 child: Text(
                   badgeText!,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: colorScheme.primary,
-                    fontWeight: FontWeight.w900,
-                  ),
+                        color: colorScheme.primary,
+                        fontWeight: FontWeight.w900,
+                      ),
                 ),
               ),
             ),
@@ -13114,10 +13194,10 @@ class _AboutQuickLinkTile extends StatelessWidget {
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.68),
-                  height: 1.18,
-                  fontWeight: FontWeight.w600,
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.68),
+                      height: 1.18,
+                      fontWeight: FontWeight.w600,
+                    ),
               ),
             ],
           ),
@@ -13128,26 +13208,42 @@ class _AboutQuickLinkTile extends StatelessWidget {
 }
 
 class _UpdateCheckButton extends StatelessWidget {
-  const _UpdateCheckButton({required this.checking, required this.onPressed});
+  const _UpdateCheckButton({
+    required this.checking,
+    required this.updateAvailable,
+    required this.onPressed,
+    required this.onDownloadUpdate,
+  });
 
   final bool checking;
+  final bool updateAvailable;
   final VoidCallback onPressed;
+  final VoidCallback onDownloadUpdate;
 
   @override
   Widget build(BuildContext context) {
+    final label = checking
+        ? 'Checking'
+        : updateAvailable
+            ? 'Download update'
+            : 'Check for updates';
     return Semantics(
       button: true,
       enabled: !checking,
-      label: checking ? 'Checking for updates' : 'Check for updates',
+      label: label,
       child: SizedBox(
         width: double.infinity,
         child: FilledButton(
-          onPressed: checking ? null : onPressed,
+          onPressed: checking
+              ? null
+              : updateAvailable
+                  ? onDownloadUpdate
+                  : onPressed,
           style: FilledButton.styleFrom(
             minimumSize: const Size(0, 40),
             fixedSize: const Size.fromHeight(40),
           ),
-          child: Text(checking ? 'Checking' : 'Check for updates'),
+          child: Text(label),
         ),
       ),
     );

@@ -9,7 +9,6 @@ import 'app_shell.dart';
 import 'diagnostic_log.dart';
 import 'first_run_welcome_page.dart';
 import 'notification_orchestrator.dart';
-import 'release_changelog_view.dart';
 import 'release_updates.dart';
 import 'stream_api.dart';
 import 'system_ui.dart';
@@ -37,6 +36,8 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
     with WidgetsBindingObserver {
   final StreamApi _api = StreamApi();
   final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+  final GlobalKey<ScaffoldMessengerState> _scaffoldMessengerKey =
+      GlobalKey<ScaffoldMessengerState>();
   late final NotificationOrchestrator _notificationOrchestrator =
       NotificationOrchestrator(api: _api, navigatorKey: _navigatorKey);
   bool _crashPromptShown = false;
@@ -49,7 +50,9 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
     AppState.notificationSettingsRevision.addListener(
       _handleNotificationSettingsChanged,
     );
+    AppState.forcePortraitShell.addListener(_handleForcePortraitShellChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _handleForcePortraitShellChanged();
       _maybeShowCrashPrompt();
       unawaited(_refreshProviderHealthAfterStartup());
       unawaited(_checkNotificationsAfterStartup());
@@ -62,6 +65,9 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
     WidgetsBinding.instance.removeObserver(this);
     DiagnosticLog.sessionRevision.removeListener(
       _handleDiagnosticSessionChanged,
+    );
+    AppState.forcePortraitShell.removeListener(
+      _handleForcePortraitShellChanged,
     );
     AppState.notificationSettingsRevision.removeListener(
       _handleNotificationSettingsChanged,
@@ -76,6 +82,14 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
 
   void _handleNotificationSettingsChanged() {
     unawaited(_notificationOrchestrator.check(reason: 'settings_changed'));
+  }
+
+  void _handleForcePortraitShellChanged() {
+    unawaited(
+      applyJuicrShellOrientation(
+        forcePortrait: AppState.forcePortraitShell.value,
+      ),
+    );
   }
 
   @override
@@ -158,7 +172,11 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
 
   Future<void> _maybeCheckReleaseOnLaunch() async {
     await Future<void>.delayed(const Duration(milliseconds: 2600));
-    if (!mounted || !AppState.releaseCheckOnLaunchEnabled.value) return;
+    if (!mounted ||
+        !AppState.firstRunWelcomeSeen.value ||
+        !AppState.releaseCheckOnLaunchEnabled.value) {
+      return;
+    }
     try {
       final installInfo = await DiagnosticLog.installInfo();
       final versionName = (installInfo['versionName'] ?? '').toString().trim();
@@ -175,9 +193,9 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
       )) {
         return;
       }
-      final context = _navigatorKey.currentContext;
-      if (context == null) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      final messenger = _scaffoldMessengerKey.currentState;
+      if (messenger == null) return;
+      messenger.showSnackBar(
         SnackBar(
           content: Text(
             channel == ReleaseUpdateChannel.nightly
@@ -186,41 +204,13 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
           ),
           action: SnackBarAction(
             label: 'Changelog',
-            onPressed: () => _showLaunchReleaseChangelog(release),
+            onPressed: AppState.openUpdatesChangelog,
           ),
         ),
       );
     } catch (error) {
       DiagnosticLog.add('release launch check skipped reason=$error');
     }
-  }
-
-  Future<void> _showLaunchReleaseChangelog(ReleaseUpdateInfo release) async {
-    final dialogContext = _navigatorKey.currentContext;
-    if (!mounted || dialogContext == null) return;
-    final body = release.body.trim().isEmpty
-        ? fallbackChangelog(release.channel)
-        : release.body.trim();
-    await showDialog<void>(
-      context: dialogContext,
-      builder: (context) => AlertDialog(
-        title: Text(
-          release.channel == ReleaseUpdateChannel.nightly
-              ? 'Nightly changelog'
-              : 'Release changelog',
-        ),
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 360),
-          child: SingleChildScrollView(child: ReleaseChangelogView(body: body)),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _sendCrashReport() async {
@@ -295,23 +285,26 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
                                     return ValueListenableBuilder<String>(
                                       valueListenable:
                                           AppState.statusMessageStyle,
-                                      builder: (context, statusMessageStyle, __________) {
+                                      builder: (context, statusMessageStyle,
+                                          __________) {
                                         return ValueListenableBuilder<String>(
                                           valueListenable:
                                               AppState.systemBarStyle,
-                                          builder: (context, systemBarStyle, ___________) {
+                                          builder: (context, systemBarStyle,
+                                              ___________) {
                                             Widget buildApp(
                                               ColorScheme? lightDynamicScheme,
                                               ColorScheme? darkDynamicScheme,
                                             ) {
                                               final dynamicAvailable =
                                                   useDeviceAccent &&
-                                                  lightDynamicScheme != null &&
-                                                  darkDynamicScheme != null;
+                                                      lightDynamicScheme !=
+                                                          null &&
+                                                      darkDynamicScheme != null;
                                               final accent = dynamicAvailable
                                                   ? lightDynamicScheme.primary
                                                   : AppState
-                                                        .effectiveAccentColor;
+                                                      .effectiveAccentColor;
                                               final darkBase = pureBlack
                                                   ? Colors.black
                                                   : _juicrDarkBase;
@@ -319,10 +312,12 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
                                                   _juicrLightSurface;
                                               final visualDensity =
                                                   compactLayout
-                                                  ? VisualDensity.compact
-                                                  : VisualDensity.standard;
+                                                      ? VisualDensity.compact
+                                                      : VisualDensity.standard;
                                               return MaterialApp(
                                                 navigatorKey: _navigatorKey,
+                                                scaffoldMessengerKey:
+                                                    _scaffoldMessengerKey,
                                                 debugShowCheckedModeBanner:
                                                     false,
                                                 title: 'Juicr',
@@ -335,8 +330,8 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
                                                   accent: accent,
                                                   dynamicScheme:
                                                       dynamicAvailable
-                                                      ? lightDynamicScheme
-                                                      : null,
+                                                          ? lightDynamicScheme
+                                                          : null,
                                                   visualDensity: visualDensity,
                                                   reduceMotion: reduceMotion,
                                                   statusMessageStyle:
@@ -345,12 +340,12 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
                                                 darkTheme: _darkTheme(
                                                   accent: dynamicAvailable
                                                       ? darkDynamicScheme
-                                                            .primary
+                                                          .primary
                                                       : accent,
                                                   dynamicScheme:
                                                       dynamicAvailable
-                                                      ? darkDynamicScheme
-                                                      : null,
+                                                          ? darkDynamicScheme
+                                                          : null,
                                                   pureBlack: pureBlack,
                                                   visualDensity: visualDensity,
                                                   reduceMotion: reduceMotion,
@@ -358,27 +353,24 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
                                                       statusMessageStyle,
                                                 ),
                                                 builder: (context, child) {
-                                                  final isDark =
-                                                      Theme.of(
+                                                  final isDark = Theme.of(
                                                         context,
                                                       ).brightness ==
                                                       Brightness.dark;
                                                   final content = MediaQuery(
                                                     data: MediaQuery.of(context)
                                                         .copyWith(
-                                                          textScaler:
-                                                              TextScaler.linear(
-                                                                AppState
-                                                                    .textScaleFactor,
-                                                              ),
-                                                        ),
-                                                    child:
-                                                        child ??
+                                                      textScaler:
+                                                          TextScaler.linear(
+                                                        AppState
+                                                            .textScaleFactor,
+                                                      ),
+                                                    ),
+                                                    child: child ??
                                                         const SizedBox.shrink(),
                                                   );
                                                   return AnnotatedRegion<
-                                                    SystemUiOverlayStyle
-                                                  >(
+                                                      SystemUiOverlayStyle>(
                                                     value: _systemOverlayStyle(
                                                       isDark: isDark,
                                                       style: systemBarStyle,
@@ -388,7 +380,8 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
                                                     child: content,
                                                   );
                                                 },
-                                                home: ValueListenableBuilder<bool>(
+                                                home: ValueListenableBuilder<
+                                                    bool>(
                                                   valueListenable:
                                                       AppState.preferencesReady,
                                                   builder: (context, ready, _) {
@@ -396,11 +389,11 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
                                                       return const JuicrBootSplash();
                                                     }
                                                     return ValueListenableBuilder<
-                                                      bool
-                                                    >(
+                                                        bool>(
                                                       valueListenable: AppState
                                                           .firstRunWelcomeSeen,
-                                                      builder: (context, seen, _) {
+                                                      builder:
+                                                          (context, seen, _) {
                                                         return seen
                                                             ? const AppShell()
                                                             : const FirstRunWelcomePage();
@@ -490,9 +483,8 @@ SystemUiOverlayStyle _systemOverlayStyle({
     systemNavigationBarColor: Colors.transparent,
     systemNavigationBarDividerColor: Colors.transparent,
     statusBarIconBrightness: icons,
-    statusBarBrightness: icons == Brightness.light
-        ? Brightness.dark
-        : Brightness.light,
+    statusBarBrightness:
+        icons == Brightness.light ? Brightness.dark : Brightness.light,
     systemNavigationBarIconBrightness: icons,
     systemNavigationBarContrastEnforced: false,
     systemStatusBarContrastEnforced: false,
@@ -553,8 +545,7 @@ ThemeData _darkTheme({
   final darkCardLow = pureBlack ? const Color(0xFF050505) : _juicrDarkCardLow;
   final darkCardHigh = pureBlack ? const Color(0xFF101010) : _juicrDarkCardHigh;
   final darkBorder = pureBlack ? const Color(0xFF272727) : _juicrDarkBorder;
-  final seededScheme =
-      dynamicScheme ??
+  final seededScheme = dynamicScheme ??
       ColorScheme.fromSeed(
         brightness: Brightness.dark,
         seedColor: accent,
@@ -710,8 +701,7 @@ ThemeData _lightTheme({
   final lightCard = _accentTintedLightSurface(accent, 0.1);
   final lightCardHigh = _accentTintedLightSurface(accent, 0.16);
   final lightBorder = _accentTintedLightBorder(accent);
-  final seededScheme =
-      dynamicScheme ??
+  final seededScheme = dynamicScheme ??
       ColorScheme.fromSeed(
         brightness: Brightness.light,
         seedColor: accent,

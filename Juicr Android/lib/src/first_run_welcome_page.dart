@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'app_manual_sheet.dart';
 import 'app_state.dart';
 import 'diagnostic_log.dart';
 import 'visual_style.dart';
@@ -121,6 +122,20 @@ class _FirstRunWelcomePageState extends State<FirstRunWelcomePage> {
                   ),
                 ),
                 const SizedBox(height: 14),
+                OutlinedButton.icon(
+                  onPressed: () => showAppManualSheet(context),
+                  icon: const Icon(Icons.menu_book_outlined),
+                  label: const Text('Read the guide'),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'You can always find this later in Settings using the book icon beside your account button.',
+                  style: textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurface.withValues(alpha: 0.58),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 14),
                 FilledButton.icon(
                   onPressed:
                       _allAccepted ? () => _enterApp(openAddOns: true) : null,
@@ -212,19 +227,21 @@ class _WelcomeAcknowledgementTile extends StatelessWidget {
                       children: [
                         Text(
                           acknowledgement.title,
-                          style: Theme.of(context).textTheme.labelLarge
+                          style: Theme.of(context)
+                              .textTheme
+                              .labelLarge
                               ?.copyWith(fontWeight: FontWeight.w900),
                         ),
                         const SizedBox(height: 3),
                         Text(
                           acknowledgement.text,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(
-                                color: colorScheme.onSurface.withValues(
-                                  alpha: 0.68,
-                                ),
-                                fontWeight: FontWeight.w600,
-                              ),
+                          style:
+                              Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: colorScheme.onSurface.withValues(
+                                      alpha: 0.68,
+                                    ),
+                                    fontWeight: FontWeight.w600,
+                                  ),
                         ),
                       ],
                     ),

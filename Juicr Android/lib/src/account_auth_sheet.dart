@@ -124,21 +124,13 @@ class _AccountAuthSheetState extends State<AccountAuthSheet> {
       );
       unawaited(
         AppState.syncSignedInLibrary(
-          fetch: _api.fetchAccountLibrarySnapshot,
-          push: (token, snapshot, baseRevision) =>
-              _api.pushAccountLibrarySnapshot(
-                token: token,
-                snapshot: snapshot,
-                baseRevision: baseRevision,
-              ),
+          replaceWithRemoteSnapshot: true,
         ),
       );
-      unawaited(
-        AppState.syncSignedInWatchMetrics(
-          (token, activeWatchSeconds) => _api.syncAccountWatchMetrics(
-            token: token,
-            activeWatchSeconds: activeWatchSeconds,
-          ),
+      await AppState.syncSignedInWatchMetrics(
+        (token, activeWatchSeconds) => _api.syncAccountWatchMetrics(
+          token: token,
+          activeWatchSeconds: activeWatchSeconds,
         ),
       );
       if (!mounted) return;
@@ -146,8 +138,8 @@ class _AccountAuthSheetState extends State<AccountAuthSheet> {
       final profile = result.profile;
       final signedInLabel =
           profile.username.isNotEmpty && profile.emoji.isNotEmpty
-          ? '${profile.emoji} ${profile.username}'
-          : profile.email;
+              ? '${profile.emoji} ${profile.username}'
+              : profile.email;
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
         ..showSnackBar(
@@ -307,8 +299,8 @@ class _AccountAuthSheetState extends State<AccountAuthSheet> {
                   onPressed: _busy
                       ? null
                       : _codeSent
-                      ? _verifyCode
-                      : _sendCode,
+                          ? _verifyCode
+                          : _sendCode,
                   icon: _busy
                       ? const SizedBox(
                           width: 18,

@@ -1,5 +1,3 @@
-import 'dart:ui';
-
 import 'package:flutter/services.dart';
 
 int _immersiveSessionDepth = 0;
@@ -32,6 +30,23 @@ Future<void> restoreJuicrSystemUi({bool force = false}) {
     ),
   );
   return SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+}
+
+Future<void> applyJuicrShellOrientation({required bool forcePortrait}) {
+  if (juicrImmersiveSessionActive) return Future<void>.value();
+  return SystemChrome.setPreferredOrientations(
+    forcePortrait
+        ? const <DeviceOrientation>[
+            DeviceOrientation.portraitUp,
+            DeviceOrientation.portraitDown,
+          ]
+        : const <DeviceOrientation>[
+            DeviceOrientation.portraitUp,
+            DeviceOrientation.portraitDown,
+            DeviceOrientation.landscapeLeft,
+            DeviceOrientation.landscapeRight,
+          ],
+  );
 }
 
 void scheduleJuicrSystemUiRestore() {
