@@ -75,6 +75,8 @@ class VlcPlayerController extends ValueNotifier<VlcPlayerValue> {
   bool _isDisposed = false;
 
   VlcAppLifeCycleObserver? _lifeCycleObserver;
+  StreamSubscription<VlcMediaEvent>? _mediaEventSubscription;
+  StreamSubscription<VlcRendererEvent>? _rendererEventSubscription;
 
   /// Describes the type of data source this [VlcPlayerController]
   /// is constructed with.
@@ -296,13 +298,16 @@ class VlcPlayerController extends ValueNotifier<VlcPlayerValue> {
     }
 
     void errorListener(Object obj) {
+      if (_isDisposed) {
+        return;
+      }
       value = VlcPlayerValue.erroneous(obj.toString());
       if (!initializingCompleter.isCompleted) {
         initializingCompleter.completeError(obj);
       }
     }
 
-    vlcPlayerPlatform
+    _mediaEventSubscription = vlcPlayerPlatform
         .mediaEventsFor(_viewId)
         .listen(mediaEventListener, onError: errorListener);
 
@@ -324,7 +329,9 @@ class VlcPlayerController extends ValueNotifier<VlcPlayerValue> {
       }
     }
 
-    vlcPlayerPlatform.rendererEventsFor(_viewId).listen(rendererEventListener);
+    _rendererEventSubscription = vlcPlayerPlatform
+        .rendererEventsFor(_viewId)
+        .listen(rendererEventListener);
 
     if (!initializingCompleter.isCompleted) {
       initializingCompleter.complete(null);
@@ -350,6 +357,10 @@ class VlcPlayerController extends ValueNotifier<VlcPlayerValue> {
     _onRendererEventListeners.clear();
     _lifeCycleObserver?.dispose();
     _isDisposed = true;
+    await _mediaEventSubscription?.cancel();
+    _mediaEventSubscription = null;
+    await _rendererEventSubscription?.cancel();
+    _rendererEventSubscription = null;
     //
     await vlcPlayerPlatform.dispose(_viewId);
     super.dispose();
