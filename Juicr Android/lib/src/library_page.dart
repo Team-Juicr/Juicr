@@ -1452,11 +1452,20 @@ class _LibraryLeaderboardSheet extends StatelessWidget {
           child: Stack(
             alignment: Alignment.center,
             children: [
-              Opacity(
-                opacity: 0.46,
-                child: ImageFiltered(
-                  imageFilter: ImageFilter.blur(sigmaX: 3, sigmaY: 3),
-                  child: content,
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ClipRect(
+                    child: Opacity(
+                      opacity: 0.46,
+                      child: ImageFiltered(
+                        imageFilter: ImageFilter.blur(sigmaX: 3, sigmaY: 3),
+                        child: SingleChildScrollView(
+                          physics: const NeverScrollableScrollPhysics(),
+                          child: content,
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
               ),
               Positioned.fill(
