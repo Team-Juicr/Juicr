@@ -8,6 +8,7 @@ import 'account_auth_sheet.dart';
 import 'app_state.dart';
 import 'diagnostic_log.dart';
 import 'juicr_bottom_sheet.dart';
+import 'local_notification_bridge.dart';
 import 'stream_api.dart';
 import 'visual_style.dart';
 
@@ -1057,6 +1058,36 @@ class _EmojiChoice extends StatelessWidget {
 class _AccountNotificationsSection extends StatelessWidget {
   const _AccountNotificationsSection();
 
+  Future<void> _setPushNotifications(
+    BuildContext context,
+    bool enabled,
+  ) async {
+    DiagnosticLog.add(
+      'account notifications ${enabled ? 'enabled' : 'disabled'}',
+    );
+    if (!enabled) {
+      AppState.setNotificationsEnabled(false);
+      return;
+    }
+    final granted = await LocalNotificationBridge.requestPermission();
+    if (!context.mounted) {
+      AppState.setNotificationsEnabled(granted);
+      return;
+    }
+    if (!granted) {
+      AppState.setNotificationsEnabled(false);
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Notification permission was not granted.'),
+          ),
+        );
+      return;
+    }
+    AppState.setNotificationsEnabled(true);
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -1078,10 +1109,7 @@ class _AccountNotificationsSection extends StatelessWidget {
                   'Occasional picks, episode reminders, and continue-watching prompts.',
               value: AppState.notificationsEnabled.value,
               onChanged: (enabled) {
-                DiagnosticLog.add(
-                  'account notifications ${enabled ? 'enabled' : 'disabled'}',
-                );
-                AppState.setNotificationsEnabled(enabled);
+                unawaited(_setPushNotifications(context, enabled));
               },
             ),
             _AccountSwitchItem(

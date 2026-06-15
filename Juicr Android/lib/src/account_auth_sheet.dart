@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'app_state.dart';
 import 'diagnostic_log.dart';
+import 'local_notification_bridge.dart';
 import 'stream_api.dart';
 import 'visual_style.dart';
 
@@ -145,11 +146,20 @@ class _AccountAuthSheetState extends State<AccountAuthSheet> {
         ..showSnackBar(
           SnackBar(content: Text('Signed in to Juicr as $signedInLabel.')),
         );
+      unawaited(_requestPushNotificationsAfterSignIn());
     } on StreamApiException catch (error) {
       if (mounted) setState(() => _error = _friendlyAuthError(error.message));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _requestPushNotificationsAfterSignIn() async {
+    final granted = await LocalNotificationBridge.requestPermission();
+    DiagnosticLog.add(
+      'account sign-in notification permission ${granted ? 'granted' : 'denied'}',
+    );
+    AppState.setNotificationsEnabled(granted);
   }
 
   String _friendlyAuthError(String message) {
