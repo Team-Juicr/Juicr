@@ -137,10 +137,20 @@ class _SettingsPageState extends State<SettingsPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (intent == 'addons') {
-        _openAddOnsSection();
+        unawaited(_openAddOnsSection());
+        _maybeShowFirstRunGuideForAddOns();
       } else if (intent == 'updates-changelog') {
         _openUpdatesSection(showChangelogWhenReady: true);
       }
+    });
+  }
+
+  void _maybeShowFirstRunGuideForAddOns() {
+    if (!AppState.consumeFirstRunGuideIntent('addons')) return;
+    Future<void>.delayed(const Duration(milliseconds: 420), () {
+      if (!mounted) return;
+      DiagnosticLog.add('first run guide shown target=addons');
+      unawaited(showAppManualSheet(context, dismissible: false));
     });
   }
 

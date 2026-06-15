@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'ad_policy.dart';
+import 'app_manual_sheet.dart';
 import 'app_state.dart';
 import 'catalog_page.dart';
 import 'diagnostic_log.dart';
@@ -72,6 +73,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _adSlotDelayTimer = Timer(const Duration(seconds: 10), () {
       if (mounted) setState(() => _showAdSlot = true);
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _maybeShowFirstRunGuide();
+    });
     DiagnosticLog.add('app shell init tab=${AppState.shellTab.value}');
   }
 
@@ -95,6 +99,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       _forcePageControllerBackToShellTab(reason: 'lifecycle_resumed');
     }
+  }
+
+  void _maybeShowFirstRunGuide() {
+    if (!mounted || !AppState.consumeFirstRunGuideIntent('home')) return;
+    DiagnosticLog.add('first run guide shown target=home');
+    unawaited(showAppManualSheet(context, dismissible: false));
   }
 
   void _forcePageControllerBackToShellTab({required String reason}) {

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'app_manual_sheet.dart';
 import 'app_state.dart';
 import 'diagnostic_log.dart';
 import 'visual_style.dart';
@@ -65,6 +64,7 @@ class _FirstRunWelcomePageState extends State<FirstRunWelcomePage> {
       'first run welcome accepted action=${openAddOns ? 'open_addons' : 'manual'}',
     );
     if (openAddOns) AppState.openAddOnsSettings();
+    AppState.requestFirstRunGuide(afterAddOns: openAddOns);
     AppState.markFirstRunWelcomeSeen();
   }
 
@@ -119,20 +119,6 @@ class _FirstRunWelcomePageState extends State<FirstRunWelcomePage> {
                         ? colorScheme.primary
                         : colorScheme.onSurface.withValues(alpha: 0.56),
                     fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 14),
-                OutlinedButton.icon(
-                  onPressed: () => showAppManualSheet(context),
-                  icon: const Icon(Icons.menu_book_outlined),
-                  label: const Text('Read the guide'),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'You can always find this later in Settings using the book icon beside your account button.',
-                  style: textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.58),
-                    fontWeight: FontWeight.w700,
                   ),
                 ),
                 const SizedBox(height: 14),

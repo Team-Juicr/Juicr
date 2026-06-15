@@ -1,20 +1,30 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
-import 'juicr_bottom_sheet.dart';
 import 'visual_style.dart';
 
-Future<void> showAppManualSheet(BuildContext context) {
-  return showJuicrBottomSheet<void>(
+Future<void> showAppManualSheet(
+  BuildContext context, {
+  bool dismissible = true,
+}) {
+  return showDialog<void>(
     context: context,
-    backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-    shape: JuicrVisual.bottomSheetShape,
-    builder: (context) => const AppManualSheet(),
+    barrierDismissible: dismissible,
+    builder: (context) => AppManualDialog(dismissible: dismissible),
   );
 }
 
-class AppManualSheet extends StatelessWidget {
-  const AppManualSheet({super.key});
+class AppManualDialog extends StatefulWidget {
+  const AppManualDialog({super.key, required this.dismissible});
 
+  final bool dismissible;
+
+  @override
+  State<AppManualDialog> createState() => _AppManualDialogState();
+}
+
+class _AppManualDialogState extends State<AppManualDialog> {
   static const _sections = <_ManualSection>[
     _ManualSection(
       icon: Icons.flag_rounded,
@@ -108,95 +118,182 @@ class AppManualSheet extends StatelessWidget {
     ),
   ];
 
+  final PageController _pageController = PageController();
+  int _index = 0;
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  void _close() {
+    Navigator.of(context, rootNavigator: true).pop();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          18,
-          10,
-          18,
-          JuicrVisual.bottomSheetBottomBreathingRoom,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Juicr guide',
-              style: Theme.of(
-                context,
-              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'A simple manual for the main things Juicr can do.',
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final size = MediaQuery.sizeOf(context);
+    final width = math.min(440.0, size.width - 40);
+    final height = math.min(560.0, size.height - 72);
+    final isLast = _index >= _sections.length - 1;
+    return PopScope(
+      canPop: widget.dismissible,
+      child: Dialog(
+        insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 36),
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: width, maxHeight: height),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Juicr guide',
+                        style: theme.textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '${_index + 1}/${_sections.length}',
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: colorScheme.onSurface.withValues(alpha: 0.58),
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Swipe through the basics. You can skip now and return from Settings later.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
                     color: colorScheme.onSurface.withValues(alpha: 0.66),
                     fontWeight: FontWeight.w700,
                   ),
+                ),
+                const SizedBox(height: 14),
+                Flexible(
+                  child: PageView.builder(
+                    controller: _pageController,
+                    itemCount: _sections.length,
+                    onPageChanged: (index) => setState(() => _index = index),
+                    itemBuilder: (context, index) {
+                      return _ManualPage(section: _sections[index]);
+                    },
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    for (var i = 0; i < _sections.length; i++)
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        margin: const EdgeInsets.symmetric(horizontal: 3),
+                        width: i == _index ? 18 : 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(999),
+                          color: i == _index
+                              ? colorScheme.primary
+                              : colorScheme.outlineVariant,
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: _close,
+                      child: const Text('Skip'),
+                    ),
+                    const Spacer(),
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 180),
+                      child: isLast
+                          ? FilledButton(
+                              key: const ValueKey('continue'),
+                              onPressed: _close,
+                              child: const Text('Continue'),
+                            )
+                          : const SizedBox(
+                              key: ValueKey('continue-placeholder'),
+                              height: 40,
+                            ),
+                    ),
+                  ],
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            Flexible(
-              child: ListView.separated(
-                shrinkWrap: true,
-                itemCount: _sections.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 8),
-                itemBuilder: (context, index) {
-                  return _ManualExpansionTile(section: _sections[index]);
-                },
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
   }
 }
 
-class _ManualExpansionTile extends StatelessWidget {
-  const _ManualExpansionTile({required this.section});
+class _ManualPage extends StatelessWidget {
+  const _ManualPage({required this.section});
 
   final _ManualSection section;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    return Material(
-      color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.46),
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: ExpansionTile(
-        tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        childrenPadding: const EdgeInsets.fromLTRB(60, 0, 14, 14),
-        leading: JuicrVisual.iconBadge(
-          context,
-          icon: section.icon,
-          boxSize: 38,
-          iconSize: 18,
-          radius: 14,
-          shadowAlpha: 0.1,
-        ),
-        title: Text(
-          section.title,
-          style: const TextStyle(fontWeight: FontWeight.w900),
-        ),
-        iconColor: colorScheme.primary,
-        collapsedIconColor: colorScheme.onSurface.withValues(alpha: 0.7),
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              section.body,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.72),
-                    fontWeight: FontWeight.w600,
-                    height: 1.35,
-                  ),
+    final textTheme = Theme.of(context).textTheme;
+    return DecoratedBox(
+      decoration: JuicrVisual.elevatedCardDecoration(
+        colorScheme,
+        radius: 24,
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.52),
+        borderAlpha: 0.2,
+        shadowAlpha: 0.06,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            JuicrVisual.iconBadge(
+              context,
+              icon: section.icon,
+              boxSize: 48,
+              iconSize: 24,
+              radius: 18,
+              shadowAlpha: 0.1,
             ),
-          ),
-        ],
+            const SizedBox(height: 18),
+            Text(
+              section.title,
+              style: textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.w900,
+                height: 1.08,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: SingleChildScrollView(
+                child: Text(
+                  section.body,
+                  style: textTheme.bodyLarge?.copyWith(
+                    color: colorScheme.onSurface.withValues(alpha: 0.74),
+                    fontWeight: FontWeight.w700,
+                    height: 1.38,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

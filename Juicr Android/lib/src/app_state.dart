@@ -1039,6 +1039,8 @@ class AppState {
   static final ValueNotifier<bool> firstRunWelcomeSeen = ValueNotifier<bool>(
     false,
   );
+  static final ValueNotifier<String?> firstRunGuideIntent =
+      ValueNotifier<String?>(null);
   static final ValueNotifier<bool> notificationsEnabled = ValueNotifier<bool>(
     true,
   );
@@ -3935,6 +3937,16 @@ class AppState {
   static void markFirstRunWelcomeSeen() {
     if (firstRunWelcomeSeen.value) return;
     firstRunWelcomeSeen.value = true;
+  }
+
+  static void requestFirstRunGuide({required bool afterAddOns}) {
+    firstRunGuideIntent.value = afterAddOns ? 'addons' : 'home';
+  }
+
+  static bool consumeFirstRunGuideIntent(String target) {
+    if (firstRunGuideIntent.value != target) return false;
+    firstRunGuideIntent.value = null;
+    return true;
   }
 
   static void acceptExperimentalDisclaimer() {
