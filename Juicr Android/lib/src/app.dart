@@ -50,6 +50,7 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
     AppState.notificationSettingsRevision.addListener(
       _handleNotificationSettingsChanged,
     );
+    AppState.shellTab.addListener(_handleShellTabChanged);
     AppState.forcePortraitShell.addListener(_handleForcePortraitShellChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _handleForcePortraitShellChanged();
@@ -72,6 +73,7 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
     AppState.notificationSettingsRevision.removeListener(
       _handleNotificationSettingsChanged,
     );
+    AppState.shellTab.removeListener(_handleShellTabChanged);
     _api.close();
     super.dispose();
   }
@@ -82,6 +84,11 @@ class _StreamCatalogAppState extends State<StreamCatalogApp>
 
   void _handleNotificationSettingsChanged() {
     unawaited(_notificationOrchestrator.check(reason: 'settings_changed'));
+  }
+
+  void _handleShellTabChanged() {
+    if (AppState.shellTab.value != 0) return;
+    unawaited(_notificationOrchestrator.check(reason: 'home_tab'));
   }
 
   void _handleForcePortraitShellChanged() {

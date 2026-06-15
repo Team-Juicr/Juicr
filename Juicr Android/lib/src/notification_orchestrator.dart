@@ -153,6 +153,10 @@ class NotificationOrchestrator {
       DiagnosticLog.add('daily curation skipped reason=preview_empty');
       return false;
     }
+    if (AppState.shellTab.value != 0) {
+      DiagnosticLog.add('daily curation dialog skipped reason=not_home');
+      return false;
+    }
     var shown = false;
     if (!dialogAlreadyShown &&
         AppState.notificationDialogsEnabled.value &&
