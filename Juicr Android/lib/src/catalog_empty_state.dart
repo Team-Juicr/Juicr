@@ -30,7 +30,7 @@ class CatalogEmptyState extends StatelessWidget {
         ? 'No titles matched that search.'
         : filtered
         ? 'No titles matched those filters.'
-        : 'Juicr opened successfully.';
+        : 'Juicr is ready.';
     final emptySubtitle = message?.trim().isNotEmpty == true
         ? message!.trim()
         : searching
