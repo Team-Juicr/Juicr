@@ -248,16 +248,22 @@ class _LibraryPageState extends State<LibraryPage>
       context: context,
       isScrollControlled: true,
       builder: (sheetContext) {
+        final padding = juicrBottomSheetPadding(sheetContext, top: 4);
+        final viewportHeight = math.max(
+          0.0,
+          JuicrVisual.bottomSheetMaxHeight(sheetContext) - padding.vertical,
+        );
         var selectedScope = _LeaderboardScope.fromId(
           AppState.leaderboardScope.value,
         );
         return StatefulBuilder(
           builder: (context, setSheetState) {
             return SingleChildScrollView(
-              padding: juicrBottomSheetPadding(sheetContext, top: 4),
+              padding: padding,
               child: _LibraryLeaderboardSheet(
                 metrics: metrics,
                 selectedScope: selectedScope,
+                viewportHeight: viewportHeight,
                 onScopeChanged: (scope) {
                   AppState.setLeaderboardScope(scope.apiId);
                   setSheetState(() => selectedScope = scope);
@@ -1373,12 +1379,14 @@ class _LibraryLeaderboardSheet extends StatelessWidget {
   const _LibraryLeaderboardSheet({
     required this.metrics,
     required this.selectedScope,
+    required this.viewportHeight,
     required this.onScopeChanged,
     required this.onSignInRequested,
   });
 
   final _LibraryMetrics metrics;
   final _LeaderboardScope selectedScope;
+  final double viewportHeight;
   final ValueChanged<_LeaderboardScope> onScopeChanged;
   final VoidCallback onSignInRequested;
 
@@ -1433,38 +1441,46 @@ class _LibraryLeaderboardSheet extends StatelessWidget {
             ),
           ],
         );
-        if (signedIn) return content;
-        return Stack(
-          alignment: Alignment.center,
-          children: [
-            Opacity(
-              opacity: 0.46,
-              child: ImageFiltered(
-                imageFilter: ImageFilter.blur(sigmaX: 3, sigmaY: 3),
-                child: content,
+        if (signedIn) {
+          return ConstrainedBox(
+            constraints: BoxConstraints(minHeight: viewportHeight),
+            child: content,
+          );
+        }
+        return SizedBox(
+          height: viewportHeight,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Opacity(
+                opacity: 0.46,
+                child: ImageFiltered(
+                  imageFilter: ImageFilter.blur(sigmaX: 3, sigmaY: 3),
+                  child: content,
+                ),
               ),
-            ),
-            Positioned.fill(
-              child: IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: colorScheme.surface.withValues(alpha: 0.28),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: colorScheme.surface.withValues(alpha: 0.28),
+                    ),
                   ),
                 ),
               ),
-            ),
-            Positioned.fill(
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 320),
-                  child: _LeaderboardSignInGate(
-                    colorScheme: colorScheme,
-                    onSignIn: onSignInRequested,
+              Positioned.fill(
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 320),
+                    child: _LeaderboardSignInGate(
+                      colorScheme: colorScheme,
+                      onSignIn: onSignInRequested,
+                    ),
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         );
       },
     );
