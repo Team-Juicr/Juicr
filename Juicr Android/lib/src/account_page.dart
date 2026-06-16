@@ -1106,7 +1106,7 @@ class _AccountNotificationsSection extends StatelessWidget {
               icon: Icons.notifications_active_outlined,
               title: 'Push notifications',
               subtitle:
-                  'Occasional picks, episode reminders, and continue-watching prompts.',
+                  'Daily curation and saved-title alerts when permission is allowed.',
               value: AppState.notificationsEnabled.value,
               onChanged: (enabled) {
                 unawaited(_setPushNotifications(context, enabled));

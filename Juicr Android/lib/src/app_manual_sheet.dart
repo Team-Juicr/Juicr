@@ -6,7 +6,7 @@ import 'visual_style.dart';
 
 Future<void> showAppManualSheet(
   BuildContext context, {
-  bool dismissible = true,
+  bool dismissible = false,
 }) {
   return showDialog<void>(
     context: context,
@@ -136,18 +136,19 @@ class _AppManualDialogState extends State<AppManualDialog> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final size = MediaQuery.sizeOf(context);
-    final width = math.min(440.0, size.width - 40);
-    final height = math.min(560.0, size.height - 72);
+    final width = math.min(420.0, size.width - 32);
+    final height = math.min(500.0, size.height - 56);
+    final pageHeight = math.min(286.0, math.max(236.0, height - 184.0));
     final isLast = _index >= _sections.length - 1;
     return PopScope(
       canPop: widget.dismissible,
       child: Dialog(
-        insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 36),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 28),
         clipBehavior: Clip.antiAlias,
         child: ConstrainedBox(
           constraints: BoxConstraints(maxWidth: width, maxHeight: height),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -179,8 +180,9 @@ class _AppManualDialogState extends State<AppManualDialog> {
                     fontWeight: FontWeight.w700,
                   ),
                 ),
-                const SizedBox(height: 14),
-                Flexible(
+                const SizedBox(height: 12),
+                SizedBox(
+                  height: pageHeight,
                   child: PageView.builder(
                     controller: _pageController,
                     itemCount: _sections.length,
@@ -190,7 +192,7 @@ class _AppManualDialogState extends State<AppManualDialog> {
                     },
                   ),
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: 12),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -209,7 +211,7 @@ class _AppManualDialogState extends State<AppManualDialog> {
                       ),
                   ],
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 12),
                 Row(
                   children: [
                     TextButton(
@@ -253,31 +255,38 @@ class _ManualPage extends StatelessWidget {
     return DecoratedBox(
       decoration: JuicrVisual.elevatedCardDecoration(
         colorScheme,
-        radius: 24,
+        radius: 22,
         color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.52),
         borderAlpha: 0.2,
         shadowAlpha: 0.06,
       ),
       child: Padding(
-        padding: const EdgeInsets.all(18),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            JuicrVisual.iconBadge(
-              context,
-              icon: section.icon,
-              boxSize: 48,
-              iconSize: 24,
-              radius: 18,
-              shadowAlpha: 0.1,
-            ),
-            const SizedBox(height: 18),
-            Text(
-              section.title,
-              style: textTheme.headlineSmall?.copyWith(
-                fontWeight: FontWeight.w900,
-                height: 1.08,
-              ),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                JuicrVisual.iconBadge(
+                  context,
+                  icon: section.icon,
+                  boxSize: 42,
+                  iconSize: 22,
+                  radius: 16,
+                  shadowAlpha: 0.1,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    section.title,
+                    style: textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w900,
+                      height: 1.1,
+                    ),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             Expanded(

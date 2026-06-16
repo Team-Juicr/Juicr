@@ -44,7 +44,10 @@ class NotificationOrchestrator {
         return;
       }
       final dailyDelivered = await _handleDailyCuration(policy, editorial);
-      if (!dailyDelivered) {
+      final savedDelivered = dailyDelivered
+          ? false
+          : await _handleSavedAvailability(policy);
+      if (!dailyDelivered && !savedDelivered) {
         DiagnosticLog.add(
           'notification synced surface skipped reason=not_ready',
         );
@@ -57,8 +60,11 @@ class NotificationOrchestrator {
 
   Future<bool> _handleSavedAvailability(NotificationPolicy policy) async {
     if (!policy.automatic.enabled ||
+        !policy.automatic.smartSuggestionsEnabled ||
         !AppState.notificationsEnabled.value ||
-        _insideQuietHours(policy.automatic.quietHours)) {
+        _insideQuietHours(policy.automatic.quietHours) ||
+        (!policy.controls.allows('dialog') &&
+            !policy.controls.allows('notification'))) {
       return false;
     }
     final savedUpcoming = AppState.library.value.values

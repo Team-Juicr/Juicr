@@ -661,6 +661,7 @@ class _NativePlaybackController {
     if (media3Controller != null) return media3Controller.dispose();
     final vlcController = vlc!;
     try {
+      // ignore: invalid_use_of_visible_for_testing_member
       if (vlcController.viewId == null) return Future<void>.value();
     } catch (_) {
       return Future<void>.value();
@@ -1062,7 +1063,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
     final cachedSources = AppState.verifiedPlaybackSourcesFor(key);
     if (cachedSources.isEmpty) return requests;
-    final strictLibVlc = _effectivePlaybackEngine == 'libvlc';
+    final strictLibVlc =
+        _effectivePlaybackEngineForRequests(requests) == 'libvlc';
     final requestProviderIds = requests
         .map((request) => request.providerId)
         .where((providerId) => providerId.isNotEmpty)
@@ -1334,7 +1336,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   bool _hasLibVlcVisualPlaybackProof(_NativePlaybackController controller) {
     if (controller.engine != _NativePlaybackEngine.libvlc) return false;
     if (!controller.isInitialized || controller.hasError) return false;
-    if (_hasLibVlcContinuousTsPlaybackProof(controller)) return true;
+    if (_hasLibVlcContinuousTsPlaybackProof(
+      controller,
+      allowZeroVisualMetadataProof: true,
+    )) {
+      return true;
+    }
     if (controller.size == Size.zero) return false;
     if (_activeSourceHasZeroClockMetadata) return false;
     return controller.position >= const Duration(seconds: 1);
@@ -1351,19 +1358,34 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final relayPlaybackProofReady = _libVlcContinuousTsRelayProofReady ||
         controller.duration > Duration.zero;
     if (_activeSourceHasZeroClockMetadata && controller.size == Size.zero) {
+      final proofSeconds = _libVlcContinuousTsPlaybackProofSeconds(controller);
       if (allowZeroVisualMetadataProof &&
           relayPlaybackProofReady &&
-          _lastSavedSecond >= 8) {
+          proofSeconds >= 2) {
         return true;
       }
-      if (_lastSavedSecond >= 8 && _lastSavedSecond % 15 == 0) {
+      if (proofSeconds >= 8 && proofSeconds % 15 == 0) {
         DiagnosticLog.add(
-          'native libvlc continuous-ts proof waiting reason=zero_visual_metadata watched=${_lastSavedSecond}s streamed=${_countDiagnosticBucket(_libVlcContinuousTsStreamedSegments)}',
+          'native libvlc continuous-ts proof waiting reason=zero_visual_metadata watched=${proofSeconds}s streamed=${_countDiagnosticBucket(_libVlcContinuousTsStreamedSegments)}',
         );
       }
       return false;
     }
-    return _lastSavedSecond >= 8;
+    return _libVlcContinuousTsPlaybackProofSeconds(controller) >= 8;
+  }
+
+  int _libVlcContinuousTsPlaybackProofSeconds(
+    _NativePlaybackController controller,
+  ) {
+    var seconds = math.max(_lastSavedSecond, controller.position.inSeconds);
+    final startedAt = _nativeWallClockStartedAt;
+    if (controller.isPlaying && startedAt != null) {
+      seconds = math.max(
+        seconds,
+        DateTime.now().difference(startedAt).inSeconds,
+      );
+    }
+    return seconds;
   }
 
   bool _libVlcContinuousTsPlaybackActive(
@@ -2376,10 +2398,28 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return _libVlcCrashGuardActive && !_isP2pOnlySourceRoute;
   }
 
+  bool _libVlcCrashGuardActiveForManualRequests(
+    List<NativePlaybackRequest> requests,
+  ) {
+    return _libVlcCrashGuardActive && !_requestsAreP2pOnly(requests);
+  }
+
   String get _effectivePlaybackEngine {
     final configured = AppState.playerBehaviorSettings.value.playbackEngine;
     if (_temporaryAutoEngineRecovery) return 'auto';
     if (_libVlcCrashGuardActiveForManualRoute && configured == 'libvlc') {
+      return 'exoplayer';
+    }
+    return configured;
+  }
+
+  String _effectivePlaybackEngineForRequests(
+    List<NativePlaybackRequest> requests,
+  ) {
+    final configured = AppState.playerBehaviorSettings.value.playbackEngine;
+    if (_temporaryAutoEngineRecovery) return 'auto';
+    if (_libVlcCrashGuardActiveForManualRequests(requests) &&
+        configured == 'libvlc') {
       return 'exoplayer';
     }
     return configured;
@@ -2404,8 +2444,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }
 
   bool get _isP2pOnlySourceRoute {
+    return _requestsAreP2pOnly(_requests);
+  }
+
+  bool _requestsAreP2pOnly(List<NativePlaybackRequest> requests) {
     var hasSource = false;
-    for (final request in _requests) {
+    for (final request in requests) {
       for (final source in request.sources) {
         hasSource = true;
         if (source.sourceClass != PlaybackSourceClass.p2p) return false;
@@ -3534,7 +3578,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       startPosition ??= resumePromptCanOpen
           ? await _resumePositionFor(controller.duration)
           : _automaticResumePositionFor(controller.duration);
-      final resolvedStartPosition = startPosition ?? Duration.zero;
+      final resolvedStartPosition = startPosition;
       final resumePromptWasDeclined =
           _resumePromptHandled && !_resumePromptAccepted;
       final shouldReopenLibVlcRelayForStartOver = attemptedEngine ==
@@ -5033,8 +5077,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }) {
     if (controller.engine != _NativePlaybackEngine.exoplayer) return;
     final source = _activeSource;
+    if (source == null) return;
     final error = controller.errorDescription;
-    if (source == null || error == null || error.trim().isEmpty) return;
+    if (error.trim().isEmpty) return;
     DiagnosticLog.add(
       'native runtime failure hint provider=${source.providerId} engine=${controller.engine.id} reason=$reason',
     );
@@ -5587,7 +5632,58 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _nativeWallClockStartedAt = null;
     _lastSavedSecond = -1;
     _resetPlaybackIntegritySample();
-    await _stopLibVlcHlsRelay('controller_disposed');
+    final stopRelay = _stopLibVlcHlsRelay('controller_disposed');
+    if (isLibVlc && !awaitLibVlcRelease) {
+      unawaited(stopRelay);
+    } else {
+      await stopRelay;
+    }
+  }
+
+  bool _detachLibVlcControllerForAsyncRelease(String reason) {
+    final controller = _controller;
+    if (controller == null ||
+        controller.engine != _NativePlaybackEngine.libvlc) {
+      return false;
+    }
+    _stopStallWatchdog();
+    _cancelDeferredResumeSeek();
+    _controller = null;
+    controller.removeListener(_handleControllerUpdate);
+    _activeSourceHasZeroClockMetadata = false;
+    _nativeWallClockStartedAt = null;
+    _lastSavedSecond = -1;
+    _resetPlaybackIntegritySample();
+    DiagnosticLog.add(
+      'native libvlc controller detached before native release reason=$reason',
+    );
+    unawaited(
+      _stopLibVlcHlsRelay('${reason}_detached').then((_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+        final releaseStopwatch = Stopwatch()..start();
+        try {
+          await controller.dispose().timeout(const Duration(seconds: 2));
+          unawaited(
+            DiagnosticLog.clearNativeEngineActive(
+              engineId: controller.engine.id,
+              reason: 'controller_disposed_detached_$reason',
+            ),
+          );
+          DiagnosticLog.add(
+            'native controller disposed engine=${controller.engine.id} elapsed=${releaseStopwatch.elapsedMilliseconds}ms detached=true reason=$reason',
+          );
+        } catch (error) {
+          DiagnosticLog.add(
+            'native controller dispose timed out/failed engine=${controller.engine.id} elapsed=${releaseStopwatch.elapsedMilliseconds}ms detached=true reason=$reason error=${_safeDiagnosticError(error)}',
+          );
+        }
+      }).catchError((error) {
+        DiagnosticLog.add(
+          'native libvlc detached cleanup failed reason=$reason error=${_safeDiagnosticError(error)}',
+        );
+      }),
+    );
+    return true;
   }
 
   Future<void> _stopLibVlcHlsRelay(String reason) async {
@@ -5615,7 +5711,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
   void _maybeClearLibVlcContinuousTsWaitMessage({required String reason}) {
     if (!_libVlcContinuousTsRelayProofReady) return;
-    if (_playbackWaitMessage != 'Getting stream details...') return;
+    final message = _playbackWaitMessage;
+    if (message != 'Getting stream details...' &&
+        message != 'Resuming playback...' &&
+        message != 'Buffering stream...') {
+      return;
+    }
     DiagnosticLog.add(
       'native libvlc continuous-ts relay proof accepted reason=$reason streamed=${_countDiagnosticBucket(_libVlcContinuousTsStreamedSegments)} durationKnown=$_libVlcContinuousTsDurationAccepted',
     );
@@ -6451,7 +6552,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _showPlaybackWaitMessage(
         'Buffering stream...',
         reason: 'controller_buffering',
-        pausePlayback: _activeSource?.sourceClass != PlaybackSourceClass.p2p,
+        pausePlayback: false,
       );
       return;
     }
@@ -8788,7 +8889,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
 
     final resolvedNext = next;
-    await _disposeCurrentController(awaitLibVlcRelease: true);
+    final detachLibVlcRelease =
+        _detachLibVlcControllerForAsyncRelease('next_episode');
+    if (!detachLibVlcRelease) {
+      await _disposeCurrentController(awaitLibVlcRelease: true);
+    } else if (mounted) {
+      setState(() {});
+    }
     if (!mounted) return;
     setState(() {
       _title = resolvedNext.title;
@@ -9703,11 +9810,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                 _lastKnownPlaybackPosition.inSeconds >= 3))) {
       _saveNativeProgress(force: true);
     }
-    await _disposeCurrentController(
-      awaitLibVlcRelease: true,
-      saveProgress: false,
-    );
-    await _stopP2pBridgeForPolicy('route_close');
+    final detachLibVlcRelease =
+        _detachLibVlcControllerForAsyncRelease('route_close');
+    if (!detachLibVlcRelease) {
+      await _disposeCurrentController(
+        awaitLibVlcRelease: true,
+        saveProgress: false,
+      );
+    } else if (mounted) {
+      setState(() {});
+    }
+    final stopBridge = _stopP2pBridgeForPolicy('route_close');
+    if (detachLibVlcRelease) {
+      unawaited(stopBridge);
+    } else {
+      await stopBridge;
+    }
     await _forcePopPlayerRoute(result ?? 'closed');
   }
 
@@ -11602,6 +11720,39 @@ class _NativePlayerControls extends StatelessWidget {
       children: [
         const _ControlGradient(alignment: Alignment.topCenter),
         const _ControlGradient(alignment: Alignment.bottomCenter),
+        if (!locked)
+          Positioned.fill(
+            child: Stack(
+              children: [
+                if (!liveMode)
+                  Align(
+                    alignment: const Alignment(-0.50, 0),
+                    child: _SeekButton(
+                      forward: false,
+                      seconds: seekStepSeconds,
+                      onPressed: onSeekBackward,
+                    ),
+                  ),
+                Align(
+                  alignment: Alignment.center,
+                  child: _MainPlayButton(
+                    playing: playing,
+                    enabled: initialized,
+                    onPressed: onPlayPause,
+                  ),
+                ),
+                if (!liveMode)
+                  Align(
+                    alignment: const Alignment(0.50, 0),
+                    child: _SeekButton(
+                      forward: true,
+                      seconds: seekStepSeconds,
+                      onPressed: onSeekForward,
+                    ),
+                  ),
+              ],
+            ),
+          ),
         Positioned(
           top: padding.top + 8,
           left: 0,
@@ -11697,39 +11848,6 @@ class _NativePlayerControls extends StatelessWidget {
             ),
           ),
         ),
-        if (!locked)
-          Positioned.fill(
-            child: Stack(
-              children: [
-                if (!liveMode)
-                  Align(
-                    alignment: const Alignment(-0.50, 0),
-                    child: _SeekButton(
-                      forward: false,
-                      seconds: seekStepSeconds,
-                      onPressed: onSeekBackward,
-                    ),
-                  ),
-                Align(
-                  alignment: Alignment.center,
-                  child: _MainPlayButton(
-                    playing: playing,
-                    enabled: initialized,
-                    onPressed: onPlayPause,
-                  ),
-                ),
-                if (!liveMode)
-                  Align(
-                    alignment: const Alignment(0.50, 0),
-                    child: _SeekButton(
-                      forward: true,
-                      seconds: seekStepSeconds,
-                      onPressed: onSeekForward,
-                    ),
-                  ),
-              ],
-            ),
-          ),
         if (initialized && !locked)
           Positioned(
             right: padding.right + 150,
@@ -12043,7 +12161,6 @@ class _NextEpisodeButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
     return TextButton.icon(
       onPressed: onPressed,
       icon: const Icon(Icons.skip_next_rounded, size: 18),
@@ -12232,8 +12349,6 @@ class _SettingsActionButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final foreground = enabled ? Colors.white : Colors.white38;
-    final accent =
-        active ? _playerAccent(context) : Colors.white.withValues(alpha: 0.08);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: TextButton.icon(
@@ -13626,7 +13741,6 @@ class _SubtitleColorDialog extends StatefulWidget {
 
 class _SubtitleColorDialogState extends State<_SubtitleColorDialog> {
   late HSVColor _hsv;
-  late double _opacity;
   late final TextEditingController _hexController;
 
   static const List<double> _saturationStops = [1, 0.82, 0.64, 0.46, 0.28, 0.1];
@@ -13639,7 +13753,6 @@ class _SubtitleColorDialogState extends State<_SubtitleColorDialog> {
         ? Colors.white
         : widget.initialColor;
     _hsv = HSVColor.fromColor(initial.withAlpha(255));
-    _opacity = 1.0;
     _hexController = TextEditingController(text: _hexFor(_color));
   }
 
@@ -13651,10 +13764,9 @@ class _SubtitleColorDialogState extends State<_SubtitleColorDialog> {
     super.dispose();
   }
 
-  void _setHsv(HSVColor value, {double? opacity}) {
+  void _setHsv(HSVColor value) {
     setState(() {
       _hsv = value;
-      if (opacity != null) _opacity = 1.0;
       _hexController.text = _hexFor(_color);
     });
   }
@@ -13664,7 +13776,6 @@ class _SubtitleColorDialogState extends State<_SubtitleColorDialog> {
     if (parsed == null) return;
     setState(() {
       _hsv = HSVColor.fromColor(parsed.withAlpha(255));
-      _opacity = 1.0;
       _hexController.text = _hexFor(_color);
     });
   }
@@ -13954,7 +14065,6 @@ class _NativePlayerLoading extends StatefulWidget {
     this.backgroundUrl,
     this.backdropStyle = 'scan',
     this.message,
-    this.onUseWebPlayer,
     this.onRetry,
     this.onChooseSource,
   });
@@ -13965,7 +14075,6 @@ class _NativePlayerLoading extends StatefulWidget {
   final String? backgroundUrl;
   final String backdropStyle;
   final String? message;
-  final VoidCallback? onUseWebPlayer;
   final VoidCallback? onRetry;
   final VoidCallback? onChooseSource;
 
@@ -14080,7 +14189,7 @@ class _NativePlayerLoadingState extends State<_NativePlayerLoading>
                               children: [
                                 if (hasMessage)
                                   _AnimatedLoadingText(
-                                    label: message!,
+                                    label: message,
                                     textAlign: TextAlign.center,
                                     maxLines: 3,
                                     overflow: TextOverflow.ellipsis,
@@ -14520,12 +14629,10 @@ class _NativeRefreshOverlay extends StatelessWidget {
   const _NativeRefreshOverlay({
     required this.message,
     required this.onBack,
-    this.onUseWebPlayer,
   });
 
   final String message;
   final VoidCallback onBack;
-  final VoidCallback? onUseWebPlayer;
 
   @override
   Widget build(BuildContext context) {

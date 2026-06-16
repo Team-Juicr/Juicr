@@ -540,6 +540,7 @@ class _CatalogPageState extends State<CatalogPage>
       <String, List<_CatalogOriginOption>>{};
   final Map<String, Future<List<_CatalogOriginOption>>>
   _scopedOriginOptionsInFlight = <String, Future<List<_CatalogOriginOption>>>{};
+  final Set<String> _warmSnapshotRestoreAttempts = <String>{};
 
   List<CatalogItem> _items = [];
   List<CatalogItem> _visibleItems = [];
@@ -1346,6 +1347,8 @@ class _CatalogPageState extends State<CatalogPage>
 
   bool _restoreDiscoveryWarmSnapshot() {
     if (!mounted || !_hasDiscoverableContent || _searchActive) return false;
+    final signature = _discoveryWarmSnapshotSignature();
+    if (!_warmSnapshotRestoreAttempts.add(signature)) return false;
     final prefs = AppState.prefs;
     if (prefs == null) return false;
     final raw = prefs.getString(_discoveryWarmSnapshotKey);
@@ -1409,6 +1412,18 @@ class _CatalogPageState extends State<CatalogPage>
       );
       return false;
     }
+  }
+
+  String _discoveryWarmSnapshotSignature() {
+    return [
+      _type.compatTypeValue,
+      _sort.id,
+      _year,
+      _effectiveGenre(_latestConfig),
+      _effectiveOriginFor(_type).code,
+      _supportsLanguageFilter(_type) ? _language.code : '',
+      _effectiveScopeFor(_type).displayLabel,
+    ].join('|');
   }
 
   void _saveDiscoveryWarmSnapshot() {
@@ -2328,9 +2343,12 @@ class _CatalogPageState extends State<CatalogPage>
     } catch (error) {
       if (!mounted || requestToken != _requestToken) return;
       DiagnosticLog.end(timerKey, 'catalog loadMore failed error=$error');
+      final keptWarmItems = currentSkip == 0 && _visibleItems.isNotEmpty;
       setState(() {
         _error = error.toString();
-        if (currentSkip == 0) {
+        if (currentSkip == 0 && _visibleItems.isNotEmpty) {
+          _hasMore = false;
+        } else if (currentSkip == 0) {
           _items = const <CatalogItem>[];
           _visibleItems = const <CatalogItem>[];
           _skip = 0;
@@ -2339,6 +2357,11 @@ class _CatalogPageState extends State<CatalogPage>
         _reloadPriming = false;
         _pendingEndLoadLog = false;
       });
+      if (keptWarmItems) {
+        DiagnosticLog.add(
+          'catalog first page failure kept warm items count=${_visibleItems.length}',
+        );
+      }
     } finally {
       if (mounted && requestToken == _requestToken) {
         setState(() {

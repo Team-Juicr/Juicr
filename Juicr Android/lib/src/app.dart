@@ -14,8 +14,6 @@ import 'stream_api.dart';
 import 'system_ui.dart';
 import 'visual_style.dart';
 
-const _juicrGreen = Color(0xFF1DB954);
-const _juicrBrightGreen = Color(0xFF1ED760);
 const _juicrDarkBase = Color(0xFF131218);
 const _juicrDarkSurface = Color(0xFF17161C);
 const _juicrDarkCard = Color(0xFF1C1D20);

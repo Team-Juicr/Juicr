@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'ad_policy.dart';
 import 'app_state.dart';
@@ -775,12 +776,10 @@ class _HomePageState extends State<HomePage>
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map<String, dynamic>) return false;
-      final editorialRaw =
-          decoded['editorial'] ??
-          _safeJsonDecodeMap(prefs.getString(_homeEditorialCacheKey));
+      final editorialRaw = decoded['editorial'];
       final editorial = editorialRaw is Map<String, dynamic>
           ? HomeEditorialEdition.fromJson(editorialRaw)
-          : null;
+          : _restoreHomeEditorialCache(prefs);
       final newMovies = _catalogSnapshotList(decoded['newMovies']);
       final newSeries = _catalogSnapshotList(decoded['newSeries']);
       final animation = _catalogSnapshotList(decoded['animation']);
@@ -831,6 +830,15 @@ class _HomePageState extends State<HomePage>
       );
       return false;
     }
+  }
+
+  HomeEditorialEdition? _restoreHomeEditorialCache(SharedPreferences prefs) {
+    final editorialRaw = _safeJsonDecodeMap(
+      prefs.getString(_homeEditorialCacheKey),
+    );
+    return editorialRaw == null
+        ? null
+        : HomeEditorialEdition.fromJson(editorialRaw);
   }
 
   void _saveHomeWarmSnapshot({required HomeEditorialEdition? editorial}) {

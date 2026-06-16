@@ -72,7 +72,7 @@ class JuicrNotificationJobService : JobService() {
             "Today's Juicr picks"
         )
         val message = safeUserVisibleNotificationText(
-            fetchCatalogPreview(editorial) ?: curationMessage(editorial),
+            fetchCatalogPreview(editorial) ?: curationMessage(editorial, title),
             "Fresh movie, series, and animation picks are waiting."
         )
         if (showNotification(title, message)) {
@@ -240,7 +240,8 @@ class JuicrNotificationJobService : JobService() {
         return URLEncoder.encode(value, "UTF-8")
     }
 
-    private fun curationMessage(editorial: JSONObject): String {
+    private fun curationMessage(editorial: JSONObject, notificationTitle: String): String {
+        val titleKey = notificationTitle.trim().lowercase()
         val rails = mutableListOf<JSONObject>()
         editorial.optJSONObject("hero")?.let { rails.add(it) }
         editorial.optJSONArray("rails")?.let { railArray ->
@@ -251,11 +252,16 @@ class JuicrNotificationJobService : JobService() {
         for (rail in rails) {
             val railTitle = safeUserVisibleNotificationText(rail.optString("title"), "")
             val subtitle = safeUserVisibleNotificationText(rail.optString("subtitle"), "")
-            if (railTitle.isNotEmpty() && subtitle.isNotEmpty()) return "$railTitle - $subtitle"
-            if (railTitle.isNotEmpty()) return railTitle
+            val hook = safeUserVisibleNotificationText(rail.optString("notificationHook"), "")
+            val sameAsNotificationTitle = railTitle.trim().lowercase() == titleKey
+            if (railTitle.isNotEmpty() && subtitle.isNotEmpty() && !sameAsNotificationTitle) {
+                return "$railTitle - $subtitle"
+            }
             if (subtitle.isNotEmpty()) return subtitle
+            if (hook.isNotEmpty()) return hook
+            if (railTitle.isNotEmpty() && !sameAsNotificationTitle) return railTitle
         }
-        return "Fresh movie, series, and animation picks are waiting."
+        return "Fresh picks are ready when you are."
     }
 
     private fun safeUserVisibleNotificationText(value: String?, fallback: String): String {

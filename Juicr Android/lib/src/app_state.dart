@@ -1068,7 +1068,6 @@ class AppState {
   static final ValueNotifier<bool> matureContentChoiceSeen =
       ValueNotifier<bool>(false);
   static bool _matureContentChoiceInFlight = false;
-  static bool _adChoicesLocallyCustomized = false;
   static final ValueNotifier<AccountSession?> accountSession =
       ValueNotifier<AccountSession?>(null);
   static final ValueNotifier<AccountProfile?> accountProfile =
@@ -1917,15 +1916,12 @@ class AppState {
       rewardedVideoAdsEnabled.value = true;
       interstitialAdsEnabled.value = true;
       bannerAdsEnabled.value = true;
-      _adChoicesLocallyCustomized = false;
       await _prefs!.setBool(_rewardedVideoAdsEnabledKey, true);
       await _prefs!.setBool(_interstitialAdsEnabledKey, true);
       await _prefs!.setBool(_bannerAdsEnabledKey, true);
       await _prefs!.setBool(_adChoicesLocallyCustomizedKey, false);
       await _prefs!.setBool(_sampleAdDefaultsMigratedKey, true);
     } else {
-      _adChoicesLocallyCustomized =
-          _prefs!.getBool(_adChoicesLocallyCustomizedKey) ?? false;
       rewardedVideoAdsEnabled.value =
           _prefs!.getBool(_rewardedVideoAdsEnabledKey) ?? true;
       interstitialAdsEnabled.value =
@@ -2894,7 +2890,6 @@ class AppState {
   }
 
   static void _markAdChoicesLocallyCustomized() {
-    _adChoicesLocallyCustomized = true;
     unawaited(_prefs?.setBool(_adChoicesLocallyCustomizedKey, true));
   }
 
@@ -3303,39 +3298,6 @@ class AppState {
     };
   }
 
-  static bool _localCatalogTagMatchesGenre(
-    LocalCatalogItem item,
-    String genre,
-  ) {
-    final normalizedGenre = genre.trim().toLowerCase();
-    if (normalizedGenre.isEmpty || normalizedGenre == 'all genres') {
-      return true;
-    }
-    if (RegExp(r'^\d{4}$').hasMatch(normalizedGenre)) {
-      return item.releaseYear?.toString() == normalizedGenre;
-    }
-    return item.tags.any((tag) => tag.trim().toLowerCase() == normalizedGenre);
-  }
-
-  static bool _localCatalogItemMatchesSearch(
-    LocalCatalogItem item,
-    LocalCatalog? catalog,
-    String query,
-  ) {
-    final normalizedQuery = query.trim().toLowerCase();
-    if (normalizedQuery.isEmpty) return true;
-    final haystack = [
-      item.title,
-      item.description,
-      item.mediaKind,
-      ...item.tags,
-      catalog?.name ?? '',
-      catalog?.description ?? '',
-      item.releaseYear?.toString() ?? '',
-    ].join(' ').toLowerCase();
-    return haystack.contains(normalizedQuery);
-  }
-
   static CatalogItem localCatalogSurfaceItem(
     LocalCatalog catalog,
     LocalCatalogItem item,
@@ -3381,30 +3343,6 @@ class AppState {
   }) {
     // Catalog Builder is parked; existing saved metadata stays inert.
     return const <CatalogItem>[];
-    final items = <CatalogItem>[];
-    for (final localItem in localCatalogItems.value) {
-      final catalog = localCatalogById(localItem.catalogId);
-      if (catalog == null) continue;
-      final itemType = _localCatalogMediaType(localItem.mediaKind);
-      if (type != null && itemType != type) continue;
-      if (!_localCatalogTagMatchesGenre(localItem, genre)) continue;
-      if (!_localCatalogItemMatchesSearch(localItem, catalog, search)) {
-        continue;
-      }
-      items.add(localCatalogSurfaceItem(catalog, localItem));
-    }
-    items.sort((left, right) {
-      final yearCompare = _itemYearFromCatalogItem(
-        right,
-      ).compareTo(_itemYearFromCatalogItem(left));
-      if (yearCompare != 0) return yearCompare;
-      return left.name.toLowerCase().compareTo(right.name.toLowerCase());
-    });
-    return items;
-  }
-
-  static int _itemYearFromCatalogItem(CatalogItem item) {
-    return int.tryParse(item.year ?? '') ?? 0;
   }
 
   static List<LocalPickedAssetRef> localPickedAssetRefsFor(String itemId) {
@@ -6915,12 +6853,6 @@ Map<String, String> _browseStringsFromJson(Object? value) {
 Color _colorFromStoredInt(int? value, {required Color fallback}) {
   if (value == null) return fallback;
   return Color(value).withAlpha(0xFF);
-}
-
-List<String> _rotateProviderOrder(List<String> providers, String selected) {
-  final index = providers.indexOf(selected);
-  if (index < 0) return providers;
-  return [...providers.skip(index), ...providers.take(index)];
 }
 
 String _normalizeNativeProviderId(String value) {

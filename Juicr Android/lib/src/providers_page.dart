@@ -42,7 +42,6 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   final StreamApi _api = StreamApi();
-  late Future<StreamConfig> _configFuture;
   late final Future<Map<String, Object?>> _installInfoFuture;
   Future<_ReleaseUpdatesSnapshot>? _releaseUpdatesFuture;
   String _providerHealthSampleId = '';
@@ -96,12 +95,6 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void initState() {
     super.initState();
-    _configFuture = StreamApi.cachedConfig == null
-        ? Future<StreamConfig>.delayed(
-            const Duration(milliseconds: 800),
-            _api.config,
-          )
-        : Future<StreamConfig>.value(StreamApi.cachedConfig!);
     _installInfoFuture = Future<Map<String, Object?>>.delayed(
       const Duration(milliseconds: 1200),
       DiagnosticLog.installInfo,
@@ -234,12 +227,6 @@ class _SettingsPageState extends State<SettingsPage> {
       titleBadgeHint:
           'Personal servers are functional, but still being validated against real home server setups.',
     );
-  }
-
-  void _reload() {
-    setState(() {
-      _configFuture = _api.config();
-    });
   }
 
   void _snack(String message) {
@@ -4186,7 +4173,14 @@ class _SettingsPageState extends State<SettingsPage> {
                 icon: Icons.privacy_tip_outlined,
                 title: 'Diagnostics stay private',
                 subtitle:
-                    'Reports are redacted before sending and avoid private source, account, and playback details.',
+                    'Recent diagnostics stay on this device until you copy or send a report. Juicr hides stream URLs, manifest URLs, and long secret-looking values.',
+              ),
+              const Divider(height: 1),
+              const _ExperimentalInfoTile(
+                icon: Icons.shield_outlined,
+                title: 'Redaction boundary',
+                subtitle:
+                    'The report does not store URLs, hashes, trackers, headers, tokens, or account details. It does not log Wi-Fi names, IP addresses, peers, playable URLs, account details, tokens, or headers.',
               ),
               const Divider(height: 1),
               _ActionTile(
@@ -11201,7 +11195,7 @@ class _DefaultSourceHelpSheet extends StatelessWidget {
       (
         Icons.play_circle_outline_rounded,
         'Built-in playback options',
-        'Lets Juicr try optional built-in playback choices after consent. Stream add-ons, account-backed links, and P2P can stay separate as fallback paths.',
+        'Lets Juicr try optional built-in playback choices after consent. Stream add-ons, account-backed links, and P2P can stay separate as fallback paths. Direct and account-backed links can coexist as playback fallbacks.',
       ),
       (
         Icons.alt_route_rounded,
@@ -11216,7 +11210,7 @@ class _DefaultSourceHelpSheet extends StatelessWidget {
       (
         Icons.auto_awesome_rounded,
         'Auto playback',
-        'Ranks ready choices first, prefers more available options, and avoids choices that recently failed for the same title. If nothing works, Advanced fallback paths can help only when enabled.',
+        'Ranks ready choices first, prefers more available options, and avoids choices that recently failed for the same title. If nothing works, Advanced fallback paths can help only when enabled. P2P results use the existing Advanced P2P path only when you enable it.',
       ),
       (
         Icons.health_and_safety_outlined,
@@ -12009,6 +12003,11 @@ class _AboutDiagnosticsHelpSheet extends StatelessWidget {
         'Copies the app version and package name when support needs a quick environment check.',
       ),
       (
+        Icons.history_rounded,
+        'Previous session exit',
+        'Diagnostic reports include safe previous-session state and install details so support can tell whether the last launch ended cleanly.',
+      ),
+      (
         Icons.bug_report_outlined,
         'Copy diagnostic report',
         'Copies temporary playback and app state evidence for troubleshooting. Reports are written to avoid private playback details.',
@@ -12096,7 +12095,6 @@ class _OptionSheet<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final mediaQuery = MediaQuery.of(context);
-    final colorScheme = Theme.of(context).colorScheme;
     final maxHeight = mediaQuery.size.height * 0.5;
     const chromeHeight = 84.0;
     final rowHeight = options.any(
@@ -12538,7 +12536,6 @@ Color? _providerHealthTextColor(
   BuildContext context,
   NativeProviderHealthStatus status,
 ) {
-  final colorScheme = Theme.of(context).colorScheme;
   return switch (status) {
     NativeProviderHealthStatus.untested ||
     NativeProviderHealthStatus.checkedNoSample =>
