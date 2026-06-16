@@ -1374,11 +1374,12 @@ class _TvAccountLibraryPushResult {
 }
 
 class _TvRail {
-  const _TvRail(this.title, this.subtitle, this.items);
+  const _TvRail(this.title, this.subtitle, this.items, {this.showRank = true});
 
   final String title;
   final String subtitle;
   final List<_TvItem> items;
+  final bool showRank;
 }
 
 class _TvSettingsState {

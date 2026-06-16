@@ -43,62 +43,67 @@ class _PosterCard extends StatelessWidget {
       onArrowDown: onArrowDown,
       onFocus: onFocus,
       builder: (focused) {
-        final contentWidth = width;
+        const focusGutter = 4.0;
+        final contentWidth = width - (focusGutter * 2);
+        final contentHeight = posterHeight - (focusGutter * 2);
         final rating = item.imdbRating?.trim();
         return SizedBox(
           width: width,
-          height: posterHeight + 10,
+          height: posterHeight + 14,
           child: Center(
             child: AnimatedScale(
               scale: focused ? 1.035 : 1,
               duration: _tvDuration(130),
-              child: SizedBox(
-                width: contentWidth,
-                height: posterHeight,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      height: posterHeight,
-                      child: _PosterArtwork(
-                        item: item,
-                        width: contentWidth,
-                        height: posterHeight,
-                      ),
-                    ),
-                    if (rating != null && rating.isNotEmpty)
+              child: Padding(
+                padding: const EdgeInsets.all(focusGutter),
+                child: SizedBox(
+                  width: contentWidth,
+                  height: contentHeight,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
                       Positioned(
-                        left: 8,
-                        top: 8,
-                        child: _ImdbPill(label: rating),
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        height: contentHeight,
+                        child: _PosterArtwork(
+                          item: item,
+                          width: contentWidth,
+                          height: contentHeight,
+                        ),
                       ),
-                    if (showRank)
+                      if (rating != null && rating.isNotEmpty)
+                        Positioned(
+                          left: 8,
+                          top: 8,
+                          child: _ImdbPill(label: rating),
+                        ),
+                      if (showRank)
+                        Positioned(
+                          right: 8,
+                          bottom: 8,
+                          child: _Pill(label: 'Rank $rank'),
+                        ),
                       Positioned(
-                        right: 8,
-                        top: posterHeight - 34,
-                        child: _Pill(label: 'Rank $rank'),
-                      ),
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      height: posterHeight,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(18),
-                          border: Border.all(
-                            color: focused
-                                ? _tvFocusBorder
-                                : const Color(0x22FFFFFF),
-                            width: focused ? 2 : 1,
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        height: contentHeight,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: focused
+                                  ? _tvFocusBorder
+                                  : const Color(0x22FFFFFF),
+                              width: focused ? 2 : 1,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -116,54 +121,54 @@ class _ImdbPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: _tvSpacing,
-        vertical: _tvSpacing,
-      ),
-      decoration: BoxDecoration(
-        color: const Color(0xA611131A),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: const Color(0x24FFFFFF)),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x52000000),
-            blurRadius: 12,
-            offset: Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Text(
-            'IMDb',
-            maxLines: 1,
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 10,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 0.2,
-              height: 1,
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 76),
+      child: Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 11),
+        decoration: _tvPillDecoration,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text(
+              'IMDb',
+              maxLines: 1,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.2,
+                height: 1,
+              ),
             ),
-          ),
-          const SizedBox(width: _tvSpacing),
-          Text(
-            label,
-            maxLines: 1,
-            style: TextStyle(
-              color: _tvAccentColor,
-              fontSize: 10,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 0.2,
-              height: 1,
+            const SizedBox(width: 8),
+            Text(
+              label,
+              maxLines: 1,
+              style: TextStyle(
+                color: _tvAccentColor,
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.2,
+                height: 1,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
+
+BoxDecoration get _tvPillDecoration => BoxDecoration(
+  color: const Color(0xA611131A),
+  borderRadius: BorderRadius.circular(999),
+  border: Border.all(color: const Color(0x24FFFFFF)),
+  boxShadow: const [
+    BoxShadow(color: Color(0x52000000), blurRadius: 12, offset: Offset(0, 5)),
+  ],
+);
 
 class _PosterArtwork extends StatelessWidget {
   const _PosterArtwork({
@@ -340,7 +345,6 @@ class _TvTextButton extends StatelessWidget {
     this.autofocus = false,
     this.enabled = true,
     this.animateIcon = false,
-    this.autoReveal = false,
     this.focusNode,
     this.onFocus,
     this.onArrowLeft,
@@ -355,7 +359,6 @@ class _TvTextButton extends StatelessWidget {
   final bool autofocus;
   final bool enabled;
   final bool animateIcon;
-  final bool autoReveal;
   final FocusNode? focusNode;
   final VoidCallback? onFocus;
   final VoidCallback? onArrowLeft;
@@ -368,7 +371,6 @@ class _TvTextButton extends StatelessWidget {
     return _TvFocusable(
       autofocus: autofocus,
       enabled: enabled,
-      autoReveal: autoReveal,
       focusNode: focusNode,
       onFocus: onFocus,
       onPressed: onPressed,
@@ -381,7 +383,10 @@ class _TvTextButton extends StatelessWidget {
         return AnimatedContainer(
           duration: _tvDuration(130),
           constraints: const BoxConstraints(minHeight: 48),
-          padding: const EdgeInsets.symmetric(horizontal: _tvSpacing, vertical: _tvSpacing),
+          padding: const EdgeInsets.symmetric(
+            horizontal: _tvSpacing,
+            vertical: _tvSpacing,
+          ),
           decoration: BoxDecoration(
             color: active ? _tvAccentColor : const Color(0x1FFFFFFF),
             borderRadius: BorderRadius.circular(999),
@@ -480,6 +485,7 @@ class _TvFocusable extends StatefulWidget {
     this.autofocus = false,
     this.enabled = true,
     this.autoReveal = false,
+    this.descendantsAreFocusable = false,
     this.focusNode,
     this.onArrowLeft,
     this.onArrowRight,
@@ -493,6 +499,7 @@ class _TvFocusable extends StatefulWidget {
   final bool autofocus;
   final bool enabled;
   final bool autoReveal;
+  final bool descendantsAreFocusable;
   final FocusNode? focusNode;
   final VoidCallback? onArrowLeft;
   final VoidCallback? onArrowRight;
@@ -525,23 +532,31 @@ class _TvFocusableState extends State<_TvFocusable> {
       widget.onPressed();
       return KeyEventResult.handled;
     }
+    if (!widget.enabled) {
+      if (key == LogicalKeyboardKey.arrowLeft ||
+          key == LogicalKeyboardKey.arrowRight ||
+          key == LogicalKeyboardKey.arrowUp ||
+          key == LogicalKeyboardKey.arrowDown) {
+        return KeyEventResult.ignored;
+      }
+      return KeyEventResult.handled;
+    }
     if (key == LogicalKeyboardKey.arrowLeft && widget.onArrowLeft != null) {
-      if (widget.enabled) widget.onArrowLeft!();
+      widget.onArrowLeft!();
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowRight && widget.onArrowRight != null) {
-      if (widget.enabled) widget.onArrowRight!();
+      widget.onArrowRight!();
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp && widget.onArrowUp != null) {
-      if (widget.enabled) widget.onArrowUp!();
+      widget.onArrowUp!();
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowDown && widget.onArrowDown != null) {
-      if (widget.enabled) widget.onArrowDown!();
+      widget.onArrowDown!();
       return KeyEventResult.handled;
     }
-    if (!widget.enabled) return KeyEventResult.handled;
     final direction = switch (key) {
       LogicalKeyboardKey.arrowLeft => TraversalDirection.left,
       LogicalKeyboardKey.arrowRight => TraversalDirection.right,
@@ -575,7 +590,7 @@ class _TvFocusableState extends State<_TvFocusable> {
         focusNode: widget.focusNode,
         autofocus: widget.autofocus && widget.enabled,
         canRequestFocus: widget.enabled,
-        descendantsAreFocusable: false,
+        descendantsAreFocusable: widget.descendantsAreFocusable,
         onKeyEvent: (_, event) => _handleKey(event),
         onFocusChange: (focused) {
           setState(() => _focused = focused);
@@ -665,29 +680,23 @@ class _Pill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: _tvSpacing, vertical: _tvSpacing),
-      decoration: BoxDecoration(
-        color: const Color(0xA611131A),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: const Color(0x24FFFFFF)),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x52000000),
-            blurRadius: 12,
-            offset: Offset(0, 5),
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 70),
+      child: Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 11),
+        alignment: Alignment.center,
+        decoration: _tvPillDecoration,
+        child: Text(
+          label,
+          maxLines: 1,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 11,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 0.2,
+            height: 1,
           ),
-        ],
-      ),
-      child: Text(
-        label,
-        maxLines: 1,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 11,
-          fontWeight: FontWeight.w900,
-          letterSpacing: 0.2,
-          height: 1,
         ),
       ),
     );

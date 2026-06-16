@@ -24,6 +24,8 @@ class _TvMainSurface extends StatelessWidget {
     required this.discoveryKind,
     required this.discoverySort,
     required this.discoveryGenre,
+    required this.discoveryLoading,
+    required this.discoveryExhausted,
     required this.libraryFilter,
     required this.accountSignedIn,
     required this.accountToken,
@@ -82,6 +84,8 @@ class _TvMainSurface extends StatelessWidget {
   final _TvDiscoveryKind discoveryKind;
   final _TvDiscoverySort discoverySort;
   final String discoveryGenre;
+  final bool discoveryLoading;
+  final bool discoveryExhausted;
   final _TvLibraryFilter libraryFilter;
   final bool accountSignedIn;
   final String accountToken;
@@ -167,6 +171,9 @@ class _TvMainSurface extends StatelessWidget {
           ),
         Expanded(
           child: CustomScrollView(
+            key: PageStorageKey<String>(
+              'tv-main-scroll-$selectedTab-${expandedRail == null ? 'root' : 'expanded'}',
+            ),
             slivers: [
               SliverPadding(
                 padding: selectedTab == 0
@@ -200,6 +207,9 @@ class _TvMainSurface extends StatelessWidget {
           onBack: onBackToHome,
           onOpenItem: onOpenItem,
           onFocusNavigation: onFocusNavigation,
+          backFocusNode: pageEntryFocusNode,
+          gridFocusNode: pageContentFocusNode,
+          onRememberFocus: onRememberPageFocus,
         ),
       );
     }
@@ -228,6 +238,8 @@ class _TvMainSurface extends StatelessWidget {
           kind: discoveryKind,
           sort: discoverySort,
           genre: discoveryGenre,
+          loadingMore: discoveryLoading,
+          exhausted: discoveryExhausted,
           onOpenItem: onOpenItem,
           onFocusNavigation: onFocusNavigation,
           entryFocusNode: pageContentFocusNode,
@@ -1161,12 +1173,14 @@ class _TvDiscoveryMenuDialog extends StatefulWidget {
     required this.sort,
     required this.genre,
     required this.genres,
+    required this.onChanged,
   });
 
   final _TvDiscoveryKind kind;
   final _TvDiscoverySort sort;
   final String genre;
   final List<String> genres;
+  final ValueChanged<_TvDiscoverySelection> onChanged;
 
   @override
   State<_TvDiscoveryMenuDialog> createState() => _TvDiscoveryMenuDialogState();
@@ -1216,9 +1230,6 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
   final FocusNode _featuredSortFocusNode = FocusNode(
     debugLabel: 'tv-discovery-menu-sort-featured',
   );
-  final FocusNode _applyFocusNode = FocusNode(
-    debugLabel: 'tv-discovery-menu-apply',
-  );
 
   late _TvDiscoveryKind _kind = widget.kind;
   late _TvDiscoverySort _sort = widget.sort;
@@ -1245,6 +1256,17 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
       _kind = kind;
       _ensureSortFitsKind();
     });
+    widget.onChanged(_TvDiscoverySelection(_kind, _sort, _genre));
+  }
+
+  void _setSort(_TvDiscoverySort sort) {
+    setState(() => _sort = sort);
+    widget.onChanged(_TvDiscoverySelection(_kind, _sort, _genre));
+  }
+
+  void _setGenre(String genre) {
+    setState(() => _genre = genre);
+    widget.onChanged(_TvDiscoverySelection(_kind, _sort, _genre));
   }
 
   void _focusMenuNode(FocusNode node, {double alignment = 0.45}) {
@@ -1291,7 +1313,6 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
     _onTvSortFocusNode.dispose();
     _newSortFocusNode.dispose();
     _featuredSortFocusNode.dispose();
-    _applyFocusNode.dispose();
     super.dispose();
   }
 
@@ -1318,15 +1339,15 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
   }
 
   Future<void> _pickGenre() async {
-    final selected = await showDialog<String>(
+    await showDialog<void>(
       context: context,
-      builder: (context) =>
-          _TvGenreMenuDialog(selected: _genre, genres: widget.genres),
+      builder: (context) => _TvGenreMenuDialog(
+        selected: _genre,
+        genres: widget.genres,
+        onChanged: _setGenre,
+      ),
     );
     if (!mounted) return;
-    if (selected != null) {
-      setState(() => _genre = selected);
-    }
     _focusMenuNode(_genreFocusNode);
   }
 
@@ -1346,30 +1367,16 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
               borderRadius: BorderRadius.circular(26),
               border: Border.all(color: const Color(0x22FFFFFF)),
             ),
-            child: Stack(
-              children: [
-                Positioned(
-                  top: 0,
-                  right: 0,
-                  child: _TvCircleIconButton(
-                    focusNode: _closeFocusNode,
-                    icon: Icons.close_rounded,
-                    onArrowUp: () => _closeFocusNode.requestFocus(),
-                    onArrowRight: () => _closeFocusNode.requestFocus(),
-                    onArrowLeft: () => _focusMenuNode(_firstCatalogFocusNode),
-                    onArrowDown: () => _focusMenuNode(_firstCatalogFocusNode),
-                    onPressed: () => Navigator.of(context).pop(),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(top: _tvSpacing),
-                  child: SingleChildScrollView(
-                    controller: _scrollController,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
+            child: SingleChildScrollView(
+              controller: _scrollController,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
                           'Discovery menu',
                           style: TextStyle(
                             color: Colors.white,
@@ -1377,140 +1384,122 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
                             fontWeight: FontWeight.w900,
                           ),
                         ),
-                        const SizedBox(height: _tvSpacing),
-                        const Text(
-                          'Choose the catalog and ordering for this screen.',
-                          style: TextStyle(
-                            color: Color(0xFFBDB9D5),
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: _tvSpacing),
-                        _TvChoiceListSection(
-                          title: 'Catalog',
-                          children: [
-                            for (
-                              var index = 0;
-                              index < _TvDiscoveryKind.values.length;
-                              index++
-                            )
-                              _TvChoiceRow(
-                                focusNode: _kindNode(
-                                  _TvDiscoveryKind.values[index],
-                                ),
-                                icon: _TvDiscoveryKind.values[index].icon,
-                                label: _TvDiscoveryKind.values[index].label,
-                                selected:
-                                    _kind == _TvDiscoveryKind.values[index],
-                                autofocus: index == 0,
-                                onArrowUp: index == 0
-                                    ? () => _closeFocusNode.requestFocus()
-                                    : () => _focusMenuNode(
-                                        _kindNode(
-                                          _TvDiscoveryKind.values[index - 1],
-                                        ),
-                                      ),
-                                onArrowDown:
-                                    index + 1 < _TvDiscoveryKind.values.length
-                                    ? () => _focusMenuNode(
-                                        _kindNode(
-                                          _TvDiscoveryKind.values[index + 1],
-                                        ),
-                                      )
-                                    : () => _focusMenuNode(_genreFocusNode),
-                                onArrowLeft: () => _focusMenuNode(
-                                  _kindNode(_TvDiscoveryKind.values[index]),
-                                ),
-                                onArrowRight: () => _focusMenuNode(
-                                  _kindNode(_TvDiscoveryKind.values[index]),
-                                ),
-                                onPressed: () =>
-                                    _setKind(_TvDiscoveryKind.values[index]),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: _tvSpacing),
-                        _TvChoiceListSection(
-                          title: 'Genre',
-                          children: [
-                            _TvChoiceRow(
-                              focusNode: _genreFocusNode,
-                              icon: Icons.category_rounded,
-                              label: _genre,
-                              selected: true,
-                              onArrowUp: () => _focusMenuNode(
-                                _liveCatalogFocusNode,
-                                alignment: 0.28,
-                              ),
-                              onArrowDown: () =>
-                                  _focusMenuNode(_sortNode(sortOptions.first)),
-                              onArrowLeft: () =>
-                                  _focusMenuNode(_genreFocusNode),
-                              onArrowRight: () =>
-                                  _focusMenuNode(_genreFocusNode),
-                              onPressed: () => unawaited(_pickGenre()),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: _tvSpacing),
-                        _TvChoiceListSection(
-                          title: 'Sort',
-                          children: [
-                            for (
-                              var index = 0;
-                              index < sortOptions.length;
-                              index++
-                            )
-                              _TvChoiceRow(
-                                focusNode: _sortNode(sortOptions[index]),
-                                icon: Icons.sort_rounded,
-                                label: sortOptions[index].labelFor(_kind),
-                                selected: _sort == sortOptions[index],
-                                onArrowUp: index == 0
-                                    ? () => _focusMenuNode(
-                                        _genreFocusNode,
-                                        alignment: 0.22,
-                                      )
-                                    : () => _focusMenuNode(
-                                        _sortNode(sortOptions[index - 1]),
-                                      ),
-                                onArrowDown: index + 1 < sortOptions.length
-                                    ? () => _focusMenuNode(
-                                        _sortNode(sortOptions[index + 1]),
-                                      )
-                                    : () => _focusMenuNode(_applyFocusNode),
-                                onArrowLeft: () => _focusMenuNode(
-                                  _sortNode(sortOptions[index]),
-                                ),
-                                onArrowRight: () => _focusMenuNode(
-                                  _sortNode(sortOptions[index]),
-                                ),
-                                onPressed: () =>
-                                    setState(() => _sort = sortOptions[index]),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: _tvSpacing),
-                        _TvTextButton(
-                          focusNode: _applyFocusNode,
-                          autoReveal: true,
-                          icon: Icons.check_rounded,
-                          label: 'Apply',
-                          onArrowUp: () =>
-                              _focusMenuNode(_sortNode(sortOptions.last)),
-                          onArrowDown: () => _focusMenuNode(_applyFocusNode),
-                          onArrowLeft: () => _focusMenuNode(_applyFocusNode),
-                          onArrowRight: () => _focusMenuNode(_applyFocusNode),
-                          onPressed: () => Navigator.of(
-                            context,
-                          ).pop(_TvDiscoverySelection(_kind, _sort, _genre)),
-                        ),
-                      ],
+                      ),
+                      _TvCircleIconButton(
+                        focusNode: _closeFocusNode,
+                        icon: Icons.close_rounded,
+                        onArrowUp: () => _closeFocusNode.requestFocus(),
+                        onArrowRight: () => _closeFocusNode.requestFocus(),
+                        onArrowLeft: () =>
+                            _focusMenuNode(_firstCatalogFocusNode),
+                        onArrowDown: () =>
+                            _focusMenuNode(_firstCatalogFocusNode),
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: _tvSpacing),
+                  const Text(
+                    'Choose the catalog and ordering for this screen.',
+                    style: TextStyle(
+                      color: Color(0xFFBDB9D5),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(height: _tvSpacing),
+                  _TvChoiceListSection(
+                    title: 'Catalog',
+                    children: [
+                      for (
+                        var index = 0;
+                        index < _TvDiscoveryKind.values.length;
+                        index++
+                      )
+                        _TvChoiceRow(
+                          focusNode: _kindNode(_TvDiscoveryKind.values[index]),
+                          icon: _TvDiscoveryKind.values[index].icon,
+                          label: _TvDiscoveryKind.values[index].label,
+                          selected: _kind == _TvDiscoveryKind.values[index],
+                          autofocus: index == 0,
+                          onArrowUp: index == 0
+                              ? () => _closeFocusNode.requestFocus()
+                              : () => _focusMenuNode(
+                                  _kindNode(_TvDiscoveryKind.values[index - 1]),
+                                ),
+                          onArrowDown:
+                              index + 1 < _TvDiscoveryKind.values.length
+                              ? () => _focusMenuNode(
+                                  _kindNode(_TvDiscoveryKind.values[index + 1]),
+                                )
+                              : () => _focusMenuNode(_genreFocusNode),
+                          onArrowLeft: () => _focusMenuNode(
+                            _kindNode(_TvDiscoveryKind.values[index]),
+                          ),
+                          onArrowRight: () => _focusMenuNode(
+                            _kindNode(_TvDiscoveryKind.values[index]),
+                          ),
+                          onPressed: () =>
+                              _setKind(_TvDiscoveryKind.values[index]),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: _tvSpacing),
+                  _TvChoiceListSection(
+                    title: 'Genre',
+                    children: [
+                      _TvChoiceRow(
+                        focusNode: _genreFocusNode,
+                        icon: Icons.category_rounded,
+                        label: _genre,
+                        selected: true,
+                        onArrowUp: () => _focusMenuNode(
+                          _liveCatalogFocusNode,
+                          alignment: 0.28,
+                        ),
+                        onArrowDown: () =>
+                            _focusMenuNode(_sortNode(sortOptions.first)),
+                        onArrowLeft: () => _focusMenuNode(_genreFocusNode),
+                        onArrowRight: () => _focusMenuNode(_genreFocusNode),
+                        onPressed: () => unawaited(_pickGenre()),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: _tvSpacing),
+                  _TvChoiceListSection(
+                    title: 'Sort',
+                    children: [
+                      for (var index = 0; index < sortOptions.length; index++)
+                        _TvChoiceRow(
+                          focusNode: _sortNode(sortOptions[index]),
+                          icon: Icons.sort_rounded,
+                          label: sortOptions[index].labelFor(_kind),
+                          selected: _sort == sortOptions[index],
+                          onArrowUp: index == 0
+                              ? () => _focusMenuNode(
+                                  _genreFocusNode,
+                                  alignment: 0.22,
+                                )
+                              : () => _focusMenuNode(
+                                  _sortNode(sortOptions[index - 1]),
+                                ),
+                          onArrowDown: index + 1 < sortOptions.length
+                              ? () => _focusMenuNode(
+                                  _sortNode(sortOptions[index + 1]),
+                                )
+                              : () => _focusMenuNode(
+                                  _sortNode(sortOptions[index]),
+                                ),
+                          onArrowLeft: () =>
+                              _focusMenuNode(_sortNode(sortOptions[index])),
+                          onArrowRight: () =>
+                              _focusMenuNode(_sortNode(sortOptions[index])),
+                          onPressed: () => _setSort(sortOptions[index]),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1520,10 +1509,15 @@ class _TvDiscoveryMenuDialogState extends State<_TvDiscoveryMenuDialog> {
 }
 
 class _TvGenreMenuDialog extends StatefulWidget {
-  const _TvGenreMenuDialog({required this.selected, required this.genres});
+  const _TvGenreMenuDialog({
+    required this.selected,
+    required this.genres,
+    required this.onChanged,
+  });
 
   final String selected;
   final List<String> genres;
+  final ValueChanged<String> onChanged;
 
   @override
   State<_TvGenreMenuDialog> createState() => _TvGenreMenuDialogState();
@@ -1535,6 +1529,7 @@ class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
   );
   final Map<String, FocusNode> _genreFocusNodes = <String, FocusNode>{};
   final ScrollController _scrollController = ScrollController();
+  late String _selected = widget.selected;
 
   @override
   void initState() {
@@ -1622,30 +1617,16 @@ class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
             borderRadius: BorderRadius.circular(26),
             border: Border.all(color: const Color(0x22FFFFFF)),
           ),
-          child: Stack(
-            children: [
-              Positioned(
-                top: 0,
-                right: 0,
-                child: _TvCircleIconButton(
-                  focusNode: _closeFocusNode,
-                  icon: Icons.close_rounded,
-                  onArrowUp: () => _closeFocusNode.requestFocus(),
-                  onArrowRight: () => _closeFocusNode.requestFocus(),
-                  onArrowLeft: () => _focusGenre(_choices.first),
-                  onArrowDown: () => _focusGenre(_choices.first),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.only(top: _tvSpacing),
-                child: SingleChildScrollView(
-                  controller: _scrollController,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text(
+          child: SingleChildScrollView(
+            controller: _scrollController,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
                         'Genres',
                         style: TextStyle(
                           color: Colors.white,
@@ -1653,44 +1634,51 @@ class _TvGenreMenuDialogState extends State<_TvGenreMenuDialog> {
                           fontWeight: FontWeight.w900,
                         ),
                       ),
-                      const SizedBox(height: _tvSpacing),
-                      Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          for (
-                            var index = 0;
-                            index < choices.length;
-                            index++
-                          ) ...[
-                            _TvChoiceRow(
-                              icon: choices[index] == widget.selected
-                                  ? Icons.check_circle_rounded
-                                  : Icons.category_rounded,
-                              label: choices[index],
-                              selected: choices[index] == widget.selected,
-                              autofocus: choices[index] == widget.selected,
-                              focusNode: _genreNode(choices[index]),
-                              onArrowUp: index == 0
-                                  ? () => _closeFocusNode.requestFocus()
-                                  : () => _focusGenre(choices[index - 1]),
-                              onArrowDown: index + 1 < choices.length
-                                  ? () => _focusGenre(choices[index + 1])
-                                  : () => _focusGenre(choices[index]),
-                              onArrowLeft: () => _focusGenre(choices[index]),
-                              onArrowRight: () => _focusGenre(choices[index]),
-                              onPressed: () =>
-                                  Navigator.of(context).pop(choices[index]),
-                            ),
-                            if (index != choices.length - 1)
-                              const SizedBox(height: _tvSpacing),
-                          ],
-                        ],
-                      ),
-                    ],
-                  ),
+                    ),
+                    _TvCircleIconButton(
+                      focusNode: _closeFocusNode,
+                      icon: Icons.close_rounded,
+                      onArrowUp: () => _closeFocusNode.requestFocus(),
+                      onArrowRight: () => _closeFocusNode.requestFocus(),
+                      onArrowLeft: () => _focusGenre(_choices.first),
+                      onArrowDown: () => _focusGenre(_choices.first),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ],
                 ),
-              ),
-            ],
+                const SizedBox(height: _tvSpacing),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (var index = 0; index < choices.length; index++) ...[
+                      _TvChoiceRow(
+                        icon: choices[index] == _selected
+                            ? Icons.check_circle_rounded
+                            : Icons.category_rounded,
+                        label: choices[index],
+                        selected: choices[index] == _selected,
+                        autofocus: choices[index] == _selected,
+                        focusNode: _genreNode(choices[index]),
+                        onArrowUp: index == 0
+                            ? () => _closeFocusNode.requestFocus()
+                            : () => _focusGenre(choices[index - 1]),
+                        onArrowDown: index + 1 < choices.length
+                            ? () => _focusGenre(choices[index + 1])
+                            : () => _focusGenre(choices[index]),
+                        onArrowLeft: () => _focusGenre(choices[index]),
+                        onArrowRight: () => _focusGenre(choices[index]),
+                        onPressed: () {
+                          setState(() => _selected = choices[index]);
+                          widget.onChanged(choices[index]);
+                        },
+                      ),
+                      if (index != choices.length - 1)
+                        const SizedBox(height: _tvSpacing),
+                    ],
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1708,9 +1696,10 @@ const List<_TvLibraryFilter> _tvLibraryContentFilters = [
 ];
 
 class _TvLibraryMenuDialog extends StatefulWidget {
-  const _TvLibraryMenuDialog({required this.filter});
+  const _TvLibraryMenuDialog({required this.filter, required this.onChanged});
 
   final _TvLibraryFilter filter;
+  final ValueChanged<_TvLibraryFilter> onChanged;
 
   @override
   State<_TvLibraryMenuDialog> createState() => _TvLibraryMenuDialogState();
@@ -1724,7 +1713,6 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
     for (final filter in _tvLibraryContentFilters)
       filter: FocusNode(debugLabel: 'tv-library-menu-${filter.name}'),
   };
-  final FocusNode _applyFocusNode = FocusNode(debugLabel: 'tv-library-apply');
   final ScrollController _scrollController = ScrollController();
 
   late _TvLibraryFilter _filter =
@@ -1747,7 +1735,6 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
     for (final node in _filterNodes.values) {
       node.dispose();
     }
-    _applyFocusNode.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -1784,34 +1771,16 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
               borderRadius: BorderRadius.circular(26),
               border: Border.all(color: const Color(0x22FFFFFF)),
             ),
-            child: Stack(
-              children: [
-                Positioned(
-                  top: 0,
-                  right: 0,
-                  child: _TvCircleIconButton(
-                    focusNode: _closeFocusNode,
-                    icon: Icons.close_rounded,
-                    onArrowUp: () => _closeFocusNode.requestFocus(),
-                    onArrowRight: () => _closeFocusNode.requestFocus(),
-                    onArrowLeft: () => _focusFilter(
-                      _tvLibraryContentFilters.first,
-                    ),
-                    onArrowDown: () => _focusFilter(
-                      _tvLibraryContentFilters.first,
-                    ),
-                    onPressed: () => Navigator.of(context).pop(),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(top: _tvSpacing),
-                  child: SingleChildScrollView(
-                    controller: _scrollController,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
+            child: SingleChildScrollView(
+              controller: _scrollController,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
                           'Library menu',
                           style: TextStyle(
                             color: Colors.white,
@@ -1819,65 +1788,68 @@ class _TvLibraryMenuDialogState extends State<_TvLibraryMenuDialog> {
                             fontWeight: FontWeight.w900,
                           ),
                         ),
-                        const SizedBox(height: _tvSpacing),
-                        const Text(
-                          'Choose which saved TV items to show.',
-                          style: TextStyle(
-                            color: Color(0xFFAAA6BD),
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: _tvSpacing),
-                        _TvChoiceListSection(
-                          title: 'Library',
-                          children: [
-                            for (
-                              var index = 0;
-                              index < _tvLibraryContentFilters.length;
-                              index++
-                            )
-                              _TvChoiceRow(
-                                icon: _tvLibraryContentFilters[index].icon,
-                                label: _tvLibraryContentFilters[index].label,
-                                selected:
-                                    _filter == _tvLibraryContentFilters[index],
-                                autofocus: index == 0,
-                                focusNode:
-                                    _filterNodes[_tvLibraryContentFilters[index]],
-                                onPressed: () => setState(
-                                  () =>
-                                      _filter = _tvLibraryContentFilters[index],
-                                ),
-                                onArrowUp: index == 0
-                                    ? () => _closeFocusNode.requestFocus()
-                                    : () => _focusFilter(
-                                        _tvLibraryContentFilters[index - 1],
-                                      ),
-                                onArrowDown:
-                                    index == _tvLibraryContentFilters.length - 1
-                                    ? () => _applyFocusNode.requestFocus()
-                                    : () => _focusFilter(
-                                        _tvLibraryContentFilters[index + 1],
-                                      ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: _tvSpacing),
-                        _TvTextButton(
-                          icon: Icons.check_rounded,
-                          label: 'Apply',
-                          focusNode: _applyFocusNode,
-                          autoReveal: true,
-                          onArrowUp: () =>
-                              _focusFilter(_tvLibraryContentFilters.last),
-                          onPressed: () => Navigator.of(context).pop(_filter),
-                        ),
-                      ],
+                      ),
+                      _TvCircleIconButton(
+                        focusNode: _closeFocusNode,
+                        icon: Icons.close_rounded,
+                        onArrowUp: () => _closeFocusNode.requestFocus(),
+                        onArrowRight: () => _closeFocusNode.requestFocus(),
+                        onArrowLeft: () =>
+                            _focusFilter(_tvLibraryContentFilters.first),
+                        onArrowDown: () =>
+                            _focusFilter(_tvLibraryContentFilters.first),
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: _tvSpacing),
+                  const Text(
+                    'Choose which saved TV items to show.',
+                    style: TextStyle(
+                      color: Color(0xFFAAA6BD),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(height: _tvSpacing),
+                  _TvChoiceListSection(
+                    title: 'Library',
+                    children: [
+                      for (
+                        var index = 0;
+                        index < _tvLibraryContentFilters.length;
+                        index++
+                      )
+                        _TvChoiceRow(
+                          icon: _tvLibraryContentFilters[index].icon,
+                          label: _tvLibraryContentFilters[index].label,
+                          selected: _filter == _tvLibraryContentFilters[index],
+                          autofocus: index == 0,
+                          focusNode:
+                              _filterNodes[_tvLibraryContentFilters[index]],
+                          onPressed: () {
+                            final selection = _tvLibraryContentFilters[index];
+                            setState(() => _filter = selection);
+                            widget.onChanged(selection);
+                          },
+                          onArrowUp: index == 0
+                              ? () => _closeFocusNode.requestFocus()
+                              : () => _focusFilter(
+                                  _tvLibraryContentFilters[index - 1],
+                                ),
+                          onArrowDown:
+                              index == _tvLibraryContentFilters.length - 1
+                              ? () => _focusFilter(
+                                  _tvLibraryContentFilters[index],
+                                )
+                              : () => _focusFilter(
+                                  _tvLibraryContentFilters[index + 1],
+                                ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1911,7 +1883,8 @@ class _TvChoiceListSection extends StatelessWidget {
           children: [
             for (var index = 0; index < children.length; index++) ...[
               children[index],
-              if (index != children.length - 1) const SizedBox(height: _tvSpacing),
+              if (index != children.length - 1)
+                const SizedBox(height: _tvSpacing),
             ],
           ],
         ),
@@ -2101,15 +2074,6 @@ class _TvContentRailState extends State<_TvContentRail> {
     });
   }
 
-  void _focusSeeAll() {
-    if (widget.onSeeAll == null) return;
-    _seeAllNode.requestFocus();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _revealRailContext();
-    });
-  }
-
   void _revealFocusedCard(int index, {double horizontalAlignment = 0.48}) {
     final cardContext = _nodeFor(index).context;
     final viewportContext = _horizontalViewportKey.currentContext;
@@ -2218,7 +2182,7 @@ class _TvContentRailState extends State<_TvContentRail> {
               ),
           ],
         ),
-        SizedBox(height: _tvHomeRailGap),
+        const SizedBox(height: _tvHomeRailGap),
         SizedBox(
           height: 214,
           child: SingleChildScrollView(
@@ -2243,6 +2207,7 @@ class _TvContentRailState extends State<_TvContentRail> {
                     rank: index + 1,
                     width: 140,
                     posterHeight: 182,
+                    showRank: widget.rail.showRank,
                     focusNode: _nodeFor(index),
                     autoReveal: false,
                     onFocus: () {
@@ -2261,9 +2226,9 @@ class _TvContentRailState extends State<_TvContentRail> {
                     onArrowRight: index + 1 < widget.rail.items.length
                         ? () =>
                               _focusIndex(index + 1, horizontalAlignment: 0.84)
-                        : widget.onSeeAll != null
-                        ? _focusSeeAll
-                        : () => _focusIndex(index, horizontalAlignment: 0.84),
+                        : widget.onSeeAll ??
+                              () =>
+                                  _focusIndex(index, horizontalAlignment: 0.84),
                     onArrowUp: widget.onItemArrowUp,
                   ),
                   if (index != widget.rail.items.length - 1)
@@ -2284,12 +2249,18 @@ class _TvExpandedRail extends StatelessWidget {
     required this.onBack,
     required this.onOpenItem,
     required this.onFocusNavigation,
+    required this.backFocusNode,
+    required this.gridFocusNode,
+    required this.onRememberFocus,
   });
 
   final _TvRail rail;
   final VoidCallback onBack;
   final ValueChanged<_TvItem> onOpenItem;
   final VoidCallback onFocusNavigation;
+  final FocusNode backFocusNode;
+  final FocusNode gridFocusNode;
+  final ValueChanged<FocusNode> onRememberFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -2299,6 +2270,13 @@ class _TvExpandedRail extends StatelessWidget {
         _TvTextButton(
           icon: Icons.arrow_back_rounded,
           label: 'Back to Home',
+          focusNode: backFocusNode,
+          onFocus: () => onRememberFocus(backFocusNode),
+          onArrowLeft: onFocusNavigation,
+          onArrowDown: () {
+            onRememberFocus(gridFocusNode);
+            gridFocusNode.requestFocus();
+          },
           onPressed: onBack,
         ),
         const SizedBox(height: _tvSpacing),
@@ -2306,8 +2284,15 @@ class _TvExpandedRail extends StatelessWidget {
           title: rail.title,
           subtitle: rail.subtitle,
           items: rail.items,
+          showRank: rail.showRank,
           onOpenItem: onOpenItem,
           onFocusNavigation: onFocusNavigation,
+          firstItemFocusNode: gridFocusNode,
+          onTopRowArrowUp: () {
+            onRememberFocus(backFocusNode);
+            backFocusNode.requestFocus();
+          },
+          onRememberFocus: onRememberFocus,
         ),
       ],
     );
@@ -2329,6 +2314,8 @@ class _TvPosterGrid extends StatefulWidget {
     this.onTopRowArrowUp,
     this.onRememberFocus,
     this.onLoadMore,
+    this.loadingMore = false,
+    this.exhausted = false,
   });
 
   final String title;
@@ -2344,6 +2331,8 @@ class _TvPosterGrid extends StatefulWidget {
   final VoidCallback? onTopRowArrowUp;
   final ValueChanged<FocusNode>? onRememberFocus;
   final VoidCallback? onLoadMore;
+  final bool loadingMore;
+  final bool exhausted;
 
   @override
   State<_TvPosterGrid> createState() => _TvPosterGridState();
@@ -2351,18 +2340,27 @@ class _TvPosterGrid extends StatefulWidget {
 
 class _TvPosterGridState extends State<_TvPosterGrid> {
   final _nodes = <FocusNode>[];
+  late String _itemSignature;
 
   @override
   void initState() {
     super.initState();
+    _itemSignature = _buildItemSignature(widget.items);
     _syncNodes();
   }
 
   @override
   void didUpdateWidget(covariant _TvPosterGrid oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.items.length != widget.items.length) {
-      _syncNodes();
+    final nextSignature = _buildItemSignature(widget.items);
+    if (oldWidget.items.length != widget.items.length ||
+        nextSignature != _itemSignature) {
+      _itemSignature = nextSignature;
+      if (oldWidget.items.length == widget.items.length) {
+        _rebuildNodes();
+      } else {
+        _syncNodes();
+      }
     }
   }
 
@@ -2385,7 +2383,9 @@ class _TvPosterGridState extends State<_TvPosterGrid> {
   }
 
   void _focusIndex(int index, {double alignment = 0.38}) {
-    if (index < 0 || index >= _nodes.length) return;
+    if (index < 0 || index >= widget.items.length || index >= _nodes.length) {
+      return;
+    }
     final node = _nodeFor(index);
     widget.onRememberFocus?.call(node);
     node.requestFocus();
@@ -2402,7 +2402,12 @@ class _TvPosterGridState extends State<_TvPosterGrid> {
   void _revealIndex(int index, {double alignment = 0.38}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final context = _nodeFor(index).context;
+      if (index < 0 || index >= widget.items.length || index >= _nodes.length) {
+        return;
+      }
+      final node = _nodeFor(index);
+      if (!node.canRequestFocus) return;
+      final context = node.context;
       if (context == null) return;
       Scrollable.ensureVisible(
         context,
@@ -2493,11 +2498,73 @@ class _TvPosterGridState extends State<_TvPosterGrid> {
                             _focusIndex(index, alignment: 0.58);
                           },
                   ),
+                if (widget.loadingMore || widget.exhausted)
+                  SizedBox(
+                    width: constraints.maxWidth,
+                    child: _TvCatalogEndState(
+                      loading: widget.loadingMore,
+                      exhausted: widget.exhausted,
+                    ),
+                  ),
               ],
             );
           },
         ),
       ],
+    );
+  }
+
+  void _rebuildNodes() {
+    for (final node in _nodes) {
+      node.dispose();
+    }
+    _nodes.clear();
+    _syncNodes();
+  }
+
+  String _buildItemSignature(List<_TvItem> items) {
+    return items
+        .map((item) => '${item.type}:${item.id}:${item.title}')
+        .join('|');
+  }
+}
+
+class _TvCatalogEndState extends StatelessWidget {
+  const _TvCatalogEndState({required this.loading, required this.exhausted});
+
+  final bool loading;
+  final bool exhausted;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = loading ? 'Loading more' : 'End of catalog';
+    final icon = loading
+        ? Icons.hourglass_top_rounded
+        : Icons.check_circle_outline_rounded;
+    return Container(
+      height: 72,
+      alignment: Alignment.center,
+      margin: const EdgeInsets.only(top: _tvSpacing),
+      decoration: BoxDecoration(
+        color: const Color(0x14FFFFFF),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0x18FFFFFF)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: const Color(0xFFAAA6BD), size: 22),
+          const SizedBox(width: _tvSpacing),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xFFAAA6BD),
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

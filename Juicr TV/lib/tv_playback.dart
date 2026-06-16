@@ -6,6 +6,13 @@ const MethodChannel _tvMedia3PlayerChannel = MethodChannel(
 
 enum _TvPlaybackEngine { media3, textureExoplayer, libvlc }
 
+class _TvPlaybackCanceledException implements Exception {
+  const _TvPlaybackCanceledException();
+
+  @override
+  String toString() => 'playback_canceled';
+}
+
 class _TvPlaybackValue {
   const _TvPlaybackValue({
     this.isInitialized = false,
@@ -518,6 +525,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   bool _locked = false;
   bool _switchingSource = false;
   bool _closingPlayback = false;
+  int _playbackGeneration = 0;
   late bool _autoplayNextEpisode = widget.settings.nextEpisode;
   late bool _captionsEnabled;
   bool _autoNextQueued = false;
@@ -557,6 +565,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
 
   @override
   void dispose() {
+    _playbackGeneration++;
     _hideControlsTimer?.cancel();
     _feedbackTimer?.cancel();
     _playbackFocusNode.dispose();
@@ -571,6 +580,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _progressFocusNode.dispose();
     _controller?.dispose();
     super.dispose();
+  }
+
+  bool _isPlaybackGenerationActive(int generation) {
+    return mounted && generation == _playbackGeneration;
   }
 
   Future<void> _togglePlay() async {
@@ -739,6 +752,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   Future<_TvNativePlaybackController> _prepareNativeController(
     _PlaybackSession session,
     _TvPlaybackEngine engine,
+    int generation,
   ) async {
     var controllerSession = session;
     LibVlcHlsRelay? relay;
@@ -790,11 +804,25 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         relayProof: relayProof,
       ),
     };
+    if (!_isPlaybackGenerationActive(generation)) {
+      await relay?.stop();
+      await controller.dispose();
+      throw const _TvPlaybackCanceledException();
+    }
     setState(() => _controller = controller);
     try {
       await WidgetsBinding.instance.endOfFrame;
+      if (!_isPlaybackGenerationActive(generation)) {
+        throw const _TvPlaybackCanceledException();
+      }
       await Future<void>.delayed(const Duration(milliseconds: 16));
+      if (!_isPlaybackGenerationActive(generation)) {
+        throw const _TvPlaybackCanceledException();
+      }
       await controller.initialize().timeout(const Duration(seconds: 24));
+      if (!_isPlaybackGenerationActive(generation)) {
+        throw const _TvPlaybackCanceledException();
+      }
       await controller.setPlaybackSpeed(_playbackSpeed);
       final shouldResumeInitialEpisode =
           _season == widget.initialSeason && _episode == widget.initialEpisode;
@@ -803,17 +831,26 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
           widget.initialResumePosition < controller.value.duration) {
         await controller.seekTo(widget.initialResumePosition);
       }
+      if (!_isPlaybackGenerationActive(generation)) {
+        throw const _TvPlaybackCanceledException();
+      }
       await controller.play();
-      await _verifyStartupProof(controller, engine);
+      await _verifyStartupProof(controller, engine, generation);
+      if (!_isPlaybackGenerationActive(generation)) {
+        throw const _TvPlaybackCanceledException();
+      }
       debugPrint('Juicr TV native playback ready engine=${engine.name}');
       return controller;
     } catch (error) {
-      debugPrint(
-        'Juicr TV native playback candidate failed '
-        'engine=${engine.name} bucket=${_playbackInitBucket(error)} '
-        'errorType=${error.runtimeType} detail=${_safeTvPlaybackError(error)}',
-      );
-      if (identical(_controller, controller)) {
+      if (error is! _TvPlaybackCanceledException) {
+        debugPrint(
+          'Juicr TV native playback candidate failed '
+          'engine=${engine.name} bucket=${_playbackInitBucket(error)} '
+          'errorType=${error.runtimeType} detail=${_safeTvPlaybackError(error)}',
+        );
+      }
+      if (_isPlaybackGenerationActive(generation) &&
+          identical(_controller, controller)) {
         setState(() => _controller = null);
       }
       if (relay != null && _controller != controller) {
@@ -859,6 +896,20 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   String _safeTvPlaybackError(Object error) {
     return error
         .toString()
+        .replaceAll(
+          RegExp(
+            r'(authorization|cookie|token|api(?:-|_| )?key|x-api-key)\s*[:=]\s*[^,\s]+',
+            caseSensitive: false,
+          ),
+          r'$1=[hidden]',
+        )
+        .replaceAll(
+          RegExp(
+            r'bearer\s+[A-Za-z0-9._~+/=\-]+',
+            caseSensitive: false,
+          ),
+          'bearer [hidden]',
+        )
         .replaceAll(RegExp(r'https?://[^\s"]+'), '[hidden-url]')
         .replaceAll(RegExp(r'127\.0\.0\.1[^\s"]*'), '[localhost-hidden]')
         .replaceAll(RegExp(r'localhost[^\s"]*'), '[localhost-hidden]');
@@ -866,6 +917,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
 
   Future<_TvNativePlaybackController> _prepareWithLadder(
     _PlaybackSession session,
+    int generation,
   ) async {
     Object? lastError;
     var currentSession = session;
@@ -873,11 +925,22 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     for (var index = 0; index < engineLadder.length; index += 1) {
       final engine = engineLadder[index];
       try {
-        return await _prepareNativeController(currentSession, engine);
+        if (!_isPlaybackGenerationActive(generation)) {
+          throw const _TvPlaybackCanceledException();
+        }
+        return await _prepareNativeController(
+          currentSession,
+          engine,
+          generation,
+        );
       } catch (error) {
+        if (error is _TvPlaybackCanceledException) rethrow;
         lastError = error;
         if (index < engineLadder.length - 1) {
           final refreshed = await _freshPlaybackSessionForCurrentEpisode();
+          if (!_isPlaybackGenerationActive(generation)) {
+            throw const _TvPlaybackCanceledException();
+          }
           if (refreshed != null) {
             currentSession = refreshed;
             if (_sessionIndex >= 0 && _sessionIndex < _sessions.length) {
@@ -910,12 +973,16 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   Future<void> _verifyStartupProof(
     _TvNativePlaybackController controller,
     _TvPlaybackEngine engine,
+    int generation,
   ) async {
     final timeout = engine == _TvPlaybackEngine.libvlc
         ? const Duration(seconds: 22)
         : const Duration(seconds: 6);
     final deadline = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(deadline)) {
+      if (!_isPlaybackGenerationActive(generation)) {
+        throw const _TvPlaybackCanceledException();
+      }
       if (controller.value.errorDescription.isNotEmpty) {
         throw StateError(controller.value.errorDescription);
       }
@@ -927,6 +994,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
 
   Future<void> _openSession(int index, {required String feedbackLabel}) async {
     if (index < 0 || index >= _sessions.length || _switchingSource) return;
+    final generation = ++_playbackGeneration;
     setState(() {
       _switchingSource = true;
       _controlsVisible = true;
@@ -944,10 +1012,16 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         try {
           preparedController = await _prepareWithLadder(
             _sessions[candidateIndex],
+            generation,
           );
+          if (!_isPlaybackGenerationActive(generation)) {
+            await preparedController.dispose();
+            return;
+          }
           selectedIndex = candidateIndex;
           break;
         } catch (error) {
+          if (error is _TvPlaybackCanceledException) rethrow;
           lastError = error;
           debugPrint(
             'Juicr TV source candidate failed '
@@ -959,8 +1033,8 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       if (preparedController == null) {
         throw lastError ?? const _TvApiException('playback_unavailable');
       }
-      if (!mounted) {
-        await _controller?.dispose();
+      if (!_isPlaybackGenerationActive(generation)) {
+        await preparedController.dispose();
         return;
       }
       if (oldController != null && !identical(oldController, _controller)) {
@@ -974,7 +1048,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       });
       _playFocusNode.requestFocus();
     } catch (error) {
-      if (!mounted) return;
+      if (error is _TvPlaybackCanceledException ||
+          !_isPlaybackGenerationActive(generation)) {
+        return;
+      }
       setState(() {
         _switchingSource = false;
         _controller = oldController;
@@ -1001,6 +1078,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       _showPlayerToast('Next episode is available for series and animation.');
       return;
     }
+    final generation = ++_playbackGeneration;
     setState(() {
       _switchingSource = true;
       _controlsVisible = true;
@@ -1011,8 +1089,9 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       final sessions = await _api
           .playbackSessions(widget.item, season: _season, episode: nextEpisode)
           .timeout(const Duration(seconds: 75));
-      final controller = await _prepareWithLadder(sessions.first);
-      if (!mounted) {
+      if (!_isPlaybackGenerationActive(generation)) return;
+      final controller = await _prepareWithLadder(sessions.first, generation);
+      if (!_isPlaybackGenerationActive(generation)) {
         await controller.dispose();
         return;
       }
@@ -1029,7 +1108,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       });
       _playFocusNode.requestFocus();
     } catch (error) {
-      if (!mounted) return;
+      if (error is _TvPlaybackCanceledException ||
+          !_isPlaybackGenerationActive(generation)) {
+        return;
+      }
       setState(() {
         _switchingSource = false;
         _controller = oldController;
@@ -1294,6 +1376,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   Widget _videoSurface(_TvPlaybackValue value) {
     final controller = _controller;
     if (controller == null) return const _TvPlaybackLoadingState();
+    final aspectRatio = value.aspectRatio <= 0 ? 16 / 9 : value.aspectRatio;
     Widget withLoading(Widget child) {
       if (value.isInitialized) return child;
       return Stack(
@@ -1308,12 +1391,34 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       );
     }
 
-    return SizedBox.expand(
-      child: withLoading(
-        controller.surface(
-          aspectRatio: value.aspectRatio <= 0 ? 16 / 9 : value.aspectRatio,
-        ),
-      ),
+    Widget surface() => controller.surface(aspectRatio: aspectRatio);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final height = constraints.maxHeight;
+        if (width <= 0 || height <= 0) {
+          return const SizedBox.shrink();
+        }
+        final mode = _videoSize.toLowerCase();
+        if (mode == 'stretch' || mode == 'fill') {
+          return SizedBox.expand(child: withLoading(surface()));
+        }
+        final viewportRatio = width / height;
+        final fittedWidth = viewportRatio > aspectRatio
+            ? height * aspectRatio
+            : width;
+        final fittedHeight = viewportRatio > aspectRatio
+            ? height
+            : width / aspectRatio;
+        return Center(
+          child: SizedBox(
+            width: fittedWidth,
+            height: fittedHeight,
+            child: withLoading(surface()),
+          ),
+        );
+      },
     );
   }
 

@@ -31,6 +31,8 @@ class _TvDiscoverySurface extends StatelessWidget {
     required this.kind,
     required this.sort,
     required this.genre,
+    required this.loadingMore,
+    required this.exhausted,
     required this.onOpenItem,
     required this.onFocusNavigation,
     required this.entryFocusNode,
@@ -48,6 +50,8 @@ class _TvDiscoverySurface extends StatelessWidget {
   final _TvDiscoveryKind kind;
   final _TvDiscoverySort sort;
   final String genre;
+  final bool loadingMore;
+  final bool exhausted;
   final ValueChanged<_TvItem> onOpenItem;
   final VoidCallback onFocusNavigation;
   final FocusNode entryFocusNode;
@@ -106,6 +110,8 @@ class _TvDiscoverySurface extends StatelessWidget {
       onTopRowArrowUp: onFocusHeader,
       onRememberFocus: onRememberFocus,
       onLoadMore: onLoadMore,
+      loadingMore: loadingMore,
+      exhausted: exhausted,
     );
   }
 
@@ -193,8 +199,9 @@ class _TvLibrarySurface extends StatelessWidget {
         completedCount: completedCount,
         movieCount: likedItems.where((item) => item.type == 'movie').length,
         seriesCount: likedItems.where((item) => item.type == 'series').length,
-        animationCount:
-            likedItems.where((item) => item.type == 'animation').length,
+        animationCount: likedItems
+            .where((item) => item.type == 'animation')
+            .length,
         entryFocusNode: entryFocusNode,
         onFocusNavigation: onFocusNavigation,
         onFocusHeader: onFocusHeader,
@@ -353,7 +360,8 @@ class _TvLibraryListsSurface extends StatelessWidget {
     if (lists.isEmpty) {
       return _TvEmptyCatalogState(
         title: 'No lists yet.',
-        subtitle: 'Create a list from a title details page to organize it here.',
+        subtitle:
+            'Create a list from a title details page to organize it here.',
         height: MediaQuery.sizeOf(context).height - 210,
         verticalOffset: 42,
         focusNode: entryFocusNode,
@@ -504,21 +512,45 @@ class _TvLibraryMetricsSurface extends StatelessWidget {
               const SizedBox(height: _tvSpacing),
               Row(
                 children: [
-                  Expanded(child: _TvMetricCard(label: 'Continue', value: '$recentCount')),
+                  Expanded(
+                    child: _TvMetricCard(
+                      label: 'Continue',
+                      value: '$recentCount',
+                    ),
+                  ),
                   const SizedBox(width: _tvSpacing),
-                  Expanded(child: _TvMetricCard(label: 'Saved', value: '$savedCount')),
+                  Expanded(
+                    child: _TvMetricCard(label: 'Saved', value: '$savedCount'),
+                  ),
                   const SizedBox(width: _tvSpacing),
-                  Expanded(child: _TvMetricCard(label: 'Completed', value: '$completedCount')),
+                  Expanded(
+                    child: _TvMetricCard(
+                      label: 'Completed',
+                      value: '$completedCount',
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: _tvSpacing),
               Row(
                 children: [
-                  Expanded(child: _TvMetricCard(label: 'Movies', value: '$movieCount')),
+                  Expanded(
+                    child: _TvMetricCard(label: 'Movies', value: '$movieCount'),
+                  ),
                   const SizedBox(width: _tvSpacing),
-                  Expanded(child: _TvMetricCard(label: 'Series', value: '$seriesCount')),
+                  Expanded(
+                    child: _TvMetricCard(
+                      label: 'Series',
+                      value: '$seriesCount',
+                    ),
+                  ),
                   const SizedBox(width: _tvSpacing),
-                  Expanded(child: _TvMetricCard(label: 'Animation', value: '$animationCount')),
+                  Expanded(
+                    child: _TvMetricCard(
+                      label: 'Animation',
+                      value: '$animationCount',
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -670,7 +702,11 @@ class _TvLibraryRankingSurface extends StatelessWidget {
           ),
           child: Row(
             children: [
-              Icon(Icons.emoji_events_outlined, color: _tvAccentColor, size: 42),
+              Icon(
+                Icons.emoji_events_outlined,
+                color: _tvAccentColor,
+                size: 42,
+              ),
               const SizedBox(width: _tvSpacing),
               Expanded(
                 child: Column(
@@ -2293,7 +2329,9 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                         children: [
                           for (var index = 0; index < actions.length; index++)
                             Padding(
-                              padding: const EdgeInsets.only(bottom: _tvSpacing),
+                              padding: const EdgeInsets.only(
+                                bottom: _tvSpacing,
+                              ),
                               child: _TvSettingsLineCard(
                                 action: actions[index],
                                 autofocus: index == 0,
@@ -2644,7 +2682,9 @@ class _TvDefaultSourceDialogState extends State<_TvDefaultSourceDialog> {
                         children: [
                           for (var index = 0; index < actions.length; index++)
                             Padding(
-                              padding: const EdgeInsets.only(bottom: _tvSpacing),
+                              padding: const EdgeInsets.only(
+                                bottom: _tvSpacing,
+                              ),
                               child: _TvSettingsLineCard(
                                 action: actions[index],
                                 autofocus: index == 0,
@@ -2827,7 +2867,9 @@ class _TvUserAddOnDialogState extends State<_TvUserAddOnDialog> {
                         children: [
                           for (var index = 0; index < actions.length; index++)
                             Padding(
-                              padding: const EdgeInsets.only(bottom: _tvSpacing),
+                              padding: const EdgeInsets.only(
+                                bottom: _tvSpacing,
+                              ),
                               child: _TvSettingsLineCard(
                                 action: actions[index],
                                 autofocus: index == 0,
@@ -2985,7 +3027,9 @@ class _TvSettingsOptionDialogState extends State<_TvSettingsOptionDialog> {
                               index++
                             )
                               Padding(
-                                padding: const EdgeInsets.only(bottom: _tvSpacing),
+                                padding: const EdgeInsets.only(
+                                  bottom: _tvSpacing,
+                                ),
                                 child: _TvSettingsOptionRow(
                                   label: widget.options[index],
                                   selected:
@@ -3051,7 +3095,10 @@ class _TvSettingsOptionRow extends StatelessWidget {
           duration: _tvDuration(140),
           width: double.infinity,
           constraints: const BoxConstraints(minHeight: 58),
-          padding: const EdgeInsets.symmetric(horizontal: _tvSpacing, vertical: _tvSpacing),
+          padding: const EdgeInsets.symmetric(
+            horizontal: _tvSpacing,
+            vertical: _tvSpacing,
+          ),
           decoration: BoxDecoration(
             color: fill,
             borderRadius: BorderRadius.circular(18),
@@ -3756,6 +3803,7 @@ class _TvEditableDialogFieldState extends State<_TvEditableDialogField> {
         child: _TvFocusable(
           focusNode: _shellFocusNode,
           autoReveal: true,
+          descendantsAreFocusable: true,
           onPressed: _editing ? () {} : _beginEditing,
           onArrowUp: widget.onArrowUp,
           onArrowDown: widget.onArrowDown,
@@ -3857,7 +3905,7 @@ class _TvDetailsPage extends StatefulWidget {
   final List<TvLibraryList> libraryLists;
   final Future<void> Function(_TvItem item) onPlay;
   final Future<void> Function(_TvItem item, int season, int episode)
-      onPlayEpisode;
+  onPlayEpisode;
   final ValueChanged<_TvItem> onOpenItem;
   final ValueChanged<_TvItem> onToggleSaved;
   final Future<TvLibraryList?> Function(_TvItem item, String name) onCreateList;
@@ -3871,14 +3919,21 @@ class _TvDetailsPage extends StatefulWidget {
 
 class _TvDetailsPageState extends State<_TvDetailsPage> {
   final ScrollController _scrollController = ScrollController();
-  final FocusNode _backFocusNode = FocusNode(debugLabel: 'tv-details-page-back');
-  final FocusNode _watchFocusNode = FocusNode(debugLabel: 'tv-details-page-watch');
-  final FocusNode _episodesFocusNode =
-      FocusNode(debugLabel: 'tv-details-page-episodes');
-  final FocusNode _trailerFocusNode =
-      FocusNode(debugLabel: 'tv-details-page-trailer');
-  final FocusNode _libraryFocusNode =
-      FocusNode(debugLabel: 'tv-details-page-library');
+  final FocusNode _backFocusNode = FocusNode(
+    debugLabel: 'tv-details-page-back',
+  );
+  final FocusNode _watchFocusNode = FocusNode(
+    debugLabel: 'tv-details-page-watch',
+  );
+  final FocusNode _episodesFocusNode = FocusNode(
+    debugLabel: 'tv-details-page-episodes',
+  );
+  final FocusNode _trailerFocusNode = FocusNode(
+    debugLabel: 'tv-details-page-trailer',
+  );
+  final FocusNode _libraryFocusNode = FocusNode(
+    debugLabel: 'tv-details-page-library',
+  );
   final FocusNode _recommendationsFocusNode = FocusNode(
     debugLabel: 'tv-details-page-recommendations-first',
   );
@@ -3938,6 +3993,16 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
     );
   }
 
+  void _focusDetailsHeroNode(FocusNode node) {
+    node.requestFocus();
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.minScrollExtent,
+      duration: _tvDuration(180),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
   void _scrollDetailsLower() {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
@@ -3976,6 +4041,26 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
     }
   }
 
+  void _focusDetailsActions() {
+    _focusDetailsHeroNode(_watchFocusNode);
+  }
+
+  void _focusRecommendationsOrActions() {
+    if (_recommendationsFocusNode.context != null) {
+      _focusDetailsNode(_recommendationsFocusNode, alignment: 0.24);
+      return;
+    }
+    _focusDetailsActions();
+  }
+
+  void _focusCastOrPrevious(_TvItem item) {
+    if (item.castPeople.isNotEmpty && _castFocusNode.context != null) {
+      _focusDetailsNode(_castFocusNode, alignment: 0.32);
+      return;
+    }
+    _focusRecommendationsOrActions();
+  }
+
   void _focusAfterCast(_TvItem item) {
     if (item.directorPeople.isNotEmpty && _directorFocusNode.context != null) {
       _focusDetailsNode(_directorFocusNode, alignment: 0.32);
@@ -3986,9 +4071,9 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
 
   Future<_TvItem> _loadDetails() async {
     try {
-      final item = await _TvApi().meta(widget.item).timeout(
-            const Duration(seconds: 10),
-          );
+      final item = await _TvApi()
+          .meta(widget.item)
+          .timeout(const Duration(seconds: 10));
       if (mounted) setState(() => _details = item);
       return item;
     } catch (_) {
@@ -4062,7 +4147,9 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(content: Text('This trailer is not ready for TV yet.')),
+          const SnackBar(
+            content: Text('This trailer is not ready for TV yet.'),
+          ),
         );
       return;
     }
@@ -4152,7 +4239,9 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
         ..showSnackBar(
           SnackBar(
             content: Text(
-              selected ? 'Added to ${result.name}' : 'Removed from ${result.name}',
+              selected
+                  ? 'Added to ${result.name}'
+                  : 'Removed from ${result.name}',
             ),
           ),
         );
@@ -4171,14 +4260,16 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
       _TvTextButton(
         focusNode: _watchFocusNode,
         autofocus: true,
-        icon: _preparing ? Icons.hourglass_top_rounded : Icons.play_arrow_rounded,
+        icon: _preparing
+            ? Icons.hourglass_top_rounded
+            : Icons.play_arrow_rounded,
         label: _preparing ? 'Preparing' : 'Watch now',
         enabled: !_preparing,
         animateIcon: _preparing,
         onArrowLeft: _backFocusNode.requestFocus,
-        onArrowRight:
-            (_isSeriesLike ? _episodesFocusNode : _trailerFocusNode).requestFocus,
-        onArrowUp: _backFocusNode.requestFocus,
+        onArrowRight: (_isSeriesLike ? _episodesFocusNode : _trailerFocusNode)
+            .requestFocus,
+        onArrowUp: () => _focusDetailsHeroNode(_backFocusNode),
         onArrowDown: () => _focusFirstLowerDetails(item),
         onPressed: () => _runPreparing(() => widget.onPlay(_current)),
       ),
@@ -4190,7 +4281,7 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
           enabled: !_preparing,
           onArrowLeft: _watchFocusNode.requestFocus,
           onArrowRight: _trailerFocusNode.requestFocus,
-          onArrowUp: _backFocusNode.requestFocus,
+          onArrowUp: () => _focusDetailsHeroNode(_backFocusNode),
           onArrowDown: () => _focusFirstLowerDetails(item),
           onPressed: _showEpisodePicker,
         ),
@@ -4202,7 +4293,7 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
         onArrowLeft:
             (_isSeriesLike ? _episodesFocusNode : _watchFocusNode).requestFocus,
         onArrowRight: _libraryFocusNode.requestFocus,
-        onArrowUp: _backFocusNode.requestFocus,
+        onArrowUp: () => _focusDetailsHeroNode(_backFocusNode),
         onArrowDown: () => _focusFirstLowerDetails(item),
         onPressed: _showTrailerPicker,
       ),
@@ -4213,7 +4304,7 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
         enabled: !_preparing,
         onArrowLeft: _trailerFocusNode.requestFocus,
         onArrowRight: _libraryFocusNode.requestFocus,
-        onArrowUp: _backFocusNode.requestFocus,
+        onArrowUp: () => _focusDetailsHeroNode(_backFocusNode),
         onArrowDown: () => _focusFirstLowerDetails(item),
         onPressed: _showLibraryMenu,
       ),
@@ -4281,7 +4372,7 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
                             future: _recommendationsFuture,
                             onOpenItem: widget.onOpenItem,
                             firstFocusNode: _recommendationsFocusNode,
-                            onArrowUp: _watchFocusNode.requestFocus,
+                            onArrowUp: _focusDetailsActions,
                             onArrowDown: () => _focusAfterRecommendations(item),
                           ),
                           if (item.castPeople.isNotEmpty)
@@ -4289,10 +4380,7 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
                               title: 'Cast',
                               people: item.castPeople,
                               firstFocusNode: _castFocusNode,
-                              onArrowUp: () => _focusDetailsNode(
-                                _recommendationsFocusNode,
-                                alignment: 0.24,
-                              ),
+                              onArrowUp: _focusRecommendationsOrActions,
                               onArrowDown: () => _focusAfterCast(item),
                             ),
                           if (item.directorPeople.isNotEmpty)
@@ -4301,14 +4389,8 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
                               people: item.directorPeople,
                               firstFocusNode: _directorFocusNode,
                               onArrowUp: item.castPeople.isNotEmpty
-                                  ? () => _focusDetailsNode(
-                                      _castFocusNode,
-                                      alignment: 0.32,
-                                    )
-                                  : () => _focusDetailsNode(
-                                      _recommendationsFocusNode,
-                                      alignment: 0.24,
-                                    ),
+                                  ? () => _focusCastOrPrevious(item)
+                                  : _focusRecommendationsOrActions,
                               onArrowDown: _scrollDetailsLower,
                             ),
                           if (_isSeriesLike)
@@ -4448,7 +4530,8 @@ class _TvLibraryActionDialog extends StatelessWidget {
       values: const [_TvLibraryAction.addToList, _TvLibraryAction.toggleSaved],
       labelFor: (action) => switch (action) {
         _TvLibraryAction.addToList => 'Add to List',
-        _TvLibraryAction.toggleSaved => saved ? 'Remove from Library' : 'Save to Library',
+        _TvLibraryAction.toggleSaved =>
+          saved ? 'Remove from Library' : 'Save to Library',
       },
       iconFor: (action) => switch (action) {
         _TvLibraryAction.addToList => Icons.bookmark_add_outlined,
@@ -4552,7 +4635,8 @@ class _TvListPickerDialogState extends State<_TvListPickerDialog> {
           ? 'Create a list for this title.'
           : 'Choose one of your lists.',
       values: <Object>['__create__', ...widget.lists],
-      labelFor: (value) => value is TvLibraryList ? value.name : 'Create new list',
+      labelFor: (value) =>
+          value is TvLibraryList ? value.name : 'Create new list',
       iconFor: (value) => value is TvLibraryList
           ? widget.isItemInList(widget.item, value)
                 ? Icons.check_rounded
@@ -4720,7 +4804,10 @@ class _TvInfoChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: _tvSpacing, vertical: _tvSpacing),
+      padding: const EdgeInsets.symmetric(
+        horizontal: _tvSpacing,
+        vertical: _tvSpacing,
+      ),
       decoration: BoxDecoration(
         color: const Color(0x5531313C),
         borderRadius: BorderRadius.circular(999),
@@ -4908,7 +4995,10 @@ class _TvEpisodesSection extends StatelessWidget {
           for (final episode in episodes.take(24))
             Padding(
               padding: const EdgeInsets.only(bottom: _tvSpacing),
-              child: _TvEpisodeCard(episode: episode, onPlay: () => onPlay(episode)),
+              child: _TvEpisodeCard(
+                episode: episode,
+                onPlay: () => onPlay(episode),
+              ),
             ),
         ],
       ),
@@ -4960,7 +5050,9 @@ class _TvPosterTile extends StatelessWidget {
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(15),
                     child: item.poster == null
-                        ? DecoratedBox(decoration: BoxDecoration(color: item.color))
+                        ? DecoratedBox(
+                            decoration: BoxDecoration(color: item.color),
+                          )
                         : Image.network(item.poster!, fit: BoxFit.cover),
                   ),
                 ),
@@ -5164,7 +5256,9 @@ class _TvDetailsOverlayState extends State<_TvDetailsOverlay> {
                                   index++
                                 )
                                   Padding(
-                                    padding: const EdgeInsets.only(bottom: _tvSpacing),
+                                    padding: const EdgeInsets.only(
+                                      bottom: _tvSpacing,
+                                    ),
                                     child: SizedBox(
                                       width: double.infinity,
                                       child: _TvTextButton(
@@ -5740,7 +5834,10 @@ class _TvSeasonButton extends StatelessWidget {
         final active = focused || selected;
         return AnimatedContainer(
           duration: _tvDuration(140),
-          padding: const EdgeInsets.symmetric(horizontal: _tvSpacing, vertical: _tvSpacing),
+          padding: const EdgeInsets.symmetric(
+            horizontal: _tvSpacing,
+            vertical: _tvSpacing,
+          ),
           constraints: const BoxConstraints(minHeight: 48),
           decoration: BoxDecoration(
             color: selected
@@ -5925,6 +6022,11 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
   bool _listening = false;
   bool _editingText = false;
 
+  void _refreshSearchFocusChrome() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
@@ -5936,6 +6038,8 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
     _searchTextFocusNode
       ..canRequestFocus = false
       ..skipTraversal = true;
+    _searchBarFocusNode.addListener(_refreshSearchFocusChrome);
+    _searchTextFocusNode.addListener(_refreshSearchFocusChrome);
     _controller.addListener(() {
       setState(() => _query = _controller.text.trim());
     });
@@ -5948,6 +6052,8 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleSearchTextHardwareKey);
+    _searchBarFocusNode.removeListener(_refreshSearchFocusChrome);
+    _searchTextFocusNode.removeListener(_refreshSearchFocusChrome);
     _searchBarFocusNode.dispose();
     _searchTextFocusNode.dispose();
     _voiceFocusNode.dispose();
@@ -6402,6 +6508,9 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
                                       title: 'No TV results yet.',
                                       subtitle:
                                           'Try another title, channel, or animation name.',
+                                      focusNode: _resultsFocusNode,
+                                      onFocusNavigation: _focusSearchBar,
+                                      onFocusHeader: _focusSearchBar,
                                       height:
                                           MediaQuery.sizeOf(context).height -
                                           300,

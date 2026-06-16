@@ -495,6 +495,7 @@ class _TvHomePageState extends State<TvHomePage> {
         _dailyHeroEditorial(),
       );
       final heroItems = await _loadCuratedHeroItems(heroEditorial);
+      if (!mounted) return;
       setState(() {
         _items
           ..clear()
@@ -536,6 +537,7 @@ class _TvHomePageState extends State<TvHomePage> {
       });
       unawaited(_refreshHomeSignalRails(editorial, seedItems: all));
     } catch (error) {
+      if (!mounted) return;
       setState(() {
         _loading = false;
         _error = 'Catalog is unavailable right now. Try again shortly.';
@@ -599,46 +601,37 @@ class _TvHomePageState extends State<TvHomePage> {
       _discoverySort,
     );
     var nextPage = (_discoveryLanePages[laneKey] ?? 0) + 1;
-    _discoveryLaneLoading.add(laneKey);
+    setState(() => _discoveryLaneLoading.add(laneKey));
     try {
       final existing = <String, _TvItem>{
         for (final item in _discoveryLaneItems[laneKey] ?? const <_TvItem>[])
           '${item.type}:${item.id}': item,
       };
-      var added = 0;
-      var fetchedPages = 0;
       var exhausted = false;
-      while (mounted && fetchedPages < 3 && added == 0) {
-        final items = await _api
-            .catalog(
-              type: type,
-              fallbackType: fallbackType,
-              sort: _discoverySort.catalogSortId,
-              page: nextPage,
-              genre: _discoveryGenre,
-            )
-            .timeout(const Duration(seconds: 7));
-        fetchedPages += 1;
-        if (items.isEmpty) {
-          exhausted = true;
-          break;
-        }
-        for (final item in items) {
-          final normalized = _normalizeCatalogLane(item);
-          if (normalized.poster == null) continue;
-          final itemKey = '${normalized.type}:${normalized.id}';
-          if (existing.containsKey(itemKey)) continue;
-          existing[itemKey] = normalized;
-          added += 1;
-        }
-        nextPage += 1;
+      final items = await _api
+          .catalog(
+            type: type,
+            fallbackType: fallbackType,
+            sort: _discoverySort.catalogSortId,
+            page: nextPage,
+            genre: _discoveryGenre,
+          )
+          .timeout(const Duration(seconds: 7));
+      if (items.isEmpty) {
+        exhausted = true;
+      }
+      for (final item in items) {
+        final normalized = _normalizeCatalogLane(item);
+        if (normalized.poster == null) continue;
+        final itemKey = '${normalized.type}:${normalized.id}';
+        if (existing.containsKey(itemKey)) continue;
+        existing[itemKey] = normalized;
       }
       if (!mounted) return;
-      final lastFetchedPage = nextPage - 1;
       setState(() {
         _discoveryLanePages[laneKey] = math.max(
           _discoveryLanePages[laneKey] ?? 0,
-          lastFetchedPage,
+          nextPage,
         );
         if (exhausted) _discoveryLaneExhausted.add(laneKey);
         _discoveryLaneItems[laneKey] = existing.values.toList(growable: false);
@@ -650,7 +643,11 @@ class _TvHomePageState extends State<TvHomePage> {
         'errorType=${error.runtimeType}',
       );
     } finally {
-      _discoveryLaneLoading.remove(laneKey);
+      if (mounted) {
+        setState(() => _discoveryLaneLoading.remove(laneKey));
+      } else {
+        _discoveryLaneLoading.remove(laneKey);
+      }
     }
   }
 
@@ -1225,6 +1222,7 @@ class _TvHomePageState extends State<TvHomePage> {
       List<_TvItem> fallback = const <_TvItem>[],
       int limit = 20,
       bool preservePrimaryRank = false,
+      bool showRank = true,
     }) {
       final items = _backfilledHomeRailItems(
         primary,
@@ -1234,7 +1232,7 @@ class _TvHomePageState extends State<TvHomePage> {
         preservePrimaryRank: preservePrimaryRank,
       );
       if (items.isEmpty) return;
-      rails.add(_TvRail(title, subtitle, items));
+      rails.add(_TvRail(title, subtitle, items, showRank: showRank));
       usedKeys.addAll(items.map(_homeUsedKey));
     }
 
@@ -1318,6 +1316,7 @@ class _TvHomePageState extends State<TvHomePage> {
       primary: _upcomingPicks,
       fallback: const <_TvItem>[],
       limit: 20,
+      showRank: false,
     );
 
     if (rails.isNotEmpty) return rails;
@@ -2083,17 +2082,26 @@ class _TvHomePageState extends State<TvHomePage> {
   ) async {
     final store = _libraryStore;
     if (store == null) return null;
-    final list = await store.createLibraryList(name, initialItemKey: _itemKey(item));
+    final list = await store.createLibraryList(
+      name,
+      initialItemKey: _itemKey(item),
+    );
     if (!mounted) return list;
     setState(() => _likedItemKeys.add(_itemKey(item)));
     _scheduleAccountLibraryPush();
     return list;
   }
 
-  Future<bool> _toggleItemInLibraryList(_TvItem item, TvLibraryList list) async {
+  Future<bool> _toggleItemInLibraryList(
+    _TvItem item,
+    TvLibraryList list,
+  ) async {
     final store = _libraryStore;
     if (store == null) return false;
-    final selected = await store.toggleItemInLibraryList(list.id, _itemKey(item));
+    final selected = await store.toggleItemInLibraryList(
+      list.id,
+      _itemKey(item),
+    );
     if (!mounted) return selected;
     setState(() => _likedItemKeys.add(_itemKey(item)));
     _scheduleAccountLibraryPush();
@@ -2191,31 +2199,26 @@ class _TvHomePageState extends State<TvHomePage> {
   }
 
   Future<void> _openDiscoveryMenu() async {
-    final previousKind = _discoveryKind;
-    final previousSort = _discoverySort;
-    final previousGenre = _discoveryGenre;
-    final selection = await showDialog<_TvDiscoverySelection>(
+    var changed = false;
+    await showDialog<void>(
       context: context,
       builder: (context) => _TvDiscoveryMenuDialog(
         kind: _discoveryKind,
         sort: _discoverySort,
         genre: _discoveryGenre,
         genres: _availableDiscoveryGenres,
+        onChanged: (selection) {
+          if (!mounted) return;
+          setState(() {
+            changed = true;
+            _discoveryKind = selection.kind;
+            _discoverySort = selection.sort;
+            _discoveryGenre = selection.genre;
+          });
+        },
       ),
     );
     if (!mounted) return;
-    final changed =
-        selection != null &&
-        (selection.kind != previousKind ||
-            selection.sort != previousSort ||
-            selection.genre != previousGenre);
-    if (selection != null) {
-      setState(() {
-        _discoveryKind = selection.kind;
-        _discoverySort = selection.sort;
-        _discoveryGenre = selection.genre;
-      });
-    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (changed) {
@@ -2241,14 +2244,17 @@ class _TvHomePageState extends State<TvHomePage> {
   }
 
   Future<void> _openLibraryMenu() async {
-    final selection = await showDialog<_TvLibraryFilter>(
+    await showDialog<void>(
       context: context,
-      builder: (context) => _TvLibraryMenuDialog(filter: _libraryFilter),
+      builder: (context) => _TvLibraryMenuDialog(
+        filter: _libraryFilter,
+        onChanged: (selection) {
+          if (!mounted) return;
+          setState(() => _libraryFilter = selection);
+        },
+      ),
     );
     if (!mounted) return;
-    if (selection != null) {
-      setState(() => _libraryFilter = selection);
-    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _focusRememberedPageNode()) return;
       _focusPageEntry();
@@ -2819,6 +2825,22 @@ class _TvHomePageState extends State<TvHomePage> {
                                 discoveryKind: _discoveryKind,
                                 discoverySort: _discoverySort,
                                 discoveryGenre: _discoveryGenre,
+                                discoveryLoading: _discoveryLaneLoading
+                                    .contains(
+                                      _tvDiscoveryLaneKey(
+                                        _discoveryKind,
+                                        _discoverySort,
+                                        genre: _discoveryGenre,
+                                      ),
+                                    ),
+                                discoveryExhausted: _discoveryLaneExhausted
+                                    .contains(
+                                      _tvDiscoveryLaneKey(
+                                        _discoveryKind,
+                                        _discoverySort,
+                                        genre: _discoveryGenre,
+                                      ),
+                                    ),
                                 libraryFilter: _libraryFilter,
                                 accountSignedIn: _accountSignedIn,
                                 accountToken: _accountSession?.token ?? '',
@@ -2855,8 +2877,15 @@ class _TvHomePageState extends State<TvHomePage> {
                                     unawaited(_playTrailer(item)),
                                 onToggleLike: _toggleLike,
                                 isItemLiked: _isItemLiked,
-                                onOpenRail: (rail) =>
-                                    setState(() => _expandedRail = rail),
+                                onOpenRail: (rail) {
+                                  setState(() => _expandedRail = rail);
+                                  WidgetsBinding.instance.addPostFrameCallback((
+                                    _,
+                                  ) {
+                                    if (!mounted) return;
+                                    _focusPageEntry();
+                                  });
+                                },
                                 onBackToHome: () =>
                                     setState(() => _expandedRail = null),
                                 onFocusNavigation: () => _navigationRailKey
