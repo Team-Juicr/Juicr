@@ -1,8 +1,9 @@
 package app.juicr.flutter
 
 import android.content.Context
-import android.net.Uri
 import android.graphics.Color
+import android.graphics.Matrix
+import android.net.Uri
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -78,6 +79,10 @@ class JuicrMedia3PlayerViewFactory(
                 player.setPlaybackSpeed(call.argument<Number>("speed")?.toFloat() ?: 1f)
                 result.success(true)
             }
+            "setVideoSizeMode" -> {
+                player.setVideoSizeMode(call.argument<String>("mode").orEmpty())
+                result.success(true)
+            }
             "setVolume" -> {
                 player.setVolume(call.argument<Number>("volume")?.toFloat() ?: 1f)
                 result.success(true)
@@ -104,6 +109,7 @@ class JuicrMedia3PlayerView(
     private var initialized = false
     private var width = 0
     private var height = 0
+    private var pixelWidthHeightRatio = 1f
     private var released = false
     private var firstFrameRendered = false
     private var droppedVideoFrames = 0
@@ -111,6 +117,7 @@ class JuicrMedia3PlayerView(
     private var lastTrackSummary = "unknown"
     private var lastAudioTrackSummary = "unknown"
     private var errorBucket = "none"
+    private var videoSizeMode = "fit"
     private val liveMode = args?.get("liveMode") == true
     private val sourceClass = (args?.get("sourceClass") as? String).orEmpty()
     private val sourceType = normalizedSourceType(args?.get("type"))
@@ -174,6 +181,13 @@ class JuicrMedia3PlayerView(
         rootView.isFocusable = false
         textureView.isClickable = false
         textureView.isFocusable = false
+        textureView.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            val nextWidth = right - left
+            val nextHeight = bottom - top
+            if (nextWidth != oldRight - oldLeft || nextHeight != oldBottom - oldTop) {
+                applyVideoSizeMode()
+            }
+        }
         rootView.addView(
             textureView,
             FrameLayout.LayoutParams(
@@ -217,6 +231,12 @@ class JuicrMedia3PlayerView(
     override fun onVideoSizeChanged(videoSize: VideoSize) {
         width = videoSize.width
         height = videoSize.height
+        pixelWidthHeightRatio = if (videoSize.pixelWidthHeightRatio > 0f) {
+            videoSize.pixelWidthHeightRatio
+        } else {
+            1f
+        }
+        applyVideoSizeMode()
     }
 
     override fun onRenderedFirstFrame(eventTime: AnalyticsListener.EventTime, output: Any, renderTimeMs: Long) {
@@ -246,6 +266,33 @@ class JuicrMedia3PlayerView(
     }
 
     fun state(): Map<String, Any> {
+        if (released) {
+            return mapOf(
+                "viewId" to viewId,
+                "initialized" to false,
+                "hasError" to true,
+                "errorDescription" to "media3_view_released",
+                "errorBucket" to "released",
+                "playing" to false,
+                "buffering" to false,
+                "ended" to false,
+                "durationMs" to 0L,
+                "positionMs" to 0L,
+                "width" to 0,
+                "height" to 0,
+                "playbackState" to Player.STATE_IDLE,
+                "firstFrameRendered" to false,
+                "droppedVideoFrames" to droppedVideoFrames,
+                "bandwidthKbps" to bandwidthKbps,
+                "trackSummary" to lastTrackSummary,
+                "audioTrackSummary" to lastAudioTrackSummary,
+                "sourceClass" to sourceClass,
+                "sourceType" to sourceType.ifBlank { "unknown" },
+                "mimeType" to (sourceMimeType ?: "unknown"),
+                "headerCountBucket" to headerCountBucket,
+                "liveMode" to liveMode
+            )
+        }
         val durationMs = if (player.duration > 0) player.duration else 0L
         val positionMs = max(0L, player.currentPosition)
         return mapOf(
@@ -294,6 +341,57 @@ class JuicrMedia3PlayerView(
 
     fun setPlaybackSpeed(speed: Float) {
         player.setPlaybackSpeed(speed.coerceIn(0.25f, 3.0f))
+    }
+
+    fun setVideoSizeMode(mode: String) {
+        videoSizeMode = mode.ifBlank { "fit" }.lowercase()
+        applyVideoSizeMode()
+    }
+
+    private fun applyVideoSizeMode() {
+        textureView.post {
+            val viewWidth = textureView.width.toFloat()
+            val viewHeight = textureView.height.toFloat()
+            val videoWidth = width.toFloat() * pixelWidthHeightRatio
+            val videoHeight = height.toFloat()
+            if (
+                viewWidth <= 0f ||
+                viewHeight <= 0f ||
+                videoWidth <= 0f ||
+                videoHeight <= 0f
+            ) {
+                textureView.setTransform(Matrix())
+                return@post
+            }
+            val viewAspect = viewWidth / viewHeight
+            val sourceAspect = when (videoSizeMode) {
+                "16:9" -> 16f / 9f
+                else -> videoWidth / videoHeight
+            }
+            val matrix = Matrix()
+            val centerX = viewWidth / 2f
+            val centerY = viewHeight / 2f
+            when (videoSizeMode) {
+                "fill" -> {
+                    if (sourceAspect > viewAspect) {
+                        matrix.setScale(sourceAspect / viewAspect, 1f, centerX, centerY)
+                    } else {
+                        matrix.setScale(1f, viewAspect / sourceAspect, centerX, centerY)
+                    }
+                }
+                "stretch" -> {
+                    matrix.reset()
+                }
+                else -> {
+                    if (sourceAspect > viewAspect) {
+                        matrix.setScale(1f, viewAspect / sourceAspect, centerX, centerY)
+                    } else {
+                        matrix.setScale(sourceAspect / viewAspect, 1f, centerX, centerY)
+                    }
+                }
+            }
+            textureView.setTransform(matrix)
+        }
     }
 
     fun setVolume(volume: Float) {
@@ -475,6 +573,7 @@ class JuicrMedia3PlayerView(
                 .setRoleFlags(C.ROLE_FLAG_SUBTITLE)
             normalizedLanguage(map["language"])?.let { builder.setLanguage(it) }
             var selectionFlags = 0
+            if (map["selected"] == true) selectionFlags = selectionFlags or C.SELECTION_FLAG_DEFAULT
             if (map["isDefault"] == true) selectionFlags = selectionFlags or C.SELECTION_FLAG_DEFAULT
             if (map["isForced"] == true) selectionFlags = selectionFlags or C.SELECTION_FLAG_FORCED
             if (selectionFlags != 0) builder.setSelectionFlags(selectionFlags)

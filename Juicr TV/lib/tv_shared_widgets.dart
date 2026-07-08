@@ -1,5 +1,29 @@
 part of 'main.dart';
 
+const double _tvPosterFocusGutter = 8.0;
+const double _tvPosterFocusedScale = 1.035;
+const double _tvHomeHeroHeight = 320;
+const double _tvHomeHeroCopyLeftInset = 34;
+const double _tvHomeHeroCopyTopInset = 58;
+const double _tvHomeHeroCopyRightInset = 28;
+const double _tvEmptyStateVisualOffset = 16;
+const double _tvHomeEmptyStateHeaderSpacer = 106;
+const double _tvCompactPillHeight = 30;
+const double _tvCompactPillPadding = 9;
+const double _tvCompactPillGap = 6;
+const double _tvRankPillMinWidth = 62;
+const double _tvImdbPillMinWidth = 68;
+const double _tvCompactPillMaxWidth = 86;
+const double _tvCompactPillFontSize = 9.5;
+const double _tvHomeUpcomingPosterWidth = 136;
+const double _tvHomeUpcomingPosterHeight = 210;
+const double _tvHomeUpcomingRailHeight = 248;
+const double _tvHomeHeroBackdropOverscan = 54;
+const double _tvHomeHeroBottomBlurHeight = 24;
+const double _tvDetailsHeroHeight = 386;
+const double _tvDetailsHeroBackdropOverscan = 72;
+const double _tvDetailsHeroBottomBlurHeight = 32;
+
 class _PosterCard extends StatelessWidget {
   const _PosterCard({
     required this.item,
@@ -15,6 +39,7 @@ class _PosterCard extends StatelessWidget {
     this.onFocus,
     this.autoReveal = true,
     this.showRank = true,
+    this.badgeLabel,
   });
 
   final _TvItem item;
@@ -30,6 +55,7 @@ class _PosterCard extends StatelessWidget {
   final VoidCallback? onFocus;
   final bool autoReveal;
   final bool showRank;
+  final String? badgeLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -43,19 +69,18 @@ class _PosterCard extends StatelessWidget {
       onArrowDown: onArrowDown,
       onFocus: onFocus,
       builder: (focused) {
-        const focusGutter = 4.0;
-        final contentWidth = width - (focusGutter * 2);
-        final contentHeight = posterHeight - (focusGutter * 2);
-        final rating = item.imdbRating?.trim();
+        final contentWidth = width - (_tvPosterFocusGutter * 2);
+        final contentHeight = posterHeight - (_tvPosterFocusGutter * 2);
+        final rating = badgeLabel ?? item.imdbRating?.trim();
         return SizedBox(
           width: width,
-          height: posterHeight + 14,
+          height: posterHeight + 18,
           child: Center(
             child: AnimatedScale(
-              scale: focused ? 1.035 : 1,
+              scale: focused ? _tvPosterFocusedScale : 1,
               duration: _tvDuration(130),
               child: Padding(
-                padding: const EdgeInsets.all(focusGutter),
+                padding: const EdgeInsets.all(_tvPosterFocusGutter),
                 child: SizedBox(
                   width: contentWidth,
                   height: contentHeight,
@@ -75,14 +100,16 @@ class _PosterCard extends StatelessWidget {
                       ),
                       if (rating != null && rating.isNotEmpty)
                         Positioned(
-                          left: 8,
-                          top: 8,
-                          child: _ImdbPill(label: rating),
+                          left: 7,
+                          top: 7,
+                          child: badgeLabel == null
+                              ? _ImdbPill(label: rating)
+                              : _Pill(label: rating),
                         ),
                       if (showRank)
                         Positioned(
-                          right: 8,
-                          bottom: 8,
+                          right: 7,
+                          bottom: 7,
                           child: _Pill(label: 'Rank $rank'),
                         ),
                       Positioned(
@@ -92,7 +119,7 @@ class _PosterCard extends StatelessWidget {
                         height: contentHeight,
                         child: DecoratedBox(
                           decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(18),
+                            borderRadius: BorderRadius.circular(20),
                             border: Border.all(
                               color: focused
                                   ? _tvFocusBorder
@@ -122,10 +149,13 @@ class _ImdbPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ConstrainedBox(
-      constraints: const BoxConstraints(minWidth: 76),
+      constraints: const BoxConstraints(
+        minWidth: _tvImdbPillMinWidth,
+        maxWidth: _tvCompactPillMaxWidth,
+      ),
       child: Container(
-        height: 32,
-        padding: const EdgeInsets.symmetric(horizontal: 11),
+        height: _tvCompactPillHeight,
+        padding: const EdgeInsets.symmetric(horizontal: _tvCompactPillPadding),
         decoration: _tvPillDecoration,
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -136,19 +166,19 @@ class _ImdbPill extends StatelessWidget {
               maxLines: 1,
               style: TextStyle(
                 color: Colors.white,
-                fontSize: 10,
+                fontSize: _tvCompactPillFontSize,
                 fontWeight: FontWeight.w900,
                 letterSpacing: 0.2,
                 height: 1,
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: _tvCompactPillGap),
             Text(
               label,
               maxLines: 1,
               style: TextStyle(
                 color: _tvAccentColor,
-                fontSize: 10,
+                fontSize: _tvCompactPillFontSize,
                 fontWeight: FontWeight.w900,
                 letterSpacing: 0.2,
                 height: 1,
@@ -189,14 +219,20 @@ class _PosterArtwork extends StatelessWidget {
       child: Container(
         width: width,
         height: height,
-        color: item.color,
+        color: const Color(0xFF08090D),
         child: image == null
-            ? _TvPosterArtworkFallback(color: item.color)
+            ? const _TvPosterArtworkFallback()
             : Image.network(
                 image,
                 fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) =>
-                    _TvPosterArtworkFallback(color: item.color),
+                cacheWidth: 420,
+                filterQuality: FilterQuality.medium,
+                gaplessPlayback: true,
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return const _TvPosterArtworkFallback();
+                },
+                errorBuilder: (_, __, ___) => const _TvPosterArtworkFallback(),
               ),
       ),
     );
@@ -204,74 +240,27 @@ class _PosterArtwork extends StatelessWidget {
 }
 
 class _TvPosterArtworkFallback extends StatelessWidget {
-  const _TvPosterArtworkFallback({required this.color});
-
-  final Color color;
+  const _TvPosterArtworkFallback();
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Color.alphaBlend(const Color(0x551B2030), color),
-            const Color(0xF40A0C12),
-          ],
-        ),
-      ),
-      child: const Center(
-        child: Icon(
-          Icons.image_not_supported_rounded,
-          color: Color(0x66FFFFFF),
-          size: 34,
-        ),
-      ),
-    );
-  }
-}
-
-class _CircleArrowButton extends StatelessWidget {
-  const _CircleArrowButton({
-    required this.onPressed,
-    this.focusNode,
-    this.onArrowLeft,
-    this.onArrowDown,
-  });
-
-  final VoidCallback onPressed;
-  final FocusNode? focusNode;
-  final VoidCallback? onArrowLeft;
-  final VoidCallback? onArrowDown;
-
-  @override
-  Widget build(BuildContext context) {
-    return _TvFocusable(
-      focusNode: focusNode,
-      onPressed: onPressed,
-      onArrowLeft: onArrowLeft,
-      onArrowDown: onArrowDown,
-      builder: (focused) {
-        return AnimatedContainer(
-          duration: _tvDuration(130),
-          width: 46,
-          height: 46,
+    return const Stack(
+      fit: StackFit.expand,
+      children: [
+        _TvShimmerBox(radius: 18, alpha: 0.58),
+        DecoratedBox(
           decoration: BoxDecoration(
-            color: focused ? _tvAccentColor : const Color(0x1FFFFFFF),
-            shape: BoxShape.circle,
-            border: Border.all(
-              color: focused ? _tvFocusBorder : Colors.transparent,
-              width: 2,
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Color(0xFF101216),
+                Color(0xFF08090D),
+              ],
             ),
           ),
-          child: Icon(
-            Icons.chevron_right_rounded,
-            color: focused ? Colors.black : Colors.white,
-            size: 30,
-          ),
-        );
-      },
+        ),
+      ],
     );
   }
 }
@@ -314,7 +303,7 @@ class _FocusableIconButton extends StatelessWidget {
             width: 48,
             height: 48,
             decoration: BoxDecoration(
-              color: selected ? _tvAccentColor : const Color(0x1AFFFFFF),
+              color: selected ? _tvAccentColor : _tvTheme.cardAlt,
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
                 color: focused
@@ -327,7 +316,7 @@ class _FocusableIconButton extends StatelessWidget {
             ),
             child: Icon(
               icon,
-              color: selected ? Colors.black : const Color(0xFFDAD8E8),
+              color: selected ? Colors.black : _tvTheme.muted,
               size: 24,
             ),
           ),
@@ -351,6 +340,12 @@ class _TvTextButton extends StatelessWidget {
     this.onArrowRight,
     this.onArrowUp,
     this.onArrowDown,
+    this.minHeight = 48,
+    this.horizontalPadding = _tvSpacing,
+    this.verticalPadding = _tvSpacing,
+    this.iconSize = 22,
+    this.fontSize,
+    this.autoReveal = true,
   });
 
   final IconData icon;
@@ -365,6 +360,12 @@ class _TvTextButton extends StatelessWidget {
   final VoidCallback? onArrowRight;
   final VoidCallback? onArrowUp;
   final VoidCallback? onArrowDown;
+  final double minHeight;
+  final double horizontalPadding;
+  final double verticalPadding;
+  final double iconSize;
+  final double? fontSize;
+  final bool autoReveal;
 
   @override
   Widget build(BuildContext context) {
@@ -372,6 +373,7 @@ class _TvTextButton extends StatelessWidget {
       autofocus: autofocus,
       enabled: enabled,
       focusNode: focusNode,
+      autoReveal: autoReveal,
       onFocus: onFocus,
       onPressed: onPressed,
       onArrowLeft: onArrowLeft,
@@ -382,16 +384,16 @@ class _TvTextButton extends StatelessWidget {
         final active = focused && enabled;
         return AnimatedContainer(
           duration: _tvDuration(130),
-          constraints: const BoxConstraints(minHeight: 48),
-          padding: const EdgeInsets.symmetric(
-            horizontal: _tvSpacing,
-            vertical: _tvSpacing,
+          constraints: BoxConstraints(minHeight: minHeight),
+          padding: EdgeInsets.symmetric(
+            horizontal: horizontalPadding,
+            vertical: verticalPadding,
           ),
           decoration: BoxDecoration(
-            color: active ? _tvAccentColor : const Color(0x1FFFFFFF),
+            color: active ? _tvAccentColor : _tvTheme.valuePill,
             borderRadius: BorderRadius.circular(999),
             border: Border.all(
-              color: active ? _tvFocusBorder : const Color(0x22FFFFFF),
+              color: active ? _tvSolidFocusBorder : _tvTheme.valuePillBorder,
               width: active ? 2 : 1,
             ),
           ),
@@ -405,9 +407,10 @@ class _TvTextButton extends StatelessWidget {
                   color: active
                       ? Colors.black
                       : enabled
-                      ? Colors.white
-                      : const Color(0xFFAAA6BD),
+                      ? _tvTheme.text
+                      : _tvTheme.muted,
                   fontWeight: FontWeight.w900,
+                  fontSize: fontSize,
                 ),
               );
               return Row(
@@ -419,19 +422,19 @@ class _TvTextButton extends StatelessWidget {
                           color: active
                               ? Colors.black
                               : enabled
-                              ? Colors.white
-                              : const Color(0xFFAAA6BD),
+                              ? _tvTheme.text
+                              : _tvTheme.muted,
                         )
                       : Icon(
                           icon,
                           color: active
                               ? Colors.black
                               : enabled
-                              ? Colors.white
-                              : const Color(0xFFAAA6BD),
-                          size: 22,
+                              ? _tvTheme.text
+                              : _tvTheme.muted,
+                          size: iconSize,
                         ),
-                  const SizedBox(width: _tvSpacing),
+                  SizedBox(width: horizontalPadding * 0.55),
                   if (constraints.hasBoundedWidth)
                     Flexible(child: labelText)
                   else
@@ -514,6 +517,21 @@ class _TvFocusable extends StatefulWidget {
 class _TvFocusableState extends State<_TvFocusable> {
   bool _focused = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _focused = widget.enabled && (widget.focusNode?.hasFocus ?? false);
+  }
+
+  @override
+  void didUpdateWidget(covariant _TvFocusable oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final hasFocus = widget.enabled && (widget.focusNode?.hasFocus ?? false);
+    if (_focused != hasFocus) {
+      _focused = hasFocus;
+    }
+  }
+
   bool _activateForKey(LogicalKeyboardKey key) {
     return key == LogicalKeyboardKey.select ||
         key == LogicalKeyboardKey.enter ||
@@ -565,8 +583,18 @@ class _TvFocusableState extends State<_TvFocusable> {
       _ => null,
     };
     if (direction != null) {
-      final moved = FocusScope.of(context).focusInDirection(direction);
-      return moved ? KeyEventResult.handled : KeyEventResult.ignored;
+      var moved = false;
+      try {
+        moved = FocusScope.of(context).focusInDirection(direction);
+      } on FlutterError {
+        moved = false;
+      }
+      if (moved) return KeyEventResult.handled;
+      final currentFocus = FocusManager.instance.primaryFocus;
+      if (currentFocus?.canRequestFocus == true) {
+        currentFocus?.requestFocus();
+      }
+      return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
   }
@@ -614,29 +642,491 @@ class _TvFocusableState extends State<_TvFocusable> {
 }
 
 class _TvLoadingState extends StatelessWidget {
-  const _TvLoadingState();
+  const _TvLoadingState({required this.selectedTab});
+
+  final int selectedTab;
 
   @override
   Widget build(BuildContext context) {
-    return const SizedBox(
-      height: 260,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(),
-            SizedBox(height: _tvSpacing),
-            Text(
-              'Loading Juicr catalog...',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.w800,
+    if (selectedTab == 0) {
+      return const ClipRect(
+        child: SingleChildScrollView(
+          physics: NeverScrollableScrollPhysics(),
+          child: _TvHomeSkeletonPage(),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 32, 0, 70),
+      child: selectedTab == 1
+          ? const _TvCatalogSkeletonGrid()
+          : const _TvCatalogSkeletonPage(),
+    );
+  }
+}
+
+class _TvShimmer extends StatefulWidget {
+  const _TvShimmer({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_TvShimmer> createState() => _TvShimmerState();
+}
+
+class _TvShimmerState extends State<_TvShimmer>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1450),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_tvMotionEnabled) return widget.child;
+    final base =
+        Color.lerp(_tvTheme.background, const Color(0xFF151619), 0.86) ??
+        const Color(0xFF111214);
+    final glow = Color.lerp(base, _tvAccentColor, 0.045) ?? base;
+    final shine = Color.lerp(base, Colors.white, 0.045) ?? base;
+    return AnimatedBuilder(
+      animation: _controller,
+      child: widget.child,
+      builder: (context, child) {
+        final sweep = -1.35 + (_controller.value * 2.7);
+        return ShaderMask(
+          blendMode: BlendMode.srcATop,
+          shaderCallback: (bounds) => LinearGradient(
+            begin: Alignment(sweep, -0.8),
+            end: Alignment(sweep + 0.72, 0.85),
+            colors: [base, glow, shine, glow, base],
+            stops: const [0, 0.34, 0.5, 0.66, 1],
+          ).createShader(bounds),
+          child: child,
+        );
+      },
+    );
+  }
+}
+
+class _TvShimmerBox extends StatelessWidget {
+  const _TvShimmerBox({
+    this.width,
+    this.height,
+    this.radius = 14,
+    this.alpha = 0.72,
+  });
+
+  final double? width;
+  final double? height;
+  final double radius;
+  final double alpha;
+
+  @override
+  Widget build(BuildContext context) {
+    return _TvShimmer(
+      child: Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color:
+              (Color.lerp(_tvTheme.background, const Color(0xFF151619), 0.82) ??
+                      const Color(0xFF111214))
+                  .withValues(alpha: alpha.clamp(0.28, 0.72)),
+          borderRadius: BorderRadius.circular(radius),
+          border: Border.all(color: const Color(0x14FFFFFF)),
+        ),
+      ),
+    );
+  }
+}
+
+class _TvCatalogSkeletonPage extends StatelessWidget {
+  const _TvCatalogSkeletonPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _TvShimmerBox(width: 280, height: 38, radius: 8),
+        SizedBox(height: 36),
+        _TvShimmerBox(width: 420, height: 22, radius: 8),
+        SizedBox(height: _tvSpacing),
+        _TvCatalogSkeletonRow(),
+        SizedBox(height: 34),
+        _TvShimmerBox(width: 340, height: 22, radius: 8),
+        SizedBox(height: _tvSpacing),
+        _TvCatalogSkeletonRow(),
+      ],
+    );
+  }
+}
+
+class _TvHomeHeroArtClipper extends CustomClipper<Path> {
+  const _TvHomeHeroArtClipper();
+
+  @override
+  Path getClip(Size size) {
+    return Path()
+      ..moveTo(0, 0)
+      ..lineTo(size.width, 0)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+  }
+
+  @override
+  bool shouldReclip(covariant CustomClipper<Path> oldClipper) => false;
+}
+
+class _TvHomeHeroCurveScrim extends StatelessWidget {
+  const _TvHomeHeroCurveScrim();
+
+  @override
+  Widget build(BuildContext context) {
+    return const IgnorePointer(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
+                colors: [
+                  Color(0xB8000000),
+                  Color(0xB0000000),
+                  Color(0x70000000),
+                  Color(0x18000000),
+                  Color(0x00000000),
+                ],
+                stops: [0, 0.34, 0.50, 0.72, 1],
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TvHomeSkeletonPage extends StatelessWidget {
+  const _TvHomeSkeletonPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          height: _tvHomeHeroHeight,
+          width: double.infinity,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ColoredBox(color: Color(0xFF000000)),
+              ClipPath(
+                clipper: _TvHomeHeroArtClipper(),
+                child: _TvShimmerBox(radius: 0, alpha: 0.30),
+              ),
+              _TvHomeHeroCurveScrim(),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [
+                      Color(0xFF000000),
+                      Color(0xD6000000),
+                      Color(0x66000000),
+                      Color(0x18000000),
+                      Color(0x00000000),
+                    ],
+                    stops: [0, 0.16, 0.36, 0.62, 1],
+                  ),
+                ),
+              ),
+              Positioned(
+                left: _tvHomeHeroCopyLeftInset,
+                top: _tvHomeHeroCopyTopInset,
+                right: _tvHomeHeroCopyRightInset,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: _TvHomeHeroCopySkeleton(),
+                  ),
+                ),
+              ),
+              Positioned(
+                right: 84,
+                bottom: 26,
+                child: _TvHomeHeroDotsSkeleton(),
+              ),
+            ],
+          ),
+        ),
+        SizedBox(height: 12),
+        Padding(
+          padding: EdgeInsets.fromLTRB(30, 0, 48, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _TvShimmerBox(width: 250, height: 28, radius: 8, alpha: 0.44),
+              SizedBox(height: _tvHomeRailGap),
+              _TvHomeRailSkeletonRow(),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TvHomeHeroCopySkeleton extends StatelessWidget {
+  const _TvHomeHeroCopySkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        _TvShimmerBox(width: 156, height: 242, radius: 18, alpha: 0.38),
+        SizedBox(width: 26),
+        SizedBox(
+          width: 540,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _TvShimmerBox(width: 360, height: 92, radius: 12, alpha: 0.40),
+              SizedBox(height: _tvSpacing),
+              _TvShimmerBox(width: 500, height: 18, radius: 99, alpha: 0.34),
+              SizedBox(height: _tvSpacing),
+              _TvShimmerBox(width: 540, height: 16, radius: 99, alpha: 0.30),
+              SizedBox(height: 8),
+              _TvShimmerBox(width: 470, height: 16, radius: 99, alpha: 0.30),
+              SizedBox(height: 8),
+              _TvShimmerBox(width: 360, height: 16, radius: 99, alpha: 0.28),
+              SizedBox(height: 18),
+              Row(
+                children: [
+                  _TvShimmerBox(
+                    width: 116,
+                    height: 42,
+                    radius: 24,
+                    alpha: 0.36,
+                  ),
+                  SizedBox(width: 10),
+                  _TvShimmerBox(width: 42, height: 42, radius: 99, alpha: 0.34),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TvHomeHeroDotsSkeleton extends StatelessWidget {
+  const _TvHomeHeroDotsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _TvShimmerBox(width: 8, height: 8, radius: 99, alpha: 0.34),
+        SizedBox(width: 7),
+        _TvShimmerBox(width: 8, height: 8, radius: 99, alpha: 0.34),
+        SizedBox(width: 7),
+        _TvShimmerBox(width: 28, height: 8, radius: 99, alpha: 0.48),
+        SizedBox(width: 7),
+        _TvShimmerBox(width: 8, height: 8, radius: 99, alpha: 0.34),
+        SizedBox(width: 7),
+        _TvShimmerBox(width: 8, height: 8, radius: 99, alpha: 0.34),
+        SizedBox(width: 7),
+        _TvShimmerBox(width: 8, height: 8, radius: 99, alpha: 0.30),
+      ],
+    );
+  }
+}
+
+class _TvCatalogSkeletonGrid extends StatelessWidget {
+  const _TvCatalogSkeletonGrid();
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const columns = 6;
+        final cardWidth =
+            (constraints.maxWidth - (_tvPosterGridGap * (columns - 1))) /
+            columns;
+        return _TvCatalogSkeletonRow(
+          count: 18,
+          landscape: false,
+          cardWidth: cardWidth,
+        );
+      },
+    );
+  }
+}
+
+class _TvCatalogSkeletonRow extends StatelessWidget {
+  const _TvCatalogSkeletonRow({
+    this.count = 5,
+    this.landscape = true,
+    this.cardWidth = 220,
+  });
+
+  final int count;
+  final bool landscape;
+  final double cardWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    final height = landscape
+        ? cardWidth * _TvHomeLandscapeCard.aspectRatio
+        : cardWidth * 1.42;
+    return Wrap(
+      spacing: _tvPosterGridGap,
+      runSpacing: _tvPosterGridGap,
+      children: [
+        for (var index = 0; index < count; index++)
+          _TvCatalogSkeletonCard(
+            width: cardWidth,
+            height: height,
+            landscape: landscape,
+          ),
+      ],
+    );
+  }
+}
+
+class _TvHomeRailSkeletonRow extends StatelessWidget {
+  const _TvHomeRailSkeletonRow({this.count = 4});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: _tvPosterGridGap,
+      runSpacing: _tvPosterGridGap,
+      children: [
+        for (var index = 0; index < count; index++)
+          _TvHomeLandscapeSkeletonCard(rank: index + 1),
+      ],
+    );
+  }
+}
+
+class _TvHomeLandscapeSkeletonCard extends StatelessWidget {
+  const _TvHomeLandscapeSkeletonCard({required this.rank});
+
+  final int rank;
+
+  @override
+  Widget build(BuildContext context) {
+    const width = _TvHomeLandscapeCard._width;
+    const height = _TvHomeLandscapeCard._height;
+    return SizedBox(
+      width: width,
+      height: height + 10,
+      child: Padding(
+        padding: const EdgeInsets.all(5),
+        child: Stack(
+          children: [
+            const Positioned.fill(
+              child: _TvShimmerBox(radius: 18, alpha: 0.54),
+            ),
+            const Positioned(
+              left: 12,
+              top: 12,
+              child: _TvShimmerBox(
+                width: 72,
+                height: 28,
+                radius: 99,
+                alpha: 0.36,
+              ),
+            ),
+            const Positioned(
+              left: 14,
+              right: 72,
+              bottom: 16,
+              child: _TvShimmerBox(height: 17, radius: 6, alpha: 0.42),
+            ),
+            if (rank <= 3)
+              const Positioned(
+                right: 10,
+                bottom: 12,
+                child: _TvShimmerBox(
+                  width: 58,
+                  height: 36,
+                  radius: 16,
+                  alpha: 0.34,
+                ),
+              ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _TvCatalogSkeletonCard extends StatelessWidget {
+  const _TvCatalogSkeletonCard({
+    required this.width,
+    required this.height,
+    required this.landscape,
+  });
+
+  final double width;
+  final double height;
+  final bool landscape;
+
+  @override
+  Widget build(BuildContext context) {
+    final inset = landscape ? 5.0 : _tvPosterFocusGutter;
+    final outerHeight = landscape ? height : height + 18;
+    return SizedBox(
+      width: width,
+      height: outerHeight,
+      child: Padding(
+        padding: EdgeInsets.all(inset),
+        child: _TvShimmerBox(
+          width: width - (inset * 2),
+          height: height - (inset * 2),
+          radius: 18,
+          alpha: 0.54,
+        ),
+      ),
+    );
+  }
+}
+
+class _TvPendingHomeRailsSkeleton extends StatelessWidget {
+  const _TvPendingHomeRailsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _TvShimmerBox(width: 260, height: 28, radius: 8, alpha: 0.44),
+        SizedBox(height: _tvHomeRailGap),
+        _TvHomeRailSkeletonRow(count: 3),
+      ],
     );
   }
 }
@@ -681,10 +1171,13 @@ class _Pill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ConstrainedBox(
-      constraints: const BoxConstraints(minWidth: 70),
+      constraints: const BoxConstraints(
+        minWidth: _tvRankPillMinWidth,
+        maxWidth: _tvCompactPillMaxWidth,
+      ),
       child: Container(
-        height: 32,
-        padding: const EdgeInsets.symmetric(horizontal: 11),
+        height: _tvCompactPillHeight,
+        padding: const EdgeInsets.symmetric(horizontal: _tvCompactPillPadding),
         alignment: Alignment.center,
         decoration: _tvPillDecoration,
         child: Text(
@@ -692,7 +1185,7 @@ class _Pill extends StatelessWidget {
           maxLines: 1,
           style: const TextStyle(
             color: Colors.white,
-            fontSize: 11,
+            fontSize: 10,
             fontWeight: FontWeight.w900,
             letterSpacing: 0.2,
             height: 1,
@@ -710,15 +1203,12 @@ class _TvBackdrop extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final light = settings.theme == 'Light';
     return DecoratedBox(
       decoration: BoxDecoration(
         gradient: RadialGradient(
           center: Alignment.topRight,
           radius: 1.2,
-          colors: light
-              ? const [Color(0xFFE7FFF0), Color(0xFFF7F5FF), Color(0xFFFFFFFF)]
-              : const [Color(0xFF172B1D), Color(0xFF111024), Color(0xFF07080D)],
+          colors: _themeForSetting(settings.theme).backdropGradient,
         ),
       ),
       child: const SizedBox.expand(),

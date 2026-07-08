@@ -4,11 +4,44 @@ class _TvApi {
   final HttpClient _client = HttpClient()
     ..connectionTimeout = const Duration(seconds: 12);
 
+  static const int _catalogCacheLimit = 72;
+  static final Map<String, List<_TvItem>> _catalogCache =
+      <String, List<_TvItem>>{};
+  static final Map<String, Future<List<_TvItem>>> _catalogInFlight =
+      <String, Future<List<_TvItem>>>{};
+  static List<String>? _nativeProviderCache;
+  static DateTime? _nativeProviderCacheStoredAt;
+  static const List<String> _defaultNativeProviderOrder = <String>[
+    'vidlink',
+    'vidsrc',
+    'icefy',
+    'vidnest',
+    'xpass',
+    'moviesapi',
+    'vidking',
+    'popr',
+    'cinesu',
+    'rgshows',
+    'vixsrc',
+    'vidrock',
+    'vidzee',
+    'vidapi',
+    'xyra',
+    'videasy',
+    'vidfun',
+    'flixhq',
+    'flixer',
+    '7xstream',
+    'meowtv',
+  ];
+
   static const juicrClientHeaders = <String, String>{
     'accept': 'application/json',
     'user-agent': 'JuicrTV/0.1 AndroidTV',
     'x-juicr-client': 'tv',
     'x-juicr-client-version': '0.1',
+    'x-juicr-capabilities':
+        'playback_v2,source_pool,mirrors,playback_feedback,subtitle_v2',
   };
 
   static const juicrMediaHeaders = <String, String>{
@@ -30,11 +63,67 @@ class _TvApi {
     String? fallbackType,
   }) async {
     final safePage = page < 1 ? 1 : page;
+    final cacheKey = _catalogCacheKey(
+      type: type,
+      sort: sort,
+      page: safePage,
+      genre: genre,
+      search: search,
+      deepSearch: deepSearch,
+      preferDefaultCatalog: preferDefaultCatalog,
+      fallbackType: fallbackType,
+    );
+    final cached = _catalogCache[cacheKey];
+    if (cached != null) {
+      debugPrint(
+        'Juicr TV catalog cache hit '
+        'type=$type sort=$sort page=$safePage count=${cached.length}',
+      );
+      return cached;
+    }
+    final inFlight = _catalogInFlight[cacheKey];
+    if (inFlight != null) {
+      debugPrint(
+        'Juicr TV catalog in-flight hit '
+        'type=$type sort=$sort page=$safePage',
+      );
+      return inFlight;
+    }
+    final future = _fetchCatalogUncached(
+      type: type,
+      sort: sort,
+      page: safePage,
+      genre: genre,
+      search: search,
+      deepSearch: deepSearch,
+      preferDefaultCatalog: preferDefaultCatalog,
+      fallbackType: fallbackType,
+      cacheKey: cacheKey,
+    );
+    _catalogInFlight[cacheKey] = future;
+    try {
+      return await future;
+    } finally {
+      _catalogInFlight.remove(cacheKey);
+    }
+  }
+
+  Future<List<_TvItem>> _fetchCatalogUncached({
+    required String type,
+    required String sort,
+    required int page,
+    required String genre,
+    required String search,
+    required bool deepSearch,
+    required bool preferDefaultCatalog,
+    required String cacheKey,
+    String? fallbackType,
+  }) async {
     final uri = Uri.parse('$_apiBase/catalog').replace(
       queryParameters: {
         'type': type,
         'sort': sort,
-        'page': safePage.toString(),
+        'page': page.toString(),
         if (genre.trim().isNotEmpty &&
             genre.trim().toLowerCase() != 'all genres')
           'genre': genre.trim(),
@@ -46,7 +135,7 @@ class _TvApi {
     final json = await _getJson(uri);
     final rawItems = json['items'] ?? json['metas'];
     if (rawItems is! List) return const [];
-    return rawItems
+    final items = rawItems
         .whereType<Map>()
         .map(
           (raw) => _TvItem.fromJson(
@@ -56,6 +145,43 @@ class _TvApi {
         )
         .where((item) => item.id.isNotEmpty && item.title.isNotEmpty)
         .toList();
+    if (items.isNotEmpty) {
+      _catalogCache[cacheKey] = List<_TvItem>.unmodifiable(items);
+      _evictOldestCatalogCacheEntries();
+      debugPrint(
+        'Juicr TV catalog cache store '
+        'type=$type sort=$sort page=$page count=${items.length}',
+      );
+    }
+    return items;
+  }
+
+  String _catalogCacheKey({
+    required String type,
+    required String sort,
+    required int page,
+    required String genre,
+    required String search,
+    required bool deepSearch,
+    required bool preferDefaultCatalog,
+    String? fallbackType,
+  }) {
+    return [
+      type.trim().toLowerCase(),
+      fallbackType?.trim().toLowerCase() ?? '',
+      sort.trim().toLowerCase(),
+      page.toString(),
+      genre.trim().toLowerCase(),
+      search.trim().toLowerCase(),
+      deepSearch ? 'deep' : '',
+      preferDefaultCatalog ? 'default' : '',
+    ].join('|');
+  }
+
+  void _evictOldestCatalogCacheEntries() {
+    while (_catalogCache.length > _catalogCacheLimit) {
+      _catalogCache.remove(_catalogCache.keys.first);
+    }
   }
 
   Future<_TvHomeEditorialEdition?> homeEditorial() async {
@@ -90,7 +216,10 @@ class _TvApi {
     final uri = Uri.parse('$_apiBase/meta').replace(
       queryParameters: {
         'type': item.type == 'animation' ? 'series' : item.type,
-        'id': item.id,
+        'id': _tvResolveHostedId(item),
+        if (_tvImdbIdForHostedLookup(item) != null)
+          'imdbId': _tvImdbIdForHostedLookup(item)!,
+        if (item.tmdbId != null) 'tmdbId': item.tmdbId.toString(),
       },
     );
     final json = await _getJson(uri);
@@ -116,7 +245,7 @@ class _TvApi {
       final json = await _getJson(uri).timeout(const Duration(seconds: 10));
       final rawItems = json['items'] ?? json['metas'];
       if (rawItems is! List) return const <_TvItem>[];
-      return rawItems
+      final items = rawItems
           .whereType<Map>()
           .map(
             (raw) => _TvItem.fromJson(
@@ -124,9 +253,21 @@ class _TvApi {
               fallbackType: item.type == 'animation' ? 'movie' : item.type,
             ),
           )
-          .where((candidate) => candidate.id.isNotEmpty && candidate.poster != null)
+          .where(
+            (candidate) => candidate.id.isNotEmpty && candidate.poster != null,
+          )
           .take(12)
           .toList(growable: false);
+      return Future.wait(
+        items.map((candidate) async {
+          if ((candidate.logo ?? '').trim().isNotEmpty) return candidate;
+          try {
+            return await meta(candidate).timeout(const Duration(seconds: 4));
+          } catch (_) {
+            return candidate;
+          }
+        }),
+      );
     } catch (error) {
       debugPrint(
         'Juicr TV recommendations unavailable '
@@ -168,46 +309,143 @@ class _TvApi {
   }) async {
     final seriesLike = item.type == 'series' || item.type == 'animation';
     final path = seriesLike ? 'tv' : 'movie';
-    final id = item.tmdbId?.toString().isNotEmpty == true
-        ? item.tmdbId.toString()
-        : item.id;
+    final id = _tvResolveHostedId(item);
+    final imdbId = _tvImdbIdForHostedLookup(item);
     final uri = Uri.parse('$_apiBase/subtitles/$path').replace(
       queryParameters: {
         'id': id,
-        'imdbId': item.id,
+        if (imdbId != null) 'imdbId': imdbId,
         if (item.tmdbId != null) 'tmdbId': item.tmdbId.toString(),
         if (seriesLike) 'season': season.toString(),
         if (seriesLike) 'episode': episode.toString(),
-        'languages': 'en',
+        'languages': 'en,es,fr,de,pt',
       },
     );
     final json = await _getJson(uri).timeout(const Duration(seconds: 8));
     final rawSubtitles = json['subtitles'] ?? json['items'];
     if (rawSubtitles is! List) return const <_TvSubtitle>[];
     final seen = <String>{};
-    return [
-          for (final raw in rawSubtitles.whereType<Map>())
-            _TvSubtitle.fromJson(Map<String, dynamic>.from(raw)),
-        ]
-        .where((subtitle) {
-          if (subtitle.url.isEmpty || !subtitle.url.startsWith('https://')) {
-            return false;
+    final subtitles = [
+      for (final raw in rawSubtitles.whereType<Map>())
+        _TvSubtitle.fromJson(Map<String, dynamic>.from(raw)),
+    ].where((subtitle) {
+      if (subtitle.url.isEmpty) return false;
+      return seen.add(
+        '${subtitle.language}|${subtitle.label}|${subtitle.url}',
+      );
+    }).toList(growable: false);
+    debugPrint(
+      'Juicr TV subtitle lookup ok '
+      'type=$path idBucket=${id.isEmpty ? 'missing' : 'present'} '
+      'imdbLinked=${imdbId != null} tmdbLinked=${item.tmdbId != null} '
+      'count=${subtitles.length}',
+    );
+    return subtitles;
+  }
+
+  Future<List<_TvSubtitle>> addOnSubtitles(
+    List<_TvUserAddOn> addOns,
+    _TvItem item, {
+    int season = 1,
+    int episode = 1,
+  }) async {
+    final activeAddOns = addOns.where((addOn) => addOn.enabled).toList();
+    if (activeAddOns.isEmpty) {
+      debugPrint('Juicr TV add-on subtitle lookup skipped enabled=0');
+      return const <_TvSubtitle>[];
+    }
+    final seriesLike = item.type == 'series' || item.type == 'animation';
+    final type = seriesLike ? 'series' : 'movie';
+    final ids = _tvSubtitleAddOnIdsForItem(
+      item,
+      season: seriesLike ? season : null,
+      episode: seriesLike ? episode : null,
+    );
+    if (ids.isEmpty) {
+      debugPrint(
+        'Juicr TV add-on subtitle lookup skipped '
+        'enabled=${activeAddOns.length} ids=0',
+      );
+      return const <_TvSubtitle>[];
+    }
+    debugPrint(
+      'Juicr TV add-on subtitle lookup start '
+      'enabled=${activeAddOns.length} ids=${ids.length} type=$type',
+    );
+    final subtitles = <_TvSubtitle>[];
+    for (final addOn in activeAddOns) {
+      try {
+        final manifest = await _getJson(
+          Uri.parse(addOn.manifest),
+        ).timeout(const Duration(seconds: 8));
+        final supportsPlural = _tvManifestSupportsResource(
+          manifest,
+          'subtitles',
+        );
+        final supportsSingular = _tvManifestSupportsResource(
+          manifest,
+          'subtitle',
+        );
+        if (!supportsPlural && !supportsSingular) continue;
+        final resources = <String>[
+          if (supportsPlural) 'subtitles',
+          if (supportsSingular) 'subtitle',
+        ];
+        for (final id in ids) {
+          var foundForAddOn = false;
+          for (final resource in resources) {
+            for (final uri in _tvAddOnResourceUris(
+              addOn.manifest,
+              resource: resource,
+              type: type,
+              id: id,
+            )) {
+              try {
+                final json = await _getJson(
+                  uri,
+                ).timeout(const Duration(seconds: 10));
+                final parsed = _tvSubtitlesFromJson(
+                  json['subtitles'] ?? json['items'],
+                );
+                if (parsed.isEmpty) continue;
+                subtitles.addAll(parsed);
+                foundForAddOn = true;
+                break;
+              } catch (_) {
+                continue;
+              }
+            }
+            if (foundForAddOn) break;
           }
-          return seen.add(
-            '${subtitle.language}|${subtitle.label}|${subtitle.url}',
-          );
-        })
-        .toList(growable: false);
+          if (foundForAddOn) break;
+        }
+      } catch (_) {
+        continue;
+      }
+    }
+    final deduped = _tvDedupeSubtitles(subtitles);
+    debugPrint(
+      'Juicr TV add-on subtitle lookup ok '
+      'enabled=${activeAddOns.length} ids=${ids.length} count=${deduped.length}',
+    );
+    return deduped;
   }
 
   Future<String> subtitleText(_TvSubtitle subtitle) async {
     final request = await _client.getUrl(Uri.parse(subtitle.url));
-    _applyJuicrHeaders(request);
     final response = await request.close().timeout(const Duration(seconds: 8));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw const _TvApiException('subtitle_unavailable');
     }
-    return response.transform(utf8.decoder).join();
+    final bytes = await response.expand((chunk) => chunk).toList();
+    debugPrint(
+      'Juicr TV subtitle fetch '
+      'status=${response.statusCode} bytes=${bytes.length} '
+      'type=${response.headers.contentType?.primaryType ?? 'unknown'}/'
+      '${response.headers.contentType?.subType ?? 'unknown'} '
+      'encoding=${response.headers.value(HttpHeaders.contentEncodingHeader) ?? 'identity'}',
+    );
+    return utf8.decode(bytes, allowMalformed: true);
   }
 
   Future<List<_PlaybackSession>> playbackSessions(
@@ -215,24 +453,57 @@ class _TvApi {
     int season = 1,
     int episode = 1,
   }) async {
+    final requestKind = tvPlaybackRequestKindForItemType(item.type);
+    Future<_PlaybackSession?>? serverFallbackFuture;
+    if (requestKind != TvPlaybackRequestKind.live) {
+      serverFallbackFuture = _serverPlaybackSession(
+        item,
+        season: season,
+        episode: episode,
+      ).then<_PlaybackSession?>((session) => session).catchError((error) {
+        debugPrint(
+          'Juicr TV server playback fallback unavailable '
+          'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+        );
+        return null;
+      });
+    }
     final nativeSessions = await _nativePlaybackSessions(
       item,
       season: season,
       episode: episode,
     );
-    if (nativeSessions.isNotEmpty) {
-      return nativeSessions;
+    final sessions = <_PlaybackSession>[...nativeSessions];
+    if (requestKind == TvPlaybackRequestKind.live) {
+      if (sessions.isNotEmpty) return sessions;
+      throw const _TvApiException('live_tv_playback_unavailable');
     }
-    final session = await _serverPlaybackSession(
-      item,
-      season: season,
-      episode: episode,
-    );
-    final sessions = <_PlaybackSession>[session];
+    final fallbackWait = sessions.isEmpty
+        ? serverFallbackFuture!
+        : serverFallbackFuture!.timeout(
+            const Duration(seconds: 2),
+            onTimeout: () => null,
+          );
+    final session = await fallbackWait;
+    if (session != null) {
+      _appendUniquePlaybackSession(sessions, session);
+    }
     if (sessions.isNotEmpty) {
       return sessions;
     }
     throw const _TvApiException('no_tv_safe_source');
+  }
+
+  void _appendUniquePlaybackSession(
+    List<_PlaybackSession> sessions,
+    _PlaybackSession session,
+  ) {
+    final mediaUrl = session.mediaUrl.trim();
+    if (mediaUrl.isEmpty) return;
+    final duplicate = sessions.any(
+      (candidate) => candidate.mediaUrl.trim() == mediaUrl,
+    );
+    if (!duplicate) sessions.add(session);
   }
 
   Future<List<_PlaybackSession>> _nativePlaybackSessions(
@@ -241,32 +512,143 @@ class _TvApi {
     required int episode,
   }) async {
     final requestKind = tvPlaybackRequestKindForItemType(item.type);
-    if (requestKind.apiValue == 'live_tv') {
-      return const <_PlaybackSession>[];
+    if (requestKind == TvPlaybackRequestKind.live) {
+      return _liveTvPlaybackSessions(item);
     }
     final id = item.tmdbId?.toString().isNotEmpty == true
         ? item.tmdbId.toString()
         : item.id;
+    final providerIds = await _nativeProviderIds();
+    final sessions = <_PlaybackSession>[];
+    final providerResults = providerIds.isEmpty
+        ? <List<_PlaybackSession>>[
+            await _nativePlaybackSessionsForProvider(
+              item,
+              id: id,
+              requestKind: requestKind,
+              season: season,
+              episode: episode,
+              timeout: const Duration(seconds: 20),
+            ),
+          ]
+        : await _nativePlaybackSessionsFromProviders(
+            item,
+            id: id,
+            providerIds: providerIds.take(8).toList(growable: false),
+            requestKind: requestKind,
+            season: season,
+            episode: episode,
+          );
+    for (final providerSessions in providerResults) {
+      for (final session in providerSessions) {
+        _appendUniquePlaybackSession(sessions, session);
+      }
+      if (sessions.length >= 8) break;
+    }
+    debugPrint('Juicr TV native playback candidates count=${sessions.length}');
+    return sessions.take(8).toList(growable: false);
+  }
+
+  Future<List<List<_PlaybackSession>>> _nativePlaybackSessionsFromProviders(
+    _TvItem item, {
+    required String id,
+    required List<String> providerIds,
+    required TvPlaybackRequestKind requestKind,
+    required int season,
+    required int episode,
+  }) async {
+    Future<List<_PlaybackSession>> guarded(
+      Future<List<_PlaybackSession>> future,
+    ) {
+      return future.catchError((error) {
+        debugPrint(
+          'Juicr TV native playback unavailable '
+          'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+        );
+        return const <_PlaybackSession>[];
+      });
+    }
+
+    final futures = <Future<List<_PlaybackSession>>>[
+      for (final providerId in providerIds)
+        guarded(
+          _nativePlaybackSessionsForProvider(
+            item,
+            id: id,
+            providerId: providerId,
+            requestKind: requestKind,
+            season: season,
+            episode: episode,
+          ),
+        ),
+      guarded(
+        _nativePlaybackSessionsForProvider(
+          item,
+          id: id,
+          requestKind: requestKind,
+          season: season,
+          episode: episode,
+          timeout: const Duration(seconds: 20),
+        ),
+      ),
+    ];
+    final results = <List<_PlaybackSession>>[];
+    final stream = Stream<List<_PlaybackSession>>.fromFutures(futures);
+    try {
+      await for (final providerSessions in stream.timeout(
+        const Duration(seconds: 28),
+        onTimeout: (sink) => sink.close(),
+      )) {
+        if (providerSessions.isEmpty) continue;
+        results.add(providerSessions);
+        final count = results.fold<int>(
+          0,
+          (total, sessions) => total + sessions.length,
+        );
+        if (count >= 8) break;
+      }
+    } catch (error) {
+      debugPrint(
+        'Juicr TV native provider scan stopped '
+        'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+      );
+    }
+    return results;
+  }
+
+  Future<List<_PlaybackSession>> _nativePlaybackSessionsForProvider(
+    _TvItem item, {
+    required String id,
+    String? providerId,
+    required TvPlaybackRequestKind requestKind,
+    required int season,
+    required int episode,
+    Duration timeout = const Duration(seconds: 16),
+  }) async {
     final query = <String, String>{
       'id': id,
       'title': item.title,
+      'mediaType': _resolverMediaTypeForItem(item),
+      if ((providerId ?? '').trim().isNotEmpty) 'provider': providerId!.trim(),
       if ((item.year ?? '').isNotEmpty) 'year': item.year!,
       if (requestKind.includesEpisode) 'season': season.toString(),
       if (requestKind.includesEpisode) 'episode': episode.toString(),
     };
-    final endpoint = requestKind.includesEpisode
-        ? 'resolve/tv'
-        : 'resolve/movie';
+    final endpoint =
+        requestKind.includesEpisode ? 'resolve/tv' : 'resolve/movie';
     try {
       final json = await _getJson(
         Uri.parse('$_apiBase/$endpoint').replace(queryParameters: query),
-      ).timeout(const Duration(seconds: 45));
+      ).timeout(timeout);
       final rawSources = json['sources'];
       if (rawSources is! List) return const <_PlaybackSession>[];
       final sessions = <_PlaybackSession>[];
       for (final rawSource in rawSources.whereType<Map>()) {
         final source = Map<String, dynamic>.from(rawSource);
-        final session = _playbackSessionFromNativeSource(source);
+        final session = _playbackSessionFromNativeSource(
+          source,
+          fallbackProviderId: providerId,
+        );
         if (session != null) sessions.add(session);
       }
       return sessions.take(8).toList(growable: false);
@@ -279,12 +661,93 @@ class _TvApi {
     }
   }
 
+  Future<List<_PlaybackSession>> _liveTvPlaybackSessions(_TvItem item) async {
+    final query = <String, String>{
+      'id': item.id,
+      'title': item.title,
+      'mediaType': _resolverMediaTypeForItem(item),
+    };
+    try {
+      final json = await _getJson(
+        Uri.parse('$_apiBase/resolve/live-tv').replace(queryParameters: query),
+      ).timeout(const Duration(seconds: 24));
+      final rawSources = json['sources'];
+      if (rawSources is! List) return const <_PlaybackSession>[];
+      final sessions = <_PlaybackSession>[];
+      for (final rawSource in rawSources.whereType<Map>()) {
+        final source = Map<String, dynamic>.from(rawSource);
+        final session = _playbackSessionFromNativeSource(source);
+        if (session != null) sessions.add(session);
+      }
+      return sessions.take(8).toList(growable: false);
+    } catch (error) {
+      debugPrint(
+        'Juicr TV live playback unavailable '
+        'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+      );
+      return const <_PlaybackSession>[];
+    }
+  }
+
+  String _resolverMediaTypeForItem(_TvItem item) {
+    final type = _normalizeType(item.type);
+    return switch (type) {
+      'series' => 'series',
+      'animation' => 'animation',
+      'live' || 'live_tv' || 'livetv' || 'channel' => 'live_tv',
+      _ => 'movie',
+    };
+  }
+
+  Future<List<String>> _nativeProviderIds() async {
+    final cached = _nativeProviderCache;
+    final cachedAt = _nativeProviderCacheStoredAt;
+    if (cached != null &&
+        cachedAt != null &&
+        DateTime.now().difference(cachedAt) < const Duration(minutes: 15)) {
+      return cached;
+    }
+    try {
+      final json = await _getJson(
+        Uri.parse('$_apiBase/config'),
+      ).timeout(const Duration(seconds: 12));
+      final providers = json['providers'];
+      if (providers is! List) return _defaultNativeProviderOrder;
+      final ids = <String>[];
+      for (final raw in providers.whereType<Map>()) {
+        if (raw['enabled'] == false) continue;
+        final id = (raw['id'] ?? raw['provider'] ?? '').toString().trim();
+        if (id.isEmpty || ids.contains(id)) continue;
+        ids.add(id);
+      }
+      final orderedIds = ids.isEmpty
+          ? _defaultNativeProviderOrder
+          : [
+              for (final id in _defaultNativeProviderOrder)
+                if (ids.contains(id)) id,
+              for (final id in ids)
+                if (!_defaultNativeProviderOrder.contains(id)) id,
+            ];
+      _nativeProviderCache = List<String>.unmodifiable(orderedIds);
+      _nativeProviderCacheStoredAt = DateTime.now();
+      return orderedIds;
+    } catch (error) {
+      debugPrint(
+        'Juicr TV provider config skipped '
+        'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+      );
+      return _defaultNativeProviderOrder;
+    }
+  }
+
   _PlaybackSession? _playbackSessionFromNativeSource(
-    Map<String, dynamic> source,
-  ) {
+    Map<String, dynamic> source, {
+    String? fallbackProviderId,
+  }) {
     if (source['drm'] != null) return null;
     final url = (source['url'] ?? '').toString().trim();
-    if (!url.startsWith('https://')) return null;
+    final scheme = Uri.tryParse(url)?.scheme.toLowerCase();
+    if (scheme != 'http' && scheme != 'https') return null;
     final sourceClass = (source['sourceClass'] ?? '').toString().toLowerCase();
     if (sourceClass.isNotEmpty &&
         sourceClass != 'direct' &&
@@ -297,7 +760,40 @@ class _TvApi {
       mediaUrl: url,
       sourceType: sourceType,
       httpHeaders: _stringMap(source['headers']),
+      providerId: _safeTvProviderId(source['provider'] ?? fallbackProviderId),
+      quality: _displayTvQuality(source['quality']),
+      sourceClass: sourceClass,
+      subtitles: _tvSubtitlesFromJson(source['subtitles']),
     );
+  }
+
+  String _safeTvProviderId(dynamic value) {
+    final raw = (value ?? '').toString().trim().toLowerCase();
+    if (raw.isEmpty) return '';
+    return raw.replaceAll(RegExp(r'[^a-z0-9_-]+'), '').trim();
+  }
+
+  String _displayTvQuality(dynamic value) {
+    final raw = (value ?? '').toString().trim();
+    if (raw.isEmpty) return 'Auto';
+    final lower = raw.toLowerCase();
+    if (lower == 'auto' || lower == 'unknown' || lower == 'adaptive') {
+      return 'Auto';
+    }
+    final resolution = RegExp(
+      r'\b(2160|1440|1080|720|576|480|360|240)\s*p\b',
+      caseSensitive: false,
+    ).firstMatch(raw);
+    if (resolution != null) return '${resolution.group(1)}P';
+    final named = switch (lower.replaceAll(RegExp(r'[\s_-]+'), '')) {
+      '4k' || 'uhd' => '2160P',
+      '2k' || 'qhd' => '1440P',
+      'fhd' || 'fullhd' => '1080P',
+      'hd' => '720P',
+      'sd' => '480P',
+      _ => '',
+    };
+    return named.isEmpty ? 'Auto' : named;
   }
 
   String _nativeSourceType(Map<String, dynamic> source, String url) {
@@ -344,7 +840,7 @@ class _TvApi {
     final json = await _postJson(
       Uri.parse('$_apiBase/web/playback/session'),
       body,
-    );
+    ).timeout(const Duration(seconds: 20));
     if (json['ok'] != true ||
         json['mediaUrl'] == null ||
         json['rawSourceExposed'] == true) {
@@ -356,6 +852,8 @@ class _TvApi {
       mediaUrl: json['mediaUrl'].toString(),
       sourceType: (json['sourceType'] ?? '').toString(),
       httpHeaders: juicrMediaHeaders,
+      quality: _displayTvQuality(json['quality']),
+      subtitles: _tvSubtitlesFromJson(json['subtitles']),
     );
   }
 
@@ -422,18 +920,90 @@ class _TvApi {
   }) async {
     final cleanToken = token.trim();
     if (cleanToken.isEmpty) return;
-    await _postJson(Uri.parse('$_apiBase/account/watch-metrics'), {
-      'activeWatchSeconds': math.max(0, activeWatchSeconds),
-    }, bearerToken: cleanToken).timeout(const Duration(seconds: 8));
+    await _postJson(
+            Uri.parse('$_apiBase/account/watch-metrics'),
+            {
+              'activeWatchSeconds': math.max(0, activeWatchSeconds),
+            },
+            bearerToken: cleanToken)
+        .timeout(const Duration(seconds: 8));
+  }
+
+  Future<int?> fetchAccountActiveWatchSeconds(String token) async {
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty) return null;
+    final json = await _getJson(
+      Uri.parse('$_apiBase/account/watch-metrics'),
+      bearerToken: cleanToken,
+    ).timeout(const Duration(seconds: 8));
+    return _intFromJson(json['activeWatchSeconds']);
+  }
+
+  Future<TvAccountProfile> updateAccountProfile({
+    required String token,
+    required String username,
+    required String emoji,
+    required bool leaderboardOptIn,
+  }) async {
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty) {
+      throw const _TvApiException('auth_required');
+    }
+    final json = await _postJson(
+            Uri.parse('$_apiBase/account/profile'),
+            {
+              'username': username.trim(),
+              'emoji': emoji.trim(),
+              'leaderboardOptIn': leaderboardOptIn,
+            },
+            bearerToken: cleanToken)
+        .timeout(const Duration(seconds: 12));
+    final user = json['user'];
+    if (user is! Map) {
+      throw const _TvApiException('account_profile_incomplete');
+    }
+    final profile = TvAccountProfile.fromJson(Map<String, Object?>.from(user));
+    if (!profile.isUsable) {
+      throw const _TvApiException('account_profile_incomplete');
+    }
+    return profile;
+  }
+
+  Future<void> deleteAccount(String token) async {
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty) {
+      throw const _TvApiException('auth_required');
+    }
+    await _postJson(
+      Uri.parse('$_apiBase/account/delete'),
+      const <String, Object?>{},
+      bearerToken: cleanToken,
+    ).timeout(const Duration(seconds: 12));
+  }
+
+  Future<String> sendDiagnosticReport(String report) async {
+    final json =
+        await _postJson(Uri.parse('$_apiBase/ops/diagnostics/report'), {
+      'appVersion': '$_tvAppVersion+$_tvAppBuildNumber',
+      'platform': 'android-tv',
+      'report': report,
+    }).timeout(const Duration(seconds: 12));
+    final ticketId = (json['ticketId'] ?? '').toString().trim();
+    if (ticketId.isEmpty) {
+      throw const _TvApiException('diagnostic_ticket_missing');
+    }
+    return ticketId;
   }
 
   Future<_TvLeaderboardResult> fetchLeaderboard({
     required String scope,
     required String token,
   }) async {
-    final uri = Uri.parse(
-      '$_apiBase/leaderboard',
-    ).replace(queryParameters: {'scope': scope.trim().isEmpty ? 'weekly' : scope.trim()});
+    final uri = Uri.parse('$_apiBase/leaderboard').replace(
+      queryParameters: {
+        'scope': scope.trim().isEmpty ? 'weekly' : scope.trim(),
+      },
+    );
     final json = await _getJson(
       uri,
       bearerToken: token.trim().isEmpty ? null : token.trim(),
@@ -467,10 +1037,15 @@ class _TvApi {
         snapshot: null,
       );
     }
-    final json = await _postJson(Uri.parse('$_apiBase/account/library-sync'), {
-      'snapshot': snapshot,
-      if (baseRevision.trim().isNotEmpty) 'baseRevision': baseRevision.trim(),
-    }, bearerToken: cleanToken).timeout(const Duration(seconds: 8));
+    final json = await _postJson(
+            Uri.parse('$_apiBase/account/library-sync'),
+            {
+              'snapshot': snapshot,
+              if (baseRevision.trim().isNotEmpty)
+                'baseRevision': baseRevision.trim(),
+            },
+            bearerToken: cleanToken)
+        .timeout(const Duration(seconds: 8));
     return _TvAccountLibraryPushResult.fromJson(json);
   }
 
@@ -540,11 +1115,15 @@ class _TvItem {
     required this.color,
     this.poster,
     this.background,
+    this.logo,
     this.year,
     this.tmdbId,
+    this.imdbId,
     this.genres = const [],
     this.description,
     this.imdbRating,
+    this.releaseDate,
+    this.isUpcoming = false,
     this.runtime,
     this.directorPeople = const [],
     this.castPeople = const [],
@@ -557,7 +1136,7 @@ class _TvItem {
   }) {
     final id = (json['id'] ?? '').toString();
     final title = (json['name'] ?? json['title'] ?? 'Untitled').toString();
-    final genres = _stringList(json['genres']);
+    final genres = _genreList(json);
     return _TvItem(
       id: id,
       type: _normalizeItemType(json['type'], fallbackType),
@@ -575,14 +1154,37 @@ class _TvItem {
             json['fanart'] ??
             json['landscape'],
       ),
+      logo: _logoImage(
+        json['logo'] ??
+            json['logoUrl'] ??
+            json['clearLogo'] ??
+            json['clear_logo'] ??
+            json['titleLogo'] ??
+            json['title_logo'] ??
+            json['titleArt'] ??
+            json['title_art'] ??
+            json['logos'] ??
+            json['images'] ??
+            json['artwork'],
+      ),
       year: _year(json),
       tmdbId: int.tryParse(
         (json['tmdb_id'] ?? json['moviedb_id'] ?? json['tmdbId'] ?? '')
             .toString(),
       ),
+      imdbId: _imdbIdFromJson(json),
       genres: genres,
       description: (json['description'] ?? json['overview'])?.toString(),
       imdbRating: (json['imdbRating'] ?? json['rating'])?.toString(),
+      releaseDate: _releaseDateFromJson(json),
+      isUpcoming: json['isUpcoming'] == true ||
+          _isUpcomingCatalogValue(
+            json['sort'] ?? json['catalogSort'] ?? json['category'],
+          ) ||
+          (json['releaseStatus'] ?? json['status'])
+              .toString()
+              .toLowerCase()
+              .contains('upcoming'),
       runtime: (json['runtime'] ?? json['runtimeLabel'])?.toString(),
       directorPeople: _TvPersonCredit.fromList(json['director']),
       castPeople: _TvPersonCredit.fromList(json['cast']),
@@ -596,11 +1198,15 @@ class _TvItem {
   final Color color;
   final String? poster;
   final String? background;
+  final String? logo;
   final String? year;
   final int? tmdbId;
+  final String? imdbId;
   final List<String> genres;
   final String? description;
   final String? imdbRating;
+  final String? releaseDate;
+  final bool isUpcoming;
   final String? runtime;
   final List<_TvPersonCredit> directorPeople;
   final List<_TvPersonCredit> castPeople;
@@ -624,11 +1230,15 @@ class _TvItem {
       color: color,
       poster: other.poster ?? poster,
       background: other.background ?? background,
+      logo: other.logo ?? logo,
       year: other.year ?? year,
       tmdbId: other.tmdbId ?? tmdbId,
+      imdbId: other.imdbId ?? imdbId,
       genres: other.genres.isNotEmpty ? other.genres : genres,
       description: other.description ?? description,
       imdbRating: other.imdbRating ?? imdbRating,
+      releaseDate: other.releaseDate ?? releaseDate,
+      isUpcoming: other.isUpcoming || isUpcoming,
       runtime: other.runtime ?? runtime,
       directorPeople: other.directorPeople.isNotEmpty
           ? other.directorPeople
@@ -646,17 +1256,57 @@ class _TvItem {
       color: color,
       poster: poster,
       background: background,
+      logo: logo,
       year: year,
       tmdbId: tmdbId,
+      imdbId: imdbId,
       genres: genres,
       description: description,
       imdbRating: imdbRating,
+      releaseDate: releaseDate,
+      isUpcoming: isUpcoming,
       runtime: runtime,
       directorPeople: directorPeople,
       castPeople: castPeople,
       episodes: episodes,
     );
   }
+}
+
+String _tvResolveHostedId(_TvItem item) {
+  final tmdbId = item.tmdbId;
+  if (tmdbId != null) return tmdbId.toString();
+  final raw = item.id.trim();
+  final tmdbMatch = RegExp(r'^tmdb:(\d+)$', caseSensitive: false)
+      .firstMatch(raw);
+  if (tmdbMatch != null) return tmdbMatch.group(1)!;
+  return raw;
+}
+
+String? _tvImdbIdForHostedLookup(_TvItem item) {
+  final itemImdbId = item.imdbId?.trim();
+  if (itemImdbId != null &&
+      RegExp(r'^tt\d{5,12}$', caseSensitive: false).hasMatch(itemImdbId)) {
+    return itemImdbId;
+  }
+  final raw = item.id.trim();
+  if (RegExp(r'^tt\d{5,12}$', caseSensitive: false).hasMatch(raw)) {
+    return raw;
+  }
+  return null;
+}
+
+String? _imdbIdFromJson(Map<String, dynamic> json) {
+  final direct = (json['imdb_id'] ?? json['imdbId'])?.toString().trim();
+  if (direct != null && direct.isNotEmpty) return direct;
+  final externalIds = json['external_ids'] ?? json['externalIds'];
+  if (externalIds is Map) {
+    final nested = (externalIds['imdb_id'] ?? externalIds['imdbId'])
+        ?.toString()
+        .trim();
+    if (nested != null && nested.isNotEmpty) return nested;
+  }
+  return null;
 }
 
 class _TvPersonCredit {
@@ -666,7 +1316,9 @@ class _TvPersonCredit {
     if (value is Map) {
       return _TvPersonCredit(
         name: (value['name'] ?? '').toString().trim(),
-        image: _image(value['image'] ?? value['profile'] ?? value['profileUrl']),
+        image: _image(
+          value['image'] ?? value['profile'] ?? value['profileUrl'],
+        ),
       );
     }
     return _TvPersonCredit(name: value.toString().trim());
@@ -695,19 +1347,16 @@ class _TvEpisode {
 
   factory _TvEpisode.fromJson(Map<String, dynamic> json) {
     final fullId = (json['id'] ?? '').toString().split(':');
-    final season =
-        int.tryParse(json['season']?.toString() ?? '') ??
+    final season = int.tryParse(json['season']?.toString() ?? '') ??
         (fullId.length > 1 ? int.tryParse(fullId[1]) : null) ??
         1;
-    final episode =
-        int.tryParse(json['episode']?.toString() ?? '') ??
+    final episode = int.tryParse(json['episode']?.toString() ?? '') ??
         (fullId.length > 2 ? int.tryParse(fullId[2]) : null) ??
         1;
     final rawTitle = (json['name'] ?? json['title'] ?? '').toString().trim();
     final title = rawTitle.isEmpty ? 'Episode $episode' : rawTitle;
-    final rawDescription = (json['description'] ?? json['overview'] ?? '')
-        .toString()
-        .trim();
+    final rawDescription =
+        (json['description'] ?? json['overview'] ?? '').toString().trim();
     return _TvEpisode(
       season: season,
       episode: episode,
@@ -750,9 +1399,8 @@ class _TvTrailer {
   const _TvTrailer({required this.title, required this.url});
 
   factory _TvTrailer.fromJson(Map<String, dynamic> json) {
-    final title = (json['title'] ?? json['name'] ?? 'Trailer')
-        .toString()
-        .trim();
+    final title =
+        (json['title'] ?? json['name'] ?? 'Trailer').toString().trim();
     return _TvTrailer(
       title: title.isEmpty ? 'Trailer' : title,
       url: (json['url'] ?? json['externalUrl'] ?? json['href'] ?? '')
@@ -815,13 +1463,14 @@ class _TvSubtitle {
   factory _TvSubtitle.fromJson(Map<String, dynamic> json) {
     final language = (json['language'] ?? json['lang'] ?? '').toString().trim();
     final label = (json['label'] ?? json['name'] ?? language).toString().trim();
+    final url = (json['url'] ?? json['src'] ?? '').toString().trim();
     return _TvSubtitle(
       id: (json['id'] ?? json['subtitleId'] ?? language.ifEmpty(label))
           .toString(),
       label: label.isEmpty ? 'Subtitle' : label,
       language: language,
-      url: (json['url'] ?? json['src'] ?? '').toString().trim(),
-      format: (json['format'] ?? 'vtt').toString().trim(),
+      url: url,
+      format: _tvSubtitleFormatFromJson(json, label: label, url: url),
       isDefault: json['isDefault'] == true || json['default'] == true,
       isForced: json['isForced'] == true || json['forced'] == true,
     );
@@ -834,6 +1483,158 @@ class _TvSubtitle {
   final String format;
   final bool isDefault;
   final bool isForced;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'label': label,
+      'language': language,
+      'url': url,
+      'format': format,
+      'isDefault': isDefault,
+      'isForced': isForced,
+    };
+  }
+}
+
+String _tvSubtitleFormatFromJson(
+  Map<String, dynamic> json, {
+  required String label,
+  required String url,
+}) {
+  final explicit = (json['format'] ??
+          json['type'] ??
+          json['extension'] ??
+          json['mimeType'] ??
+          json['mime'] ??
+          '')
+      .toString()
+      .trim()
+      .toLowerCase();
+  final candidates = <String>[
+    explicit,
+    label.toLowerCase(),
+    Uri.tryParse(url)?.path.toLowerCase() ?? url.toLowerCase(),
+  ];
+  for (final value in candidates) {
+    if (value.isEmpty) continue;
+    if (value.contains('subrip') ||
+        value.contains('/srt') ||
+        value.contains('[srt]') ||
+        value.endsWith('.srt') ||
+        value == 'srt') {
+      return 'srt';
+    }
+    if (value.contains('webvtt') ||
+        value.contains('text/vtt') ||
+        value.contains('[vtt]') ||
+        value.endsWith('.vtt') ||
+        value == 'vtt') {
+      return 'vtt';
+    }
+    if (value.contains('text/x-ssa') ||
+        value.contains('[ssa]') ||
+        value.endsWith('.ssa') ||
+        value == 'ssa') {
+      return 'ssa';
+    }
+    if (value.contains('text/x-ass') ||
+        value.contains('[ass]') ||
+        value.endsWith('.ass') ||
+        value == 'ass') {
+      return 'ass';
+    }
+    if (value.contains('ttml') ||
+        value.contains('dfxp') ||
+        value.endsWith('.ttml') ||
+        value.endsWith('.dfxp')) {
+      return 'ttml';
+    }
+  }
+  return 'vtt';
+}
+
+List<_TvSubtitle> _tvSubtitlesFromJson(dynamic value) {
+  if (value is! List) return const <_TvSubtitle>[];
+  final subtitles = <_TvSubtitle>[
+    for (final raw in value.whereType<Map>())
+      _TvSubtitle.fromJson(Map<String, dynamic>.from(raw)),
+  ];
+  return _tvDedupeSubtitles(subtitles);
+}
+
+List<_TvSubtitle> _tvDedupeSubtitles(Iterable<_TvSubtitle> subtitles) {
+  final seen = <String>{};
+  final deduped = <_TvSubtitle>[];
+  for (final subtitle in subtitles) {
+    if (subtitle.url.isEmpty) continue;
+    final key = subtitle.id.trim().isNotEmpty
+        ? subtitle.id.trim()
+        : '${subtitle.url}|${subtitle.language}|${subtitle.label}';
+    if (!seen.add(key)) continue;
+    deduped.add(subtitle);
+  }
+  return deduped.toList(growable: false);
+}
+
+bool _tvManifestSupportsResource(Map<String, dynamic> manifest, String name) {
+  final resources = manifest['resources'];
+  if (resources is! List) return false;
+  for (final resource in resources) {
+    if (resource is String && resource == name) return true;
+    if (resource is Map && resource['name'] == name) return true;
+  }
+  return false;
+}
+
+List<Uri> _tvAddOnResourceUris(
+  String manifestUrl, {
+  required String resource,
+  required String type,
+  required String id,
+}) {
+  final base = _tvAddOnBaseUrl(manifestUrl);
+  final encoded = Uri.tryParse(
+    '$base/$resource/$type/${Uri.encodeComponent(id)}.json',
+  );
+  final raw = Uri.tryParse('$base/$resource/$type/$id.json');
+  return <Uri>[
+    if (encoded != null) encoded,
+    if (raw != null && raw != encoded) raw,
+  ];
+}
+
+String _tvAddOnBaseUrl(String manifestUrl) {
+  final trimmed = manifestUrl.trim();
+  final manifestIndex = trimmed.toLowerCase().lastIndexOf('/manifest.json');
+  if (manifestIndex >= 0) return trimmed.substring(0, manifestIndex);
+  return trimmed.endsWith('/')
+      ? trimmed.substring(0, trimmed.length - 1)
+      : trimmed;
+}
+
+List<String> _tvSubtitleAddOnIdsForItem(
+  _TvItem item, {
+  int? season,
+  int? episode,
+}) {
+  final baseIds = _tvUniqueNonEmptyStrings([
+    if (_tvImdbIdForHostedLookup(item) != null) _tvImdbIdForHostedLookup(item)!,
+    item.id,
+    if (item.tmdbId != null) 'tmdb:${item.tmdbId}',
+  ]);
+  if (season == null || episode == null) return baseIds;
+  return baseIds.map((id) => '$id:$season:$episode').toList(growable: false);
+}
+
+List<String> _tvUniqueNonEmptyStrings(Iterable<String> values) {
+  final result = <String>[];
+  for (final value in values) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty || result.contains(trimmed)) continue;
+    result.add(trimmed);
+  }
+  return result;
 }
 
 class _TvHomeEditorialEdition {
@@ -899,23 +1700,23 @@ class _TvHomeEditorialEdition {
       rails: orderedRails.isNotEmpty
           ? orderedRails
           : [
-                  edition.topSignal,
-                  edition.todaySignal,
-                  edition.juicrTopSignal,
-                  edition.movie,
-                  edition.series,
-                  edition.animation,
-                  edition.personal,
-                  edition.history,
-                  edition.saved,
-                  edition.privateShelf,
-                  edition.throwback,
-                  edition.upcoming,
-                ]
-                .where(
-                  (rail) => rail.title.isNotEmpty || rail.subtitle.isNotEmpty,
-                )
-                .toList(growable: false),
+              edition.topSignal,
+              edition.todaySignal,
+              edition.juicrTopSignal,
+              edition.movie,
+              edition.series,
+              edition.animation,
+              edition.personal,
+              edition.history,
+              edition.saved,
+              edition.privateShelf,
+              edition.throwback,
+              edition.upcoming,
+            ]
+              .where(
+                (rail) => rail.title.isNotEmpty || rail.subtitle.isNotEmpty,
+              )
+              .toList(growable: false),
     );
   }
 
@@ -969,6 +1770,30 @@ class _TvHomeEditorialEdition {
       rails: rails ?? this.rails,
     );
   }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'editionId': editionId,
+      'editionDate': editionDate,
+      'hero': hero.toJson(),
+      'rails': [
+        topSignal.toJson(idOverride: 'topSignal'),
+        todaySignal.toJson(idOverride: 'todaySignal'),
+        juicrTopSignal.toJson(idOverride: 'juicrTopSignal'),
+        movie.toJson(idOverride: 'movieEditorial'),
+        series.toJson(idOverride: 'seriesEditorial'),
+        animation.toJson(idOverride: 'animationEditorial'),
+        personal.toJson(idOverride: 'personalEditorial'),
+        history.toJson(idOverride: 'historyEditorial'),
+        saved.toJson(idOverride: 'savedEditorial'),
+        privateShelf.toJson(idOverride: 'privateShelfEditorial'),
+        throwback.toJson(idOverride: 'throwbackEditorial'),
+        upcoming.toJson(idOverride: 'upcomingEditorial'),
+        for (final rail in rails)
+          if (rail.id.isNotEmpty) rail.toJson(),
+      ],
+    };
+  }
 }
 
 class _TvHomeEditorialRail {
@@ -1021,19 +1846,17 @@ class _TvHomeEditorialRail {
       genres: genres.isNotEmpty
           ? genres
           : routeGenre.isNotEmpty && routeGenre.toLowerCase() != 'all genres'
-          ? [routeGenre]
-          : const <String>[],
+              ? [routeGenre]
+              : const <String>[],
       sort: (raw['sort'] ?? route['sort'] ?? 'imdbRating').toString().trim(),
-      perType:
-          int.tryParse(
+      perType: int.tryParse(
             (raw['perType'] ?? '').toString(),
           )?.clamp(1, 12).toInt() ??
           4,
       requireGenreMatch: raw['requireGenreMatch'] == true,
       intent: (raw['intent'] ?? '').toString().trim(),
-      curationKind: (raw['curationKind'] ?? raw['curation_kind'] ?? '')
-          .toString()
-          .trim(),
+      curationKind:
+          (raw['curationKind'] ?? raw['curation_kind'] ?? '').toString().trim(),
       releaseWindow: (raw['releaseWindow'] ?? '').toString().trim(),
       theme: (raw['theme'] ?? '').toString().trim(),
       seasonalWindow: (raw['seasonalWindow'] ?? '').toString().trim(),
@@ -1060,6 +1883,27 @@ class _TvHomeEditorialRail {
   final String seasonalWindow;
   final String query;
   final List<_TvHomeEditorialTrendItem> items;
+
+  Map<String, dynamic> toJson({String? idOverride}) {
+    return {
+      'id': idOverride ?? id,
+      'kind': kind,
+      'title': title,
+      'subtitle': subtitle,
+      'types': types,
+      'genres': genres,
+      'sort': sort,
+      'perType': perType,
+      'requireGenreMatch': requireGenreMatch,
+      'intent': intent,
+      'curationKind': curationKind,
+      'releaseWindow': releaseWindow,
+      'theme': theme,
+      'seasonalWindow': seasonalWindow,
+      'query': query,
+      'items': items.map((item) => item.toJson()).toList(growable: false),
+    };
+  }
 }
 
 class _TvHomeEditorialTrendItem {
@@ -1087,6 +1931,15 @@ class _TvHomeEditorialTrendItem {
   final String title;
   final int? tmdbId;
   final String? year;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'type': type,
+      'title': title,
+      if (tmdbId != null) 'tmdbId': tmdbId,
+      if ((year ?? '').isNotEmpty) 'year': year,
+    };
+  }
 }
 
 Map<String, dynamic> _homeEditorialRailsById(dynamic value) {
@@ -1124,11 +1977,31 @@ class _PlaybackSession {
     required this.mediaUrl,
     required this.sourceType,
     required this.httpHeaders,
+    this.providerId = '',
+    this.quality = 'Auto',
+    this.sourceClass = '',
+    this.subtitles = const <_TvSubtitle>[],
   });
 
   final String mediaUrl;
   final String sourceType;
   final Map<String, String> httpHeaders;
+  final String providerId;
+  final String quality;
+  final String sourceClass;
+  final List<_TvSubtitle> subtitles;
+
+  factory _PlaybackSession.fromJson(Map<String, dynamic> json) {
+    return _PlaybackSession(
+      mediaUrl: (json['mediaUrl'] ?? '').toString(),
+      sourceType: (json['sourceType'] ?? '').toString(),
+      httpHeaders: _stringMap(json['httpHeaders']),
+      providerId: (json['providerId'] ?? '').toString(),
+      quality: (json['quality'] ?? 'Auto').toString(),
+      sourceClass: (json['sourceClass'] ?? '').toString(),
+      subtitles: _tvSubtitlesFromJson(json['subtitles']),
+    );
+  }
 
   VideoFormat? get videoFormatHint {
     final type = sourceType.toLowerCase();
@@ -1146,12 +2019,96 @@ class _PlaybackSession {
     String? mediaUrl,
     String? sourceType,
     Map<String, String>? httpHeaders,
+    String? providerId,
+    String? quality,
+    String? sourceClass,
+    List<_TvSubtitle>? subtitles,
   }) {
     return _PlaybackSession(
       mediaUrl: mediaUrl ?? this.mediaUrl,
       sourceType: sourceType ?? this.sourceType,
       httpHeaders: httpHeaders ?? this.httpHeaders,
+      providerId: providerId ?? this.providerId,
+      quality: quality ?? this.quality,
+      sourceClass: sourceClass ?? this.sourceClass,
+      subtitles: subtitles ?? this.subtitles,
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'mediaUrl': mediaUrl,
+      'sourceType': sourceType,
+      'httpHeaders': httpHeaders,
+      'providerId': providerId,
+      'quality': quality,
+      'sourceClass': sourceClass,
+      'subtitles': subtitles.map((subtitle) => subtitle.toJson()).toList(),
+    };
+  }
+}
+
+class _TvVerifiedPlaybackSession {
+  const _TvVerifiedPlaybackSession({
+    required this.session,
+    required this.engineId,
+    required this.cachedAt,
+    this.confidence = 10,
+    this.successCount = 1,
+    this.failureCount = 0,
+  });
+
+  factory _TvVerifiedPlaybackSession.fromJson(Map<String, dynamic> json) {
+    final rawSession = json['session'];
+    return _TvVerifiedPlaybackSession(
+      session: _PlaybackSession.fromJson(
+        rawSession is Map
+            ? Map<String, dynamic>.from(rawSession)
+            : const <String, dynamic>{},
+      ),
+      engineId: (json['engineId'] ?? '').toString(),
+      cachedAt: DateTime.tryParse((json['cachedAt'] ?? '').toString()) ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+      confidence: _intFromJson(json['confidence']) ?? 10,
+      successCount: _intFromJson(json['successCount']) ?? 1,
+      failureCount: _intFromJson(json['failureCount']) ?? 0,
+    );
+  }
+
+  final _PlaybackSession session;
+  final String engineId;
+  final DateTime cachedAt;
+  final int confidence;
+  final int successCount;
+  final int failureCount;
+
+  _TvVerifiedPlaybackSession copyWith({
+    _PlaybackSession? session,
+    String? engineId,
+    DateTime? cachedAt,
+    int? confidence,
+    int? successCount,
+    int? failureCount,
+  }) {
+    return _TvVerifiedPlaybackSession(
+      session: session ?? this.session,
+      engineId: engineId ?? this.engineId,
+      cachedAt: cachedAt ?? this.cachedAt,
+      confidence: confidence ?? this.confidence,
+      successCount: successCount ?? this.successCount,
+      failureCount: failureCount ?? this.failureCount,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'session': session.toJson(),
+      'engineId': engineId,
+      'cachedAt': cachedAt.toIso8601String(),
+      'confidence': confidence,
+      'successCount': successCount,
+      'failureCount': failureCount,
+    };
   }
 }
 
@@ -1257,26 +2214,26 @@ extension _TvDiscoverySortInfo on _TvDiscoverySort {
 List<_TvDiscoverySort> _tvDiscoverySortOptionsFor(_TvDiscoveryKind kind) {
   return switch (kind) {
     _TvDiscoveryKind.movie => const [
-      _TvDiscoverySort.popular,
-      _TvDiscoverySort.nowPlaying,
-      _TvDiscoverySort.topRated,
-      _TvDiscoverySort.upcoming,
-    ],
+        _TvDiscoverySort.popular,
+        _TvDiscoverySort.nowPlaying,
+        _TvDiscoverySort.topRated,
+        _TvDiscoverySort.upcoming,
+      ],
     _TvDiscoveryKind.series => const [
-      _TvDiscoverySort.popular,
-      _TvDiscoverySort.airingToday,
-      _TvDiscoverySort.onTv,
-      _TvDiscoverySort.topRated,
-    ],
+        _TvDiscoverySort.popular,
+        _TvDiscoverySort.airingToday,
+        _TvDiscoverySort.onTv,
+        _TvDiscoverySort.topRated,
+      ],
     _TvDiscoveryKind.animation => const [
-      _TvDiscoverySort.popular,
-      _TvDiscoverySort.onTv,
-    ],
+        _TvDiscoverySort.popular,
+        _TvDiscoverySort.onTv,
+      ],
     _TvDiscoveryKind.liveTv => const [
-      _TvDiscoverySort.popular,
-      _TvDiscoverySort.newest,
-      _TvDiscoverySort.featured,
-    ],
+        _TvDiscoverySort.popular,
+        _TvDiscoverySort.newest,
+        _TvDiscoverySort.featured,
+      ],
   };
 }
 
@@ -1304,6 +2261,12 @@ class _TvPlaybackProgress {
 
   final Duration position;
   final Duration duration;
+}
+
+class _TvPlaybackUnavailable {
+  const _TvPlaybackUnavailable(this.message);
+
+  final String message;
 }
 
 class _TvAuthCodeSendResult {
@@ -1374,24 +2337,105 @@ class _TvAccountLibraryPushResult {
 }
 
 class _TvRail {
-  const _TvRail(this.title, this.subtitle, this.items, {this.showRank = true});
+  const _TvRail(
+    this.title,
+    this.subtitle,
+    this.items, {
+    this.showRank = true,
+    this.posterCards = false,
+  });
 
   final String title;
   final String subtitle;
   final List<_TvItem> items;
   final bool showRank;
+  final bool posterCards;
+}
+
+String _normalizeTvTextSize(Object? value) {
+  return switch ((value ?? 'Default').toString()) {
+    'Small' => 'Smaller',
+    'Large' => 'Default',
+    'Larger' => 'Larger',
+    'Maximum' => 'Maximum',
+    'Smaller' => 'Smaller',
+    _ => 'Default',
+  };
+}
+
+String _normalizeTvTheme(Object? value) {
+  return switch ((value ?? 'System').toString()) {
+    'Light' => 'Light',
+    'Dark' => 'Dark',
+    'Amoled Black' => 'Amoled Black',
+    _ => 'System',
+  };
+}
+
+String _normalizeTvAccent(Object? value) {
+  return switch ((value ?? 'Green').toString()) {
+    'green' || 'Green' || 'Juicr Green' => 'Green',
+    'purple' || 'Purple' || 'Mono' => 'Purple',
+    'ocean' || 'Ocean' => 'Ocean',
+    'amber' || 'Amber' || 'Sunset' => 'Amber',
+    'custom' || 'Custom' => 'Custom',
+    _ => 'Green',
+  };
+}
+
+int _normalizeTvAccentColor(Object? value) {
+  const fallback = 0xFF9B6DFF;
+  if (value is int) return value;
+  if (value is String) {
+    final parsed = int.tryParse(value);
+    if (parsed != null) return parsed;
+  }
+  return fallback;
+}
+
+const int kTvP2pConsentVersion = 1;
+const String kTvP2pConsentPhrase = 'I UNDERSTAND';
+const String kTvP2pPrioritySmartStart = 'smartStart';
+const String kTvP2pPriorityQualityFirst = 'qualityFirst';
+const String kTvP2pPriorityAvailabilityFirst = 'availabilityFirst';
+const String kTvP2pPrioritySmallerFasterFiles = 'smallerFasterFiles';
+const String kTvP2pPriorityBalanced = 'balancedQualityAvailability';
+
+String _normalizeTvP2pPriorityMode(Object? value) {
+  return switch ((value ?? kTvP2pPrioritySmartStart).toString()) {
+    kTvP2pPriorityQualityFirst => kTvP2pPriorityQualityFirst,
+    kTvP2pPriorityAvailabilityFirst => kTvP2pPriorityAvailabilityFirst,
+    kTvP2pPrioritySmallerFasterFiles => kTvP2pPrioritySmallerFasterFiles,
+    kTvP2pPriorityBalanced => kTvP2pPriorityBalanced,
+    _ => kTvP2pPrioritySmartStart,
+  };
+}
+
+int _normalizeTvP2pResultsPerQuality(Object? value) {
+  final parsed = int.tryParse((value ?? '').toString());
+  return (parsed ?? 3).clamp(1, 5).toInt();
+}
+
+int _normalizeTvP2pSizeLimitMb(Object? value) {
+  final parsed = int.tryParse((value ?? '').toString());
+  return (parsed ?? 0).clamp(0, 65536).toInt();
 }
 
 class _TvSettingsState {
   const _TvSettingsState({
     this.theme = 'System',
-    this.accent = 'Juicr Green',
-    this.textSize = 'Large',
+    this.accent = 'Green',
+    this.customAccentColor = 0xFF9B6DFF,
+    this.textSize = 'Default',
     this.motion = true,
     this.playbackEngine = 'Auto',
     this.preferredQuality = 'Balanced',
     this.resumePrompt = true,
-    this.subtitles = false,
+    this.subtitles = true,
+    this.subtitleTextSize = 'Default',
+    this.subtitleTextColor = 'White',
+    this.subtitleBackground = 'Dim',
+    this.subtitleDelayMillis = 0,
     this.nextEpisode = true,
     this.defaultSourceConsentAccepted = false,
     this.showDefaultSourceSettings = false,
@@ -1404,17 +2448,32 @@ class _TvSettingsState {
     this.advancedControls = false,
     this.history = true,
     this.safeDiagnostics = true,
+    this.p2pPlaybackConsentAccepted = false,
+    this.p2pPlaybackConsentVersion = 0,
+    this.p2pPlaybackConsentAcceptedAt,
+    this.p2pPlaybackEnabled = false,
+    this.p2pSourcePrioritiesEnabled = false,
+    this.p2pPriorityMode = kTvP2pPrioritySmartStart,
+    this.p2pResultsPerQuality = 3,
+    this.p2pAvoidRiskyFormats = true,
+    this.p2pSizeLimitMb = 0,
+    this.leaderboardScope = 'weekly',
     this.userAddOns = const <_TvUserAddOn>[],
   });
 
   final String theme;
   final String accent;
+  final int customAccentColor;
   final String textSize;
   final bool motion;
   final String playbackEngine;
   final String preferredQuality;
   final bool resumePrompt;
   final bool subtitles;
+  final String subtitleTextSize;
+  final String subtitleTextColor;
+  final String subtitleBackground;
+  final int subtitleDelayMillis;
   final bool nextEpisode;
   final bool defaultSourceConsentAccepted;
   final bool showDefaultSourceSettings;
@@ -1427,6 +2486,16 @@ class _TvSettingsState {
   final bool advancedControls;
   final bool history;
   final bool safeDiagnostics;
+  final bool p2pPlaybackConsentAccepted;
+  final int p2pPlaybackConsentVersion;
+  final String? p2pPlaybackConsentAcceptedAt;
+  final bool p2pPlaybackEnabled;
+  final bool p2pSourcePrioritiesEnabled;
+  final String p2pPriorityMode;
+  final int p2pResultsPerQuality;
+  final bool p2pAvoidRiskyFormats;
+  final int p2pSizeLimitMb;
+  final String leaderboardScope;
   final List<_TvUserAddOn> userAddOns;
 
   static const int builtInSourceCount = 5;
@@ -1442,20 +2511,50 @@ class _TvSettingsState {
   }
 
   bool get hasUserAddOns => userAddOns.any((addon) => addon.enabled);
-  bool get hasCatalogSource => builtInCatalog || builtInLiveTv;
+  bool get hasP2pConsent =>
+      p2pPlaybackConsentAccepted &&
+      p2pPlaybackConsentVersion >= kTvP2pConsentVersion;
+  bool get canUseAdvancedP2p => hasUserAddOns && hasP2pConsent;
+  bool get hasCatalogSource =>
+      (defaultSourceConsentAccepted && (builtInCatalog || builtInLiveTv)) ||
+      (addOnConsentAccepted && hasUserAddOns);
   bool get hasPlaybackSource => builtInPlayback;
+  bool get hasBuiltInSubtitleSource =>
+      defaultSourceConsentAccepted || builtInSubtitles || builtInPlayback;
+  bool get hasAddOnSubtitleSource => addOnConsentAccepted && hasUserAddOns;
+  bool get hasSubtitleSource =>
+      hasBuiltInSubtitleSource || hasAddOnSubtitleSource;
   bool get keepHistory => history;
 
   factory _TvSettingsState.fromJson(Map<String, dynamic> json) {
+    final userAddOns = _TvUserAddOn.fromList(json['userAddOns']);
+    final hasEnabledAddOns = userAddOns.any((addon) => addon.enabled);
+    final p2pConsentVersion =
+        int.tryParse((json['p2pPlaybackConsentVersion'] ?? '').toString()) ?? 0;
+    final hasP2pConsent = json['p2pPlaybackConsentAccepted'] == true &&
+        p2pConsentVersion >= kTvP2pConsentVersion;
+    final p2pPlaybackEnabled =
+        json['p2pPlaybackEnabled'] == true && hasP2pConsent && hasEnabledAddOns;
     return _TvSettingsState(
-      theme: (json['theme'] ?? 'System').toString(),
-      accent: (json['accent'] ?? 'Juicr Green').toString(),
-      textSize: (json['textSize'] ?? 'Large').toString(),
+      theme: _normalizeTvTheme(json['theme']),
+      accent: _normalizeTvAccent(json['accent']),
+      customAccentColor: _normalizeTvAccentColor(json['customAccentColor']),
+      textSize: _normalizeTvTextSize(json['textSize']),
       motion: json['motion'] != false,
       playbackEngine: (json['playbackEngine'] ?? 'Auto').toString(),
       preferredQuality: (json['preferredQuality'] ?? 'Balanced').toString(),
       resumePrompt: json['resumePrompt'] != false,
-      subtitles: json['subtitles'] == true,
+      subtitles: json['subtitles'] != false,
+      subtitleTextSize: _normalizeTvSubtitleTextSize(json['subtitleTextSize']),
+      subtitleTextColor: _normalizeTvSubtitleTextColor(
+        json['subtitleTextColor'],
+      ),
+      subtitleBackground: _normalizeTvSubtitleBackground(
+        json['subtitleBackground'],
+      ),
+      subtitleDelayMillis: _normalizeTvSubtitleDelayMillis(
+        json['subtitleDelayMillis'],
+      ),
       nextEpisode: json['nextEpisode'] != false,
       defaultSourceConsentAccepted:
           json['defaultSourceConsentAccepted'] == true,
@@ -1469,7 +2568,27 @@ class _TvSettingsState {
       advancedControls: json['advancedControls'] == true,
       history: json['history'] != false,
       safeDiagnostics: json['safeDiagnostics'] != false,
-      userAddOns: _TvUserAddOn.fromList(json['userAddOns']),
+      p2pPlaybackConsentAccepted: hasP2pConsent,
+      p2pPlaybackConsentVersion: hasP2pConsent ? p2pConsentVersion : 0,
+      p2pPlaybackConsentAcceptedAt: !hasP2pConsent
+          ? null
+          : (json['p2pPlaybackConsentAcceptedAt'] ?? '')
+                  .toString()
+                  .trim()
+                  .isEmpty
+              ? null
+              : json['p2pPlaybackConsentAcceptedAt'].toString(),
+      p2pPlaybackEnabled: p2pPlaybackEnabled,
+      p2pSourcePrioritiesEnabled:
+          json['p2pSourcePrioritiesEnabled'] == true && p2pPlaybackEnabled,
+      p2pPriorityMode: _normalizeTvP2pPriorityMode(json['p2pPriorityMode']),
+      p2pResultsPerQuality: _normalizeTvP2pResultsPerQuality(
+        json['p2pResultsPerQuality'],
+      ),
+      p2pAvoidRiskyFormats: json['p2pAvoidRiskyFormats'] != false,
+      p2pSizeLimitMb: _normalizeTvP2pSizeLimitMb(json['p2pSizeLimitMb']),
+      leaderboardScope: _normalizeTvLeaderboardScope(json['leaderboardScope']),
+      userAddOns: userAddOns,
     );
   }
 
@@ -1477,12 +2596,17 @@ class _TvSettingsState {
     return {
       'theme': theme,
       'accent': accent,
+      'customAccentColor': customAccentColor,
       'textSize': textSize,
       'motion': motion,
       'playbackEngine': playbackEngine,
       'preferredQuality': preferredQuality,
       'resumePrompt': resumePrompt,
       'subtitles': subtitles,
+      'subtitleTextSize': subtitleTextSize,
+      'subtitleTextColor': subtitleTextColor,
+      'subtitleBackground': subtitleBackground,
+      'subtitleDelayMillis': subtitleDelayMillis,
       'nextEpisode': nextEpisode,
       'defaultSourceConsentAccepted': defaultSourceConsentAccepted,
       'showDefaultSourceSettings': showDefaultSourceSettings,
@@ -1495,6 +2619,17 @@ class _TvSettingsState {
       'advancedControls': advancedControls,
       'history': history,
       'safeDiagnostics': safeDiagnostics,
+      'p2pPlaybackConsentAccepted': p2pPlaybackConsentAccepted,
+      'p2pPlaybackConsentVersion': p2pPlaybackConsentVersion,
+      if (p2pPlaybackConsentAcceptedAt != null)
+        'p2pPlaybackConsentAcceptedAt': p2pPlaybackConsentAcceptedAt,
+      'p2pPlaybackEnabled': p2pPlaybackEnabled,
+      'p2pSourcePrioritiesEnabled': p2pSourcePrioritiesEnabled,
+      'p2pPriorityMode': p2pPriorityMode,
+      'p2pResultsPerQuality': p2pResultsPerQuality,
+      'p2pAvoidRiskyFormats': p2pAvoidRiskyFormats,
+      'p2pSizeLimitMb': p2pSizeLimitMb,
+      'leaderboardScope': leaderboardScope,
       'userAddOns': userAddOns.map((addon) => addon.toJson()).toList(),
     };
   }
@@ -1502,12 +2637,17 @@ class _TvSettingsState {
   _TvSettingsState copyWith({
     String? theme,
     String? accent,
+    int? customAccentColor,
     String? textSize,
     bool? motion,
     String? playbackEngine,
     String? preferredQuality,
     bool? resumePrompt,
     bool? subtitles,
+    String? subtitleTextSize,
+    String? subtitleTextColor,
+    String? subtitleBackground,
+    int? subtitleDelayMillis,
     bool? nextEpisode,
     bool? defaultSourceConsentAccepted,
     bool? showDefaultSourceSettings,
@@ -1520,17 +2660,54 @@ class _TvSettingsState {
     bool? advancedControls,
     bool? history,
     bool? safeDiagnostics,
+    bool? p2pPlaybackConsentAccepted,
+    int? p2pPlaybackConsentVersion,
+    String? p2pPlaybackConsentAcceptedAt,
+    bool? p2pPlaybackEnabled,
+    bool? p2pSourcePrioritiesEnabled,
+    String? p2pPriorityMode,
+    int? p2pResultsPerQuality,
+    bool? p2pAvoidRiskyFormats,
+    int? p2pSizeLimitMb,
+    String? leaderboardScope,
     List<_TvUserAddOn>? userAddOns,
   }) {
+    final nextUserAddOns = userAddOns ?? this.userAddOns;
+    final nextConsentVersion =
+        p2pPlaybackConsentVersion ?? this.p2pPlaybackConsentVersion;
+    final nextHasConsent =
+        (p2pPlaybackConsentAccepted ?? this.p2pPlaybackConsentAccepted) &&
+            nextConsentVersion >= kTvP2pConsentVersion;
+    final nextHasAddOns = nextUserAddOns.any((addon) => addon.enabled);
+    final nextP2pPlaybackEnabled =
+        (p2pPlaybackEnabled ?? this.p2pPlaybackEnabled) &&
+            nextHasConsent &&
+            nextHasAddOns;
+    final nextP2pSourcePrioritiesEnabled =
+        (p2pSourcePrioritiesEnabled ?? this.p2pSourcePrioritiesEnabled) &&
+            nextP2pPlaybackEnabled;
     return _TvSettingsState(
       theme: theme ?? this.theme,
       accent: accent ?? this.accent,
+      customAccentColor: customAccentColor ?? this.customAccentColor,
       textSize: textSize ?? this.textSize,
       motion: motion ?? this.motion,
       playbackEngine: playbackEngine ?? this.playbackEngine,
       preferredQuality: preferredQuality ?? this.preferredQuality,
       resumePrompt: resumePrompt ?? this.resumePrompt,
       subtitles: subtitles ?? this.subtitles,
+      subtitleTextSize: _normalizeTvSubtitleTextSize(
+        subtitleTextSize ?? this.subtitleTextSize,
+      ),
+      subtitleTextColor: _normalizeTvSubtitleTextColor(
+        subtitleTextColor ?? this.subtitleTextColor,
+      ),
+      subtitleBackground: _normalizeTvSubtitleBackground(
+        subtitleBackground ?? this.subtitleBackground,
+      ),
+      subtitleDelayMillis: _normalizeTvSubtitleDelayMillis(
+        subtitleDelayMillis ?? this.subtitleDelayMillis,
+      ),
       nextEpisode: nextEpisode ?? this.nextEpisode,
       defaultSourceConsentAccepted:
           defaultSourceConsentAccepted ?? this.defaultSourceConsentAccepted,
@@ -1545,18 +2722,83 @@ class _TvSettingsState {
       advancedControls: advancedControls ?? this.advancedControls,
       history: history ?? this.history,
       safeDiagnostics: safeDiagnostics ?? this.safeDiagnostics,
-      userAddOns: userAddOns ?? this.userAddOns,
+      p2pPlaybackConsentAccepted: nextHasConsent,
+      p2pPlaybackConsentVersion: nextHasConsent ? nextConsentVersion : 0,
+      p2pPlaybackConsentAcceptedAt: nextHasConsent
+          ? p2pPlaybackConsentAcceptedAt ?? this.p2pPlaybackConsentAcceptedAt
+          : null,
+      p2pPlaybackEnabled: nextP2pPlaybackEnabled,
+      p2pSourcePrioritiesEnabled: nextP2pSourcePrioritiesEnabled,
+      p2pPriorityMode: _normalizeTvP2pPriorityMode(
+        p2pPriorityMode ?? this.p2pPriorityMode,
+      ),
+      p2pResultsPerQuality: _normalizeTvP2pResultsPerQuality(
+        p2pResultsPerQuality ?? this.p2pResultsPerQuality,
+      ),
+      p2pAvoidRiskyFormats: p2pAvoidRiskyFormats ?? this.p2pAvoidRiskyFormats,
+      p2pSizeLimitMb: _normalizeTvP2pSizeLimitMb(
+        p2pSizeLimitMb ?? this.p2pSizeLimitMb,
+      ),
+      leaderboardScope: _normalizeTvLeaderboardScope(
+        leaderboardScope ?? this.leaderboardScope,
+      ),
+      userAddOns: nextUserAddOns,
     );
   }
 }
 
+String _normalizeTvLeaderboardScope(Object? value) {
+  return switch ((value ?? '').toString().trim()) {
+    'today' => 'today',
+    'all' || 'allTime' => 'all',
+    'weekly' => 'weekly',
+    _ => 'weekly',
+  };
+}
+
+String _normalizeTvSubtitleTextSize(Object? value) {
+  return switch ((value ?? '').toString().trim()) {
+    'Small' => 'Small',
+    'Large' => 'Large',
+    'Maximum' => 'Maximum',
+    'Default' => 'Default',
+    _ => 'Default',
+  };
+}
+
+String _normalizeTvSubtitleTextColor(Object? value) {
+  return switch ((value ?? '').toString().trim()) {
+    'Yellow' => 'Yellow',
+    'Cyan' => 'Cyan',
+    'Green' => 'Green',
+    'White' => 'White',
+    _ => 'White',
+  };
+}
+
+String _normalizeTvSubtitleBackground(Object? value) {
+  return switch ((value ?? '').toString().trim()) {
+    'Off' => 'Off',
+    'Solid' => 'Solid',
+    'Dim' => 'Dim',
+    _ => 'Dim',
+  };
+}
+
+int _normalizeTvSubtitleDelayMillis(Object? value) {
+  final parsed = int.tryParse((value ?? '').toString()) ?? 0;
+  return parsed.clamp(-5000, 5000).toInt();
+}
+
 class _TvUserAddOn {
   const _TvUserAddOn({
+    required this.id,
     required this.name,
     required this.manifest,
     this.enabled = true,
   });
 
+  final String id;
   final String name;
   final String manifest;
   final bool enabled;
@@ -1574,10 +2816,14 @@ class _TvUserAddOn {
   }
 
   factory _TvUserAddOn.fromJson(Map<String, dynamic> json) {
+    final manifest = (json['manifest'] ?? json['manifestUrl'] ?? '').toString();
+    final id = (json['id'] ?? manifest).toString();
+    final name = (json['name'] ?? '').toString();
     return _TvUserAddOn(
-      name: (json['name'] ?? '').toString(),
-      manifest: (json['manifest'] ?? '').toString(),
-      enabled: json['enabled'] != false,
+      id: id.isEmpty ? manifest : id,
+      name: name.isEmpty ? 'Saved add-on' : name,
+      manifest: manifest,
+      enabled: json['enabled'] != false && json['active'] != false,
     );
   }
 
@@ -1586,19 +2832,29 @@ class _TvUserAddOn {
     return value
         .whereType<Map>()
         .map((raw) => _TvUserAddOn.fromJson(Map<String, dynamic>.from(raw)))
-        .where(
-          (addon) =>
-              addon.name.trim().isNotEmpty && addon.manifest.trim().isNotEmpty,
-        )
+        .where((addon) => addon.manifest.trim().isNotEmpty)
         .toList(growable: false);
   }
 
   Map<String, dynamic> toJson() {
-    return {'name': name, 'manifest': manifest, 'enabled': enabled};
+    return {
+      'id': id,
+      'name': name,
+      'manifest': manifest,
+      'manifestUrl': manifest,
+      'enabled': enabled,
+      'active': enabled,
+    };
   }
 
-  _TvUserAddOn copyWith({String? name, String? manifest, bool? enabled}) {
+  _TvUserAddOn copyWith({
+    String? id,
+    String? name,
+    String? manifest,
+    bool? enabled,
+  }) {
     return _TvUserAddOn(
+      id: id ?? this.id,
       name: name ?? this.name,
       manifest: manifest ?? this.manifest,
       enabled: enabled ?? this.enabled,
@@ -1613,7 +2869,8 @@ String _normalizeType(String value) {
   if (normalized == 'live' ||
       normalized == 'livetv' ||
       normalized == 'live_tv' ||
-      normalized == 'channel') {
+      normalized == 'channel' ||
+      normalized == 'channels') {
     return 'live';
   }
   return 'movie';
@@ -1632,13 +2889,13 @@ class _TvLeaderboardResult {
       scope: (json['scope'] ?? '').toString().trim(),
       rows: rawRows is List
           ? rawRows
-                .whereType<Map>()
-                .map(
-                  (row) => _TvLeaderboardEntry.fromJson(
-                    Map<String, dynamic>.from(row),
-                  ),
-                )
-                .toList(growable: false)
+              .whereType<Map>()
+              .map(
+                (row) => _TvLeaderboardEntry.fromJson(
+                  Map<String, dynamic>.from(row),
+                ),
+              )
+              .toList(growable: false)
           : const <_TvLeaderboardEntry>[],
       viewer: _TvLeaderboardViewer.fromJson(json['viewer']),
     );
@@ -1684,8 +2941,8 @@ class _TvLeaderboardViewer {
     final json = value is Map<String, dynamic>
         ? value
         : value is Map
-        ? Map<String, dynamic>.from(value)
-        : const <String, dynamic>{};
+            ? Map<String, dynamic>.from(value)
+            : const <String, dynamic>{};
     final rank = _intFromJson(json['rank']);
     return _TvLeaderboardViewer(
       rank: rank != null && rank > 0 ? rank : null,
@@ -1710,15 +2967,76 @@ String _normalizeItemType(dynamic rawType, String fallbackType) {
   return normalized;
 }
 
+String? _logoImage(dynamic value) {
+  if (value is Map) {
+    for (final key in const [
+      'logo',
+      'logos',
+      'logoUrl',
+      'clearLogo',
+      'clear_logo',
+      'titleLogo',
+      'title_logo',
+      'titleArt',
+      'title_art',
+      'url',
+      'src',
+      'href',
+      'file_path',
+      'filePath',
+      'path',
+    ]) {
+      final image = _logoImage(value[key]);
+      if (image != null) return image;
+    }
+    return null;
+  }
+  if (value is Iterable) {
+    for (final item in value) {
+      final image = _logoImage(item);
+      if (image != null) return image;
+    }
+    return null;
+  }
+  return _image(value);
+}
+
 String? _image(dynamic value) {
+  if (value is Map) {
+    for (final key in const [
+      'url',
+      'src',
+      'href',
+      'image',
+      'poster',
+      'background',
+      'backdrop',
+      'file_path',
+      'filePath',
+      'path',
+    ]) {
+      final image = _image(value[key]);
+      if (image != null) return image;
+    }
+    return null;
+  }
+  if (value is Iterable) {
+    for (final item in value) {
+      final image = _image(item);
+      if (image != null) return image;
+    }
+    return null;
+  }
   final text = value?.toString().trim();
-  if (text == null || text.isEmpty || !text.startsWith('https://')) return null;
-  return text;
+  if (text == null || text.isEmpty) return null;
+  if (text.startsWith('https://') || text.startsWith('http://')) return text;
+  if (text.startsWith('//')) return 'https:$text';
+  if (text.startsWith('/')) return 'https://image.tmdb.org/t/p/original$text';
+  return null;
 }
 
 String? _year(Map<String, dynamic> json) {
-  final raw =
-      json['year'] ??
+  final raw = json['year'] ??
       json['releaseInfo'] ??
       json['releaseDate'] ??
       json['released'] ??
@@ -1728,12 +3046,69 @@ String? _year(Map<String, dynamic> json) {
   return RegExp(r'(19\d{2}|20\d{2})').firstMatch(text)?.group(1) ?? text;
 }
 
+String? _releaseDateFromJson(Map<String, dynamic> json) {
+  final raw = json['releaseDate'] ??
+      json['release_date'] ??
+      json['airDate'] ??
+      json['firstAirDate'] ??
+      json['first_air_date'] ??
+      json['premiereDate'] ??
+      json['premiered'] ??
+      json['released'];
+  final text = raw?.toString().trim();
+  return text == null || text.isEmpty ? null : text;
+}
+
+bool _isUpcomingCatalogValue(Object? value) {
+  final normalized =
+      value?.toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
+  return normalized != null && normalized.contains('upcoming');
+}
+
+List<String> _genreList(Map<String, dynamic> json) {
+  final direct = _dedupeStringList([
+    ..._stringList(json['genres']),
+    ..._stringList(json['genre']),
+  ]);
+  if (direct.isNotEmpty) return direct;
+
+  return _dedupeStringList([
+    ..._stringList(json['categories']),
+    ..._stringList(json['category']),
+    ..._stringList(json['groupTitle']),
+    ..._stringList(json['group_title']),
+    ..._stringList(json['group']),
+    ..._stringList(json['tags']),
+  ]);
+}
+
+List<String> _dedupeStringList(Iterable<String> values) {
+  final seen = <String>{};
+  final result = <String>[];
+  for (final value in values) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) continue;
+    final key = trimmed.toLowerCase();
+    if (key == 'all genres') continue;
+    if (!seen.add(key)) continue;
+    result.add(trimmed);
+  }
+  return result;
+}
+
 List<String> _stringList(dynamic value) {
-  if (value is! List) return const [];
-  return value
-      .map((item) => item.toString())
-      .where((item) => item.isNotEmpty)
-      .toList();
+  if (value == null) return const [];
+  if (value is String) {
+    final trimmed = value.trim();
+    return trimmed.isEmpty ? const [] : <String>[trimmed];
+  }
+  if (value is Iterable) {
+    return value
+        .map((item) => item.toString().trim())
+        .where((item) => item.isNotEmpty)
+        .toList();
+  }
+  return const [];
 }
 
 Map<String, String> _stringMap(dynamic value) {

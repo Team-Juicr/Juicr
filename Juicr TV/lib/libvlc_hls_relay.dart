@@ -12,6 +12,7 @@ class LibVlcHlsRelay {
     required Map<String, Uri> uriById,
     required Set<String> playlistIds,
     required Map<String, String> headers,
+    required bool limitHeadersToUpstreamOrigin,
     required Duration resumePosition,
     required String token,
     required bool continuousTsMode,
@@ -24,6 +25,7 @@ class LibVlcHlsRelay {
        _uriById = uriById,
        _playlistIds = playlistIds,
        _headers = headers,
+       _limitHeadersToUpstreamOrigin = limitHeadersToUpstreamOrigin,
        _resumePosition = resumePosition,
        _token = token,
        _continuousTsMode = continuousTsMode,
@@ -37,6 +39,7 @@ class LibVlcHlsRelay {
   static Future<LibVlcHlsRelay> start({
     required Uri upstreamUri,
     required Map<String, String> headers,
+    bool limitHeadersToUpstreamOrigin = false,
     required Duration resumePosition,
     bool continuousTsMode = false,
     void Function(Duration duration)? onDuration,
@@ -63,6 +66,7 @@ class LibVlcHlsRelay {
       uriById: uriById,
       playlistIds: playlistIds,
       headers: Map<String, String>.unmodifiable(headers),
+      limitHeadersToUpstreamOrigin: limitHeadersToUpstreamOrigin,
       resumePosition: resumePosition,
       token: token,
       continuousTsMode: continuousTsMode,
@@ -79,6 +83,7 @@ class LibVlcHlsRelay {
   final Map<String, Uri> _uriById;
   final Set<String> _playlistIds;
   final Map<String, String> _headers;
+  final bool _limitHeadersToUpstreamOrigin;
   final Duration _resumePosition;
   final String _token;
   final bool _continuousTsMode;
@@ -576,15 +581,24 @@ class LibVlcHlsRelay {
 
   Future<HttpClientRequest> _openUpstream(Uri upstream) async {
     final request = await _client.openUrl('GET', upstream);
-    for (final header in _headers.entries) {
-      final name = header.key.trim();
-      final value = header.value.trim();
-      if (name.isEmpty || value.isEmpty) continue;
-      if (name.toLowerCase() == HttpHeaders.acceptEncodingHeader) continue;
-      request.headers.set(name, value);
+    if (!_limitHeadersToUpstreamOrigin || _sameOrigin(upstream, _uriById['root'])) {
+      for (final header in _headers.entries) {
+        final name = header.key.trim();
+        final value = header.value.trim();
+        if (name.isEmpty || value.isEmpty) continue;
+        if (name.toLowerCase() == HttpHeaders.acceptEncodingHeader) continue;
+        request.headers.set(name, value);
+      }
     }
     request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
     return request;
+  }
+
+  static bool _sameOrigin(Uri left, Uri? right) {
+    if (right == null) return false;
+    return left.scheme.toLowerCase() == right.scheme.toLowerCase() &&
+        left.host.toLowerCase() == right.host.toLowerCase() &&
+        left.port == right.port;
   }
 
   String _rewritePlaylist(Uri baseUri, String body) {

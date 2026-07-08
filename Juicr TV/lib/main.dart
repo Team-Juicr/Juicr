@@ -7,6 +7,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_vlc_player/flutter_vlc_player.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
@@ -21,36 +22,139 @@ part 'tv_shell_widgets.dart';
 part 'tv_surfaces.dart';
 part 'tv_playback.dart';
 part 'tv_shared_widgets.dart';
+part 'tv_release_updates.dart';
 part 'tv_data.dart';
 
 const _apiBase = 'https://api.juicr.app';
 const _tvSettingsPrefsKey = 'juicr_tv_settings_v1';
+const _tvCatalogWarmSnapshotPrefsKey = 'juicr_tv_catalog_warm_snapshot_v1';
+const _tvVerifiedPlaybackSessionsPrefsKey =
+    'juicr_tv_verified_playback_sessions_v2';
+const _tvAppVersion = '1.0.1';
+const _tvAppBuildNumber = '2';
+const _tvAppPackageName = 'app.juicr.flutter';
 const _juicrGreen = Color(0xFF20D66B);
 const double _tvSpacing = 12;
+const double _tvNavigationRailWidth = 94;
 const double _tvNavItemGap = 4;
 const double _tvPosterGridGap = 6;
 const double _tvHomeRailGap = 8;
 Color _tvAccentColor = _juicrGreen;
 double _tvTextScale = 1.0;
 bool _tvMotionEnabled = true;
+_TvThemePalette _tvTheme = _TvThemePalette.dark;
 
 Color get _tvFocusBorder => _tvAccentColor;
+Color get _tvSolidFocusBorder => Colors.white;
+
+class _TvThemePalette {
+  const _TvThemePalette({
+    required this.background,
+    required this.backdropGradient,
+    required this.railGradient,
+    required this.railBorder,
+    required this.card,
+    required this.cardAlt,
+    required this.dialog,
+    required this.row,
+    required this.rowBorder,
+    required this.text,
+    required this.muted,
+    required this.valuePill,
+    required this.valuePillBorder,
+  });
+
+  final Color background;
+  final List<Color> backdropGradient;
+  final List<Color> railGradient;
+  final Color railBorder;
+  final Color card;
+  final Color cardAlt;
+  final Color dialog;
+  final Color row;
+  final Color rowBorder;
+  final Color text;
+  final Color muted;
+  final Color valuePill;
+  final Color valuePillBorder;
+
+  static const dark = _TvThemePalette(
+    background: Color(0xFF000000),
+    backdropGradient: [Color(0xFF000000), Color(0xFF000000), Color(0xFF000000)],
+    railGradient: [Color(0x1AFFFFFF), Color(0x1131313C), Color(0x1AFFFFFF)],
+    railBorder: Color(0x18FFFFFF),
+    card: Color(0x1AFFFFFF),
+    cardAlt: Color(0x18FFFFFF),
+    dialog: Color(0xF2202124),
+    row: Color(0x1FFFFFFF),
+    rowBorder: Color(0x22FFFFFF),
+    text: Colors.white,
+    muted: Color(0xFFAAA6BD),
+    valuePill: Color(0x1FFFFFFF),
+    valuePillBorder: Color(0x22FFFFFF),
+  );
+
+  static const amoled = _TvThemePalette(
+    background: Color(0xFF000000),
+    backdropGradient: [Color(0xFF000000), Color(0xFF000000), Color(0xFF000000)],
+    railGradient: [Color(0xFF050505), Color(0xFF000000), Color(0xFF050505)],
+    railBorder: Color(0x26FFFFFF),
+    card: Color(0xFF090A0D),
+    cardAlt: Color(0xFF101115),
+    dialog: Color(0xFF101115),
+    row: Color(0xFF17181D),
+    rowBorder: Color(0x29FFFFFF),
+    text: Colors.white,
+    muted: Color(0xFFC0BBD0),
+    valuePill: Color(0xFF202126),
+    valuePillBorder: Color(0x29FFFFFF),
+  );
+
+  static const light = _TvThemePalette(
+    background: Color(0xFFE1DDD2),
+    backdropGradient: [Color(0xFFD5D1C7), Color(0xFFE1DDD2), Color(0xFFCFD8D1)],
+    railGradient: [Color(0xE6D7D3C8), Color(0xD9CAC5BA), Color(0xE6D7D3C8)],
+    railBorder: Color(0x26000000),
+    card: Color(0xF2ECE8DE),
+    cardAlt: Color(0xFFE0DACE),
+    dialog: Color(0xF7E8E4DA),
+    row: Color(0xFFD8D2C6),
+    rowBorder: Color(0x33000000),
+    text: Color(0xFF151515),
+    muted: Color(0xFF56515C),
+    valuePill: Color(0xFFD8D2C6),
+    valuePillBorder: Color(0x30000000),
+  );
+}
+
+_TvThemePalette _themeForSetting(String theme) {
+  return switch (theme) {
+    'Light' => _TvThemePalette.light,
+    'Amoled Black' => _TvThemePalette.amoled,
+    _ => _TvThemePalette.dark,
+  };
+}
 
 Color _accentForSetting(String accent) {
   return switch (accent) {
-    'Ocean' => const Color(0xFF24C8DB),
-    'Sunset' => const Color(0xFFFFA64D),
-    'Mono' => const Color(0xFFE8E4F5),
+    'Purple' => const Color(0xFF9B6DFF),
+    'Ocean' => const Color(0xFF00A8CC),
+    'Amber' => const Color(0xFFFFB703),
     _ => _juicrGreen,
   };
 }
 
+Color _accentForSettings(_TvSettingsState settings) {
+  if (settings.accent == 'Custom') return Color(settings.customAccentColor);
+  return _accentForSetting(settings.accent);
+}
+
 double _textScaleForSetting(String size) {
   return switch (size) {
-    'Smaller' => 0.88,
-    'Small' => 0.94,
-    'Larger' => 1.08,
-    'Maximum' => 1.16,
+    'Smaller' => 0.92,
+    'Large' => 1.08,
+    'Larger' => 1.14,
+    'Maximum' => 1.20,
     _ => 1.0,
   };
 }
@@ -61,12 +165,23 @@ Duration _tvDuration(int milliseconds) {
       : Duration.zero;
 }
 
+void _applyTvSettingsGlobals(_TvSettingsState settings) {
+  _tvAccentColor = _accentForSettings(settings);
+  _tvTextScale = _textScaleForSetting(settings.textSize);
+  _tvMotionEnabled = settings.motion;
+  _tvTheme = _themeForSetting(settings.theme);
+}
+
 enum _TvLibraryFilter {
-  continueWatching('Continue', 'Recently opened titles', Icons.history_rounded),
+  continueWatching(
+    'Continue watching',
+    'Unfinished titles',
+    Icons.history_rounded,
+  ),
   lists('Lists', 'Custom watchlists', Icons.bookmarks_outlined),
   movies('Movies', 'Liked movies', Icons.movie_rounded),
   series('Series', 'Liked series', Icons.tv_rounded),
-  animation('Animation', 'Liked animation', Icons.auto_awesome_rounded),
+  animation('Animations', 'Liked animations', Icons.auto_awesome_rounded),
   liveTv('Live TV', 'Liked live channels', Icons.live_tv_rounded),
   metrics('Metrics', 'Watching signals', Icons.insights_rounded),
   ranking('Ranking', 'Watch time leaderboard', Icons.emoji_events_outlined);
@@ -82,12 +197,121 @@ enum _TvAccountSyncState { guest, idle, syncing, synced, needsAttention }
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  PaintingBinding.instance.imageCache.maximumSize = 480;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 256 << 20;
+  _installTvKeyboardErrorFilter();
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.landscapeLeft,
     DeviceOrientation.landscapeRight,
   ]);
   runApp(const JuicrTvApp());
+}
+
+Future<T?> _showTvDialog<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  bool barrierDismissible = true,
+  Color? barrierColor,
+  String? barrierLabel,
+  bool useSafeArea = true,
+  bool useRootNavigator = true,
+  RouteSettings? routeSettings,
+  Offset? anchorPoint,
+  TraversalEdgeBehavior? traversalEdgeBehavior,
+  bool? requestFocus,
+  AnimationStyle? animationStyle,
+}) async {
+  final previousFocus = FocusManager.instance.primaryFocus;
+  final result = await showDialog<T>(
+    context: context,
+    builder: builder,
+    barrierDismissible: barrierDismissible,
+    barrierColor: barrierColor,
+    barrierLabel: barrierLabel,
+    useSafeArea: useSafeArea,
+    useRootNavigator: useRootNavigator,
+    routeSettings: routeSettings,
+    anchorPoint: anchorPoint,
+    traversalEdgeBehavior:
+        traversalEdgeBehavior ?? TraversalEdgeBehavior.closedLoop,
+    requestFocus: requestFocus ?? true,
+    animationStyle: animationStyle,
+  );
+  _restoreTvFocusAfterRoutePop(previousFocus);
+  return result;
+}
+
+void _restoreTvFocusAfterRoutePop(FocusNode? previousFocus) {
+  if (previousFocus == null) return;
+  void restore([int attempt = 0]) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = previousFocus.context;
+      if (!previousFocus.canRequestFocus ||
+          context == null ||
+          !context.mounted) {
+        if (attempt < 5) {
+          Future<void>.delayed(
+            const Duration(milliseconds: 24),
+            () => restore(attempt + 1),
+          );
+        }
+        return;
+      }
+      previousFocus.requestFocus();
+      try {
+        Scrollable.ensureVisible(
+          context,
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOutCubic,
+          alignment: 0.35,
+          alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+        );
+      } on FlutterError {
+        // Focus restoration is still useful even when the node is outside a
+        // scrollable, or when the scrollable is settling after a route pop.
+      }
+      final primaryFocus = FocusManager.instance.primaryFocus;
+      if ((primaryFocus == null || primaryFocus.context == null) &&
+          attempt < 5) {
+        Future<void>.delayed(
+          const Duration(milliseconds: 24),
+          () => restore(attempt + 1),
+        );
+      }
+    });
+  }
+
+  restore();
+}
+
+void _installTvKeyboardErrorFilter() {
+  final previousOnError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    if (_isStaleTvKeyUpAssertion(details)) return;
+    if (_isBenignTvPlatformStreamCancel(details)) return;
+    if (previousOnError != null) {
+      previousOnError(details);
+      return;
+    }
+    FlutterError.presentError(details);
+  };
+}
+
+bool _isStaleTvKeyUpAssertion(FlutterErrorDetails details) {
+  if (details.library != 'services library') return false;
+  final exception = details.exceptionAsString();
+  return exception.contains('A KeyUpEvent is dispatched') &&
+      exception.contains('_pressedKeys.containsKey(event.physicalKey)');
+}
+
+bool _isBenignTvPlatformStreamCancel(FlutterErrorDetails details) {
+  if (details.library != 'services library') return false;
+  final exception = details.exceptionAsString();
+  return exception.contains('MissingPluginException') &&
+      exception.contains('No implementation found for method cancel') &&
+      (exception.contains('flutter_video_plugin/getVideoEvents_') ||
+          exception.contains('flutter_video_plugin/getRendererEvents_'));
 }
 
 class JuicrTvApp extends StatelessWidget {
@@ -104,7 +328,7 @@ class JuicrTvApp extends StatelessWidget {
           seedColor: const Color(0xFF20D66B),
           brightness: Brightness.dark,
         ),
-        scaffoldBackgroundColor: const Color(0xFF07080D),
+        scaffoldBackgroundColor: Colors.black,
         snackBarTheme: SnackBarThemeData(
           behavior: SnackBarBehavior.floating,
           width: 720,
@@ -118,20 +342,16 @@ class JuicrTvApp extends StatelessWidget {
             borderRadius: BorderRadius.circular(18),
             side: const BorderSide(color: Color(0x22FFFFFF)),
           ),
-          insetPadding: const EdgeInsets.only(bottom: _tvSpacing),
+          insetPadding: const EdgeInsets.only(
+            left: _tvNavigationRailWidth,
+            bottom: _tvSpacing,
+          ),
         ),
         useMaterial3: true,
       ),
       home: const TvHomePage(),
     );
   }
-}
-
-class _ScoredTvItem {
-  const _ScoredTvItem(this.item, this.score);
-
-  final _TvItem item;
-  final double score;
 }
 
 class _TvHydratedHomeSignals {
@@ -171,7 +391,7 @@ class TvHomePage extends StatefulWidget {
   State<TvHomePage> createState() => _TvHomePageState();
 }
 
-class _TvHomePageState extends State<TvHomePage> {
+class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   final GlobalKey<_TvNavigationRailState> _navigationRailKey =
       GlobalKey<_TvNavigationRailState>();
   final GlobalKey _homeHeroKey = GlobalKey(debugLabel: 'tv-home-hero');
@@ -191,6 +411,14 @@ class _TvHomePageState extends State<TvHomePage> {
     _tabItems.length,
     null,
   );
+  late final List<String?> _lastPageFocusItemKeys = List<String?>.filled(
+    _tabItems.length,
+    null,
+  );
+  late final List<String?> _pendingPageFocusItemKeys = List<String?>.filled(
+    _tabItems.length,
+    null,
+  );
   final _api = _TvApi();
   final _items = <_TvItem>[];
   final _movies = <_TvItem>[];
@@ -206,14 +434,23 @@ class _TvHomePageState extends State<TvHomePage> {
   List<_TvItem> _topSignalRemoteItems = const <_TvItem>[];
   List<_TvItem> _todaySignalRemoteItems = const <_TvItem>[];
   List<_TvItem> _juicrTopSignalRemoteItems = const <_TvItem>[];
+  final _homeArtworkByKey = <String, _TvItem>{};
+  final _homeArtworkHydrationKeys = <String>{};
+  final _homeArtworkHydrationAttempts = <String, int>{};
+  bool _homeArtworkHydrating = false;
+  Future<void>? _catalogLoadFuture;
+  DateTime? _catalogLoadedAt;
   final _recentItems = <_TvItem>[];
   final _likedItemKeys = <String>{};
   final _watchedProgress = <String, _TvPlaybackProgress>{};
+  final _verifiedPlaybackSessions =
+      <String, List<_TvVerifiedPlaybackSession>>{};
   final _accountStore = const TvAccountStateStore();
   TvLibraryStateStore? _libraryStore;
   TvAccountSession? _accountSession;
   TvAccountProfile? _accountProfile;
   String _accountLibraryRevision = '';
+  int? _accountActiveWatchSeconds;
   _TvAccountSyncState _accountSyncState = _TvAccountSyncState.guest;
   Timer? _accountLibraryPushTimer;
   _TvHomeEditorialEdition? _homeEditorial;
@@ -223,7 +460,12 @@ class _TvHomePageState extends State<TvHomePage> {
   _TvItem? _selectedItem;
   _TvRail? _expandedRail;
   bool _searchOpen = false;
+  int _homeHeroIndex = 0;
+  int _homeHeroCarouselPauseDepth = 0;
+  final GlobalKey<_TvSearchOverlayState> _searchOverlayKey =
+      GlobalKey<_TvSearchOverlayState>();
   String? _preparingPlaybackKey;
+  int _playRequestGeneration = 0;
   DateTime? _lastBackDispatchAt;
   DateTime? _lastExitBackPressAt;
   _TvDiscoveryKind _discoveryKind = _TvDiscoveryKind.movie;
@@ -251,14 +493,18 @@ class _TvHomePageState extends State<TvHomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     FocusManager.instance.addListener(_tracePrimaryFocus);
     unawaited(_restoreTvLibraryState());
     unawaited(_restoreTvAccountState());
+    unawaited(_restoreVerifiedPlaybackSessions());
     unawaited(_restoreTvSettings());
+    _restoreStartupFocusAfterFrame();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     FocusManager.instance.removeListener(_tracePrimaryFocus);
     _homeHeroWatchFocusNode.dispose();
     for (final node in _pageEntryFocusNodes) {
@@ -273,6 +519,34 @@ class _TvHomePageState extends State<TvHomePage> {
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_resyncTvKeyboardAfterResume());
+    }
+  }
+
+  Future<void> _resyncTvKeyboardAfterResume() async {
+    try {
+      await HardwareKeyboard.instance.syncKeyboardState();
+    } catch (_) {
+      // Some Android TV surfaces may not answer the keyboard state query while
+      // the window is settling after resume. Focus restoration is still useful.
+    }
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_primaryFocusNeedsRestore) return;
+      if (_searchOpen) {
+        _searchOverlayKey.currentState?.restoreFocus();
+        return;
+      }
+      if (_selectedItem == null) {
+        _enterSelectedTabContent();
+      }
+    });
+  }
+
   void _tracePrimaryFocus() {
     if (!kDebugMode) return;
     final label = FocusManager.instance.primaryFocus?.debugLabel;
@@ -282,6 +556,33 @@ class _TvHomePageState extends State<TvHomePage> {
     debugPrint(
       'Juicr TV focus trace label=$safeLabel tab=${_tabItems[_selectedTab].label}',
     );
+    if (safeLabel == 'none') {
+      _restorePrimaryFocusIfStillMissing();
+    }
+  }
+
+  void _restorePrimaryFocusIfStillMissing([int attempt = 0]) {
+    Future<void>.delayed(Duration(milliseconds: 80 + attempt * 45), () {
+      if (!mounted || !_primaryFocusNeedsRestore) return;
+      if (!(ModalRoute.of(context)?.isCurrent ?? true)) return;
+      if (_searchOpen) {
+        _searchOverlayKey.currentState?.restoreFocus();
+      } else if (_selectedItem == null) {
+        if (attempt >= 4 && _selectedTab == 0) {
+          _lastPageFocusNodes[0] = null;
+          _lastPageFocusItemKeys[0] = null;
+        }
+        if (attempt >= 6) {
+          _navigationRailKey.currentState?.focusSelected();
+        } else if (attempt >= 2) {
+          _focusPageEntry();
+        } else {
+          _enterSelectedTabContent();
+        }
+      }
+      if (!_primaryFocusNeedsRestore || attempt >= 6) return;
+      _restorePrimaryFocusIfStillMissing(attempt + 1);
+    });
   }
 
   void _focusNavigationAfterFrame() {
@@ -291,32 +592,289 @@ class _TvHomePageState extends State<TvHomePage> {
     });
   }
 
-  Future<void> _loadCatalog() async {
-    if (!_tvSettings.hasCatalogSource) {
+  void _restoreStartupFocusAfterFrame([int attempt = 0]) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_primaryFocusNeedsRestore) return;
+      if (_searchOpen) {
+        _searchOverlayKey.currentState?.restoreFocus();
+      } else if (_selectedItem == null) {
+        _enterSelectedTabContent();
+      }
+      if (attempt >= 8) {
+        if (_primaryFocusNeedsRestore) {
+          _navigationRailKey.currentState?.focusSelected();
+        }
+        return;
+      }
+      Future<void>.delayed(
+        Duration(milliseconds: 90 + attempt * 45),
+        () => _restoreStartupFocusAfterFrame(attempt + 1),
+      );
+    });
+  }
+
+  bool get _primaryFocusNeedsRestore {
+    final primaryFocus = FocusManager.instance.primaryFocus;
+    if (primaryFocus == null ||
+        primaryFocus == FocusManager.instance.rootScope ||
+        primaryFocus.context == null) {
+      return true;
+    }
+    final label = primaryFocus.debugLabel?.trim() ?? '';
+    return label.isEmpty ||
+        label == 'none' ||
+        label.startsWith('_ModalScopeState');
+  }
+
+  bool get _hasCatalogSnapshot =>
+      _items.isNotEmpty ||
+      _discoveryLaneItems.values.any((lane) => lane.isNotEmpty);
+
+  bool get _hasFreshCatalogSnapshot {
+    final loadedAt = _catalogLoadedAt;
+    if (!_hasCatalogSnapshot || loadedAt == null) return false;
+    return DateTime.now().difference(loadedAt) < const Duration(minutes: 20);
+  }
+
+  Map<String, dynamic> _catalogWarmItemJson(_TvItem item) {
+    return {
+      'id': item.id,
+      'type': item.type,
+      'title': item.title,
+      if ((item.poster ?? '').trim().isNotEmpty) 'poster': item.poster,
+      if ((item.background ?? '').trim().isNotEmpty)
+        'background': item.background,
+      if ((item.logo ?? '').trim().isNotEmpty) 'logo': item.logo,
+      if ((item.year ?? '').trim().isNotEmpty) 'year': item.year,
+      if (item.tmdbId != null) 'tmdbId': item.tmdbId,
+      if (item.genres.isNotEmpty) 'genres': item.genres,
+      if ((item.description ?? '').trim().isNotEmpty)
+        'description': item.description,
+      if ((item.imdbRating ?? '').trim().isNotEmpty)
+        'imdbRating': item.imdbRating,
+      if ((item.releaseDate ?? '').trim().isNotEmpty)
+        'releaseDate': item.releaseDate,
+      if (item.isUpcoming) 'isUpcoming': true,
+      if ((item.runtime ?? '').trim().isNotEmpty) 'runtime': item.runtime,
+    };
+  }
+
+  _TvItem? _catalogWarmItemFromJson(Object? value) {
+    if (value is! Map) return null;
+    try {
+      final json = Map<String, dynamic>.from(value);
+      final fallbackType = (json['type'] ?? 'movie').toString();
+      final item = _TvItem.fromJson(json, fallbackType: fallbackType);
+      if (item.id.trim().isEmpty || item.title.trim().isEmpty) return null;
+      if (!_hasTvDiscoveryArtwork(item)) return null;
+      return item;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  List<Map<String, dynamic>> _catalogWarmItemsJson(
+    Iterable<_TvItem> items, {
+    int limit = 80,
+  }) {
+    return items.take(limit).map(_catalogWarmItemJson).toList(growable: false);
+  }
+
+  List<_TvItem> _catalogWarmItemsFromJson(Object? value) {
+    if (value is! List) return const <_TvItem>[];
+    return value.map(_catalogWarmItemFromJson).nonNulls.toList(growable: false);
+  }
+
+  Map<String, List<_TvItem>> _catalogWarmLanesFromJson(Object? value) {
+    if (value is! Map) return const <String, List<_TvItem>>{};
+    final lanes = <String, List<_TvItem>>{};
+    for (final entry in value.entries) {
+      final key = entry.key.toString();
+      final items = _catalogWarmItemsFromJson(entry.value);
+      if (items.isNotEmpty) lanes[key] = items;
+    }
+    return lanes;
+  }
+
+  Future<bool> _restoreCatalogWarmSnapshot(SharedPreferences prefs) async {
+    try {
+      final encoded = prefs.getString(_tvCatalogWarmSnapshotPrefsKey);
+      if (encoded == null || encoded.trim().isEmpty) return false;
+      final decoded = jsonDecode(encoded);
+      if (decoded is! Map) return false;
+      final snapshot = Map<String, dynamic>.from(decoded);
+      final items = _catalogWarmItemsFromJson(snapshot['items']);
+      final lanes = _catalogWarmLanesFromJson(snapshot['lanes']);
+      if (items.isEmpty && lanes.values.every((lane) => lane.isEmpty)) {
+        return false;
+      }
+      final loadedAtMs = int.tryParse(
+        (snapshot['loadedAtMs'] ?? '').toString(),
+      );
+      final loadedAt = loadedAtMs == null
+          ? DateTime.now()
+          : DateTime.fromMillisecondsSinceEpoch(loadedAtMs);
+      final editorial = snapshot['editorial'] is Map
+          ? _TvHomeEditorialEdition.fromJson(
+              Map<String, dynamic>.from(snapshot['editorial'] as Map),
+            )
+          : null;
+      final heroItems = _catalogWarmItemsFromJson(snapshot['hero']);
+      final topSignalItems = _catalogWarmItemsFromJson(snapshot['topSignal']);
+      final todaySignalItems = _catalogWarmItemsFromJson(
+        snapshot['todaySignal'],
+      );
+      final juicrTopSignalItems = _catalogWarmItemsFromJson(
+        snapshot['juicrTopSignal'],
+      );
+      final upcomingPicks = lanes[_tvDiscoveryLaneKey(
+            _TvDiscoveryKind.movie,
+            _TvDiscoverySort.upcoming,
+          )] ??
+          const <_TvItem>[];
+      if (!mounted) return false;
       setState(() {
-        _loading = false;
-        _error = null;
-        _homeEditorial = null;
-        _items.clear();
-        _movies.clear();
-        _series.clear();
-        _animation.clear();
-        _liveTv.clear();
-        _discoveryLaneItems.clear();
-        _discoveryLanePages.clear();
+        _items
+          ..clear()
+          ..addAll(items);
+        _movies
+          ..clear()
+          ..addAll(items.where((item) => item.type == 'movie'));
+        _series
+          ..clear()
+          ..addAll(items.where((item) => item.type == 'series'));
+        _animation
+          ..clear()
+          ..addAll(items.where(_isAnimationOrAnimationItem));
+        _liveTv
+          ..clear()
+          ..addAll(
+            items.where(
+              (item) =>
+                  _matchesDiscoveryLaneKind(item, _TvDiscoveryKind.liveTv),
+            ),
+          );
+        _discoveryLaneItems
+          ..clear()
+          ..addAll(lanes);
+        _discoveryLanePages
+          ..clear()
+          ..addAll({for (final key in lanes.keys) key: 1});
         _discoveryLaneLoading.clear();
         _discoveryLaneExhausted.clear();
-        _upcomingPicks.clear();
-        _heroEditorialItems = const <_TvItem>[];
-        _topSignalRemoteItems = const <_TvItem>[];
-        _todaySignalRemoteItems = const <_TvItem>[];
-        _juicrTopSignalRemoteItems = const <_TvItem>[];
+        _upcomingPicks
+          ..clear()
+          ..addAll(upcomingPicks);
+        _heroEditorialItems = heroItems;
+        _topSignalRemoteItems = topSignalItems;
+        _todaySignalRemoteItems = todaySignalItems;
+        _juicrTopSignalRemoteItems = juicrTopSignalItems;
+        _homeEditorial = editorial?.hasUsableRails == true ? editorial : null;
+        final homeSnapshotItems = <_TvItem>[
+          ...heroItems,
+          ...topSignalItems,
+          ...todaySignalItems,
+          ...juicrTopSignalItems,
+        ];
+        _homeArtworkByKey.clear();
+        _homeArtworkByKey.addAll(_homeArtworkMap(homeSnapshotItems));
+        _homeArtworkHydrationKeys.clear();
+        _homeArtworkHydrationKeys.addAll(
+          homeSnapshotItems
+              .where((item) => (item.logo ?? '').trim().isNotEmpty)
+              .expand(_homeArtworkKeys),
+        );
+        _homeArtworkHydrationAttempts.clear();
+        _catalogLoadedAt = loadedAt;
+        _loading = false;
+        _error = null;
+        _reconcileRecentItemsWithCatalog();
       });
-      _focusNavigationAfterFrame();
+      debugPrint(
+        'Juicr TV catalog warm snapshot restored '
+        'items=${items.length} lanes=${lanes.length}',
+      );
+      return true;
+    } catch (error) {
+      debugPrint(
+        'Juicr TV catalog warm snapshot skipped '
+        'bucket=catalog_snapshot_restore errorType=${error.runtimeType}',
+      );
+      return false;
+    }
+  }
+
+  Future<void> _saveCatalogWarmSnapshot() async {
+    final hasSnapshotPayload = _items.isNotEmpty ||
+        _discoveryLaneItems.values.any((lane) => lane.isNotEmpty) ||
+        _heroEditorialItems.isNotEmpty ||
+        _topSignalRemoteItems.isNotEmpty ||
+        _todaySignalRemoteItems.isNotEmpty ||
+        _juicrTopSignalRemoteItems.isNotEmpty;
+    if (!hasSnapshotPayload) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final lanes = <String, List<Map<String, dynamic>>>{
+        for (final entry in _discoveryLaneItems.entries)
+          if (entry.value.isNotEmpty)
+            entry.key: _catalogWarmItemsJson(entry.value, limit: 48),
+      };
+      final snapshot = {
+        'version': 1,
+        'loadedAtMs':
+            (_catalogLoadedAt ?? DateTime.now()).millisecondsSinceEpoch,
+        'items': _catalogWarmItemsJson(_items, limit: 360),
+        'hero': _catalogWarmItemsJson(_heroEditorialItems, limit: 12),
+        if (_homeEditorial != null) 'editorial': _homeEditorial!.toJson(),
+        'topSignal': _catalogWarmItemsJson(_topSignalRemoteItems, limit: 24),
+        'todaySignal': _catalogWarmItemsJson(
+          _todaySignalRemoteItems,
+          limit: 24,
+        ),
+        'juicrTopSignal': _catalogWarmItemsJson(
+          _juicrTopSignalRemoteItems,
+          limit: 12,
+        ),
+        'lanes': lanes,
+      };
+      await prefs.setString(
+        _tvCatalogWarmSnapshotPrefsKey,
+        jsonEncode(snapshot),
+      );
+    } catch (error) {
+      debugPrint(
+        'Juicr TV catalog warm snapshot save skipped '
+        'bucket=catalog_snapshot_save errorType=${error.runtimeType}',
+      );
+    }
+  }
+
+  Future<void> _loadCatalog({bool force = false}) async {
+    if (!_tvSettings.hasCatalogSource) {
+      _clearCatalogForDisabledSource();
       return;
     }
+    if (!force && _hasFreshCatalogSnapshot) return;
+    final existingLoad = _catalogLoadFuture;
+    if (existingLoad != null) {
+      await existingLoad;
+      return;
+    }
+    final future = _loadCatalogInner(force: force);
+    _catalogLoadFuture = future;
+    try {
+      await future;
+    } finally {
+      if (identical(_catalogLoadFuture, future)) {
+        _catalogLoadFuture = null;
+      }
+    }
+  }
+
+  Future<void> _loadCatalogInner({required bool force}) async {
     setState(() {
-      _loading = true;
+      _loading = !_hasCatalogSnapshot;
       _error = null;
     });
     try {
@@ -438,6 +996,9 @@ class _TvHomePageState extends State<TvHomePage> {
           pages: 1,
         ),
       ];
+      var catalogFetchHadError = false;
+      void markCatalogFetchError() => catalogFetchHadError = true;
+
       final results = await Future.wait<Object?>([
         for (final request in catalogRequests)
           _safeCatalog(
@@ -445,13 +1006,13 @@ class _TvHomePageState extends State<TvHomePage> {
             fallbackType: request.fallbackType,
             sort: request.catalogSort,
             pages: request.pages,
+            onError: markCatalogFetchError,
           ),
-        _api.homeEditorial(),
+        _safeHomeEditorial(),
       ]).timeout(const Duration(seconds: 35));
       final editorialResult = results[catalogRequests.length];
-      final editorial = editorialResult is _TvHomeEditorialEdition
-          ? editorialResult
-          : null;
+      final editorial =
+          editorialResult is _TvHomeEditorialEdition ? editorialResult : null;
       final merged = <String, _TvItem>{};
       final discoveryLaneMaps = <String, Map<String, _TvItem>>{};
       final discoveryLanePages = <String, int>{};
@@ -470,6 +1031,7 @@ class _TvHomePageState extends State<TvHomePage> {
         );
         for (final item in list) {
           final normalized = _normalizeCatalogLane(item);
+          if (!_matchesDiscoveryLaneKind(normalized, request.kind)) continue;
           final itemKey = '${normalized.type}:${normalized.id}';
           laneMap[itemKey] = normalized;
           merged[itemKey] = normalized;
@@ -477,24 +1039,71 @@ class _TvHomePageState extends State<TvHomePage> {
       }
       final discoveryLanes = {
         for (final entry in discoveryLaneMaps.entries)
-          entry.key: entry.value.values
-              .where((item) => item.poster != null)
-              .toList(growable: false),
+          entry.key: entry.value.values.toList(growable: false),
       };
-      final all = merged.values.where((item) => item.poster != null).toList();
-      final upcomingPicks =
-          discoveryLanes[_tvDiscoveryLaneKey(
-                _TvDiscoveryKind.movie,
-                _TvDiscoverySort.upcoming,
-              )]
+      final all = merged.values.toList();
+      final upcomingPicks = discoveryLanes[_tvDiscoveryLaneKey(
+            _TvDiscoveryKind.movie,
+            _TvDiscoverySort.upcoming,
+          )]
               ?.where((item) => item.type == 'movie')
               .toList(growable: false) ??
           const <_TvItem>[];
-      final heroEditorial = _editorialOrFallback(
-        editorial?.hero,
-        _dailyHeroEditorial(),
-      );
-      final heroItems = await _loadCuratedHeroItems(heroEditorial);
+      final hasLoadedCatalog = all.isNotEmpty ||
+          discoveryLanes.values.any((lane) => lane.isNotEmpty);
+      if (!hasLoadedCatalog && _hasCatalogSnapshot) {
+        debugPrint(
+          'Juicr TV catalog refresh retained snapshot '
+          'bucket=empty_refresh hadNetworkError=$catalogFetchHadError',
+        );
+        if (!mounted) return;
+        setState(() {
+          _loading = false;
+          _error = null;
+          _discoveryLaneLoading.clear();
+        });
+        return;
+      }
+      if (!hasLoadedCatalog) {
+        debugPrint(
+          'Juicr TV catalog hydrate stopped '
+          'bucket=empty_initial hadNetworkError=$catalogFetchHadError',
+        );
+        if (!mounted) return;
+        setState(() {
+          _loading = false;
+          _error = 'Catalog is unavailable right now. Try again shortly.';
+          _discoveryLaneLoading.clear();
+          _discoveryLaneExhausted.clear();
+        });
+        _focusNavigationAfterFrame();
+        return;
+      }
+      final previousEditorial = _homeEditorial;
+      final previousEditionKey = previousEditorial == null
+          ? ''
+          : '${previousEditorial.editionId}|${previousEditorial.editionDate}';
+      final nextEditionKey = editorial == null
+          ? ''
+          : '${editorial.editionId}|${editorial.editionDate}';
+      final preserveHomeSignals =
+          previousEditionKey.isNotEmpty && previousEditionKey == nextEditionKey;
+      final heroEditorial = editorial?.hero;
+      var curatedHeroItems = const <_TvItem>[];
+      if (heroEditorial != null && _hasHomeEditorialScope(heroEditorial)) {
+        try {
+          final heroItems = await _loadCuratedHeroItems(
+            heroEditorial,
+            seedItems: all,
+          );
+          curatedHeroItems = heroItems;
+        } catch (error) {
+          debugPrint(
+            'Juicr TV hero editorial hydrate skipped '
+            'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+          );
+        }
+      }
       if (!mounted) return;
       setState(() {
         _items
@@ -511,7 +1120,12 @@ class _TvHomePageState extends State<TvHomePage> {
           ..addAll(all.where(_isAnimationOrAnimationItem));
         _liveTv
           ..clear()
-          ..addAll(all.where(_isLiveTvItem));
+          ..addAll(
+            all.where(
+              (item) =>
+                  _matchesDiscoveryLaneKind(item, _TvDiscoveryKind.liveTv),
+            ),
+          );
         _discoveryLaneItems
           ..clear()
           ..addAll(discoveryLanes);
@@ -523,11 +1137,23 @@ class _TvHomePageState extends State<TvHomePage> {
         _upcomingPicks
           ..clear()
           ..addAll(upcomingPicks);
-        _heroEditorialItems = heroItems;
-        _topSignalRemoteItems = const <_TvItem>[];
-        _todaySignalRemoteItems = const <_TvItem>[];
-        _juicrTopSignalRemoteItems = const <_TvItem>[];
+        _heroEditorialItems = curatedHeroItems;
+        if (!preserveHomeSignals) {
+          _topSignalRemoteItems = const <_TvItem>[];
+          _todaySignalRemoteItems = const <_TvItem>[];
+          _juicrTopSignalRemoteItems = const <_TvItem>[];
+        }
+        _homeArtworkByKey.clear();
+        _homeArtworkByKey.addAll(_homeArtworkMap(curatedHeroItems));
+        _homeArtworkHydrationKeys.clear();
+        _homeArtworkHydrationKeys.addAll(
+          curatedHeroItems
+              .where((item) => (item.logo ?? '').trim().isNotEmpty)
+              .expand(_homeArtworkKeys),
+        );
+        _homeArtworkHydrationAttempts.clear();
         _homeEditorial = editorial;
+        _catalogLoadedAt = DateTime.now();
         _loading = false;
         _reconcileRecentItemsWithCatalog();
       });
@@ -535,9 +1161,23 @@ class _TvHomePageState extends State<TvHomePage> {
         if (!mounted || _selectedItem != null || _searchOpen) return;
         _focusSelectedTabFirstItem();
       });
+      unawaited(_saveCatalogWarmSnapshot());
       unawaited(_refreshHomeSignalRails(editorial, seedItems: all));
+      unawaited(_refreshHomeRailArtwork());
     } catch (error) {
       if (!mounted) return;
+      if (_hasCatalogSnapshot) {
+        debugPrint(
+          'Juicr TV catalog refresh retained snapshot '
+          'bucket=refresh_exception errorType=${error.runtimeType}',
+        );
+        setState(() {
+          _loading = false;
+          _error = null;
+          _discoveryLaneLoading.clear();
+        });
+        return;
+      }
       setState(() {
         _loading = false;
         _error = 'Catalog is unavailable right now. Try again shortly.';
@@ -550,24 +1190,24 @@ class _TvHomePageState extends State<TvHomePage> {
     required String sort,
     String? fallbackType,
     int pages = 1,
+    void Function()? onError,
   }) async {
     final merged = <String, _TvItem>{};
     final safePages = pages.clamp(1, 4).toInt();
     for (var page = 1; page <= safePages; page += 1) {
       try {
-        final items = await _api
-            .catalog(
-              type: type,
-              fallbackType: fallbackType,
-              sort: sort,
-              page: page,
-            )
-            .timeout(const Duration(seconds: 6));
+        final items = await _catalogPageWithRetry(
+          type: type,
+          fallbackType: fallbackType,
+          sort: sort,
+          page: page,
+        );
         if (items.isEmpty) break;
         for (final item in items) {
           merged['${item.type}:${item.id}'] = item;
         }
       } catch (error) {
+        onError?.call();
         debugPrint(
           'Juicr TV catalog page skipped '
           'lane=$type page=$page bucket=${_apiErrorBucket(error)} '
@@ -579,8 +1219,86 @@ class _TvHomePageState extends State<TvHomePage> {
     return merged.values.toList(growable: false);
   }
 
+  Future<List<_TvItem>> _catalogPageWithRetry({
+    required String type,
+    required String sort,
+    required int page,
+    String? fallbackType,
+    String? genre,
+  }) async {
+    Object? lastError;
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await _api
+            .catalog(
+              type: type,
+              fallbackType: fallbackType,
+              sort: sort,
+              page: page,
+              genre: genre ?? '',
+            )
+            .timeout(const Duration(seconds: 8));
+      } catch (error) {
+        lastError = error;
+        if (attempt == 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 260));
+        }
+      }
+    }
+    Error.throwWithStackTrace(lastError!, StackTrace.current);
+  }
+
+  Future<_TvHomeEditorialEdition?> _safeHomeEditorial() async {
+    try {
+      return await _api.homeEditorial().timeout(const Duration(seconds: 8));
+    } catch (error) {
+      debugPrint(
+        'Juicr TV home editorial skipped '
+        'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+      );
+      return null;
+    }
+  }
+
+  void _clearCatalogForDisabledSource() {
+    if (!mounted) return;
+    if (!_hasCatalogSnapshot &&
+        !_loading &&
+        _error == null &&
+        _homeEditorial == null &&
+        _heroEditorialItems.isEmpty &&
+        _topSignalRemoteItems.isEmpty &&
+        _todaySignalRemoteItems.isEmpty &&
+        _juicrTopSignalRemoteItems.isEmpty &&
+        _upcomingPicks.isEmpty) {
+      return;
+    }
+    setState(() {
+      _loading = false;
+      _error = null;
+      _items.clear();
+      _movies.clear();
+      _series.clear();
+      _animation.clear();
+      _liveTv.clear();
+      _discoveryLaneItems.clear();
+      _discoveryLanePages.clear();
+      _discoveryLaneLoading.clear();
+      _discoveryLaneExhausted.clear();
+      _upcomingPicks.clear();
+      _heroEditorialItems = const <_TvItem>[];
+      _topSignalRemoteItems = const <_TvItem>[];
+      _todaySignalRemoteItems = const <_TvItem>[];
+      _juicrTopSignalRemoteItems = const <_TvItem>[];
+      _homeArtworkByKey.clear();
+      _homeArtworkHydrationKeys.clear();
+      _homeArtworkHydrationAttempts.clear();
+      _homeEditorial = null;
+      _catalogLoadedAt = null;
+    });
+  }
+
   Future<void> _loadMoreDiscoveryLane() async {
-    if (!_tvSettings.hasCatalogSource) return;
     final laneKey = _tvDiscoveryLaneKey(
       _discoveryKind,
       _discoverySort,
@@ -608,25 +1326,26 @@ class _TvHomePageState extends State<TvHomePage> {
           '${item.type}:${item.id}': item,
       };
       var exhausted = false;
-      final items = await _api
-          .catalog(
-            type: type,
-            fallbackType: fallbackType,
-            sort: _discoverySort.catalogSortId,
-            page: nextPage,
-            genre: _discoveryGenre,
-          )
-          .timeout(const Duration(seconds: 7));
+      var addedCount = 0;
+      final items = await _loadMoreDiscoveryCatalogPage(
+        type: type,
+        fallbackType: fallbackType,
+        sort: _discoverySort.catalogSortId,
+        page: nextPage,
+        genre: _discoveryGenre,
+      );
       if (items.isEmpty) {
         exhausted = true;
       }
       for (final item in items) {
         final normalized = _normalizeCatalogLane(item);
-        if (normalized.poster == null) continue;
+        if (!_matchesDiscoveryLaneKind(normalized, _discoveryKind)) continue;
         final itemKey = '${normalized.type}:${normalized.id}';
         if (existing.containsKey(itemKey)) continue;
         existing[itemKey] = normalized;
+        addedCount += 1;
       }
+      if (addedCount == 0) exhausted = true;
       if (!mounted) return;
       setState(() {
         _discoveryLanePages[laneKey] = math.max(
@@ -642,6 +1361,12 @@ class _TvHomePageState extends State<TvHomePage> {
         'lane=$laneKey page=$nextPage bucket=${_apiErrorBucket(error)} '
         'errorType=${error.runtimeType}',
       );
+      if (mounted) {
+        setState(() {
+          _discoveryLaneItems.putIfAbsent(laneKey, () => const <_TvItem>[]);
+          _discoveryLaneExhausted.add(laneKey);
+        });
+      }
     } finally {
       if (mounted) {
         setState(() => _discoveryLaneLoading.remove(laneKey));
@@ -649,6 +1374,53 @@ class _TvHomePageState extends State<TvHomePage> {
         _discoveryLaneLoading.remove(laneKey);
       }
     }
+  }
+
+  Future<List<_TvItem>> _loadMoreDiscoveryCatalogPage({
+    required String type,
+    required String sort,
+    required int page,
+    required String genre,
+    String? fallbackType,
+  }) async {
+    if (_discoveryKind != _TvDiscoveryKind.liveTv) {
+      return _catalogPageWithRetry(
+        type: type,
+        fallbackType: fallbackType,
+        sort: sort,
+        page: page,
+        genre: genre,
+      );
+    }
+
+    const liveCatalogAliases = ['live_tv', 'livetv', 'channel', 'channels'];
+    final merged = <String, _TvItem>{};
+    final results = await Future.wait<List<_TvItem>>(
+      liveCatalogAliases.map((alias) async {
+        try {
+          return await _catalogPageWithRetry(
+            type: alias,
+            fallbackType: alias == 'live_tv' ? 'live' : null,
+            sort: sort,
+            page: page,
+            genre: genre,
+          );
+        } catch (error) {
+          debugPrint(
+            'Juicr TV discovery load more skipped '
+            'lane=$alias page=$page bucket=${_apiErrorBucket(error)} '
+            'errorType=${error.runtimeType}',
+          );
+          return const <_TvItem>[];
+        }
+      }),
+    );
+    for (final list in results) {
+      for (final item in list) {
+        merged['${item.type}:${item.id}'] = item;
+      }
+    }
+    return merged.values.toList(growable: false);
   }
 
   Future<_TvHydratedHomeSignals> _hydrateHomeSignalRails(
@@ -690,15 +1462,194 @@ class _TvHomePageState extends State<TvHomePage> {
     );
     if (!mounted) return;
     final current = _homeEditorial;
-    final currentKey = current == null
-        ? ''
-        : '${current.editionId}|${current.editionDate}';
+    final currentKey =
+        current == null ? '' : '${current.editionId}|${current.editionDate}';
     if (currentKey != editionKey) return;
+    final hasTopSignal = hydrated.topSignal.isNotEmpty;
+    final hasTodaySignal = hydrated.todaySignal.isNotEmpty;
+    final hasJuicrTopSignal = hydrated.juicrTopSignal.isNotEmpty;
+    if (!hasTopSignal && !hasTodaySignal && !hasJuicrTopSignal) {
+      debugPrint(
+        'Juicr TV home signal retained previous rails '
+        'bucket=empty_signal_refresh',
+      );
+      return;
+    }
     setState(() {
-      _topSignalRemoteItems = hydrated.topSignal;
-      _todaySignalRemoteItems = hydrated.todaySignal;
-      _juicrTopSignalRemoteItems = hydrated.juicrTopSignal;
+      if (hasTopSignal) _topSignalRemoteItems = hydrated.topSignal;
+      if (hasTodaySignal) _todaySignalRemoteItems = hydrated.todaySignal;
+      if (hasJuicrTopSignal) {
+        _juicrTopSignalRemoteItems = hydrated.juicrTopSignal;
+      }
     });
+    unawaited(_refreshHomeRailArtwork());
+    unawaited(_saveCatalogWarmSnapshot());
+  }
+
+  Future<void> _refreshHomeRailArtwork() async {
+    if (!mounted || _loading || _homeArtworkHydrating) return;
+    const batchLimit = 4;
+    const maxAttempts = 2;
+    final candidates = <_TvItem>[
+      ..._items,
+      ..._movies,
+      ..._series,
+      ..._animation,
+      ..._liveTv,
+      ..._upcomingPicks,
+      ..._recentItems,
+      ..._homeHeroItems,
+      for (final rail in _rails) ...rail.items,
+    ];
+    final candidatesByKey = <String, _TvItem>{};
+    final seen = <String>{};
+    for (final item in candidates) {
+      final key = _homeUsedKey(item);
+      if (!seen.add(key)) continue;
+      if (_homeArtworkHydrationKeys.contains(key) ||
+          _hasCompleteTvArtwork(_applyHomeArtwork(item))) {
+        continue;
+      }
+      if (_hasCompleteTvArtwork(item)) continue;
+      if (item.tmdbId == null && item.id.trim().isEmpty) continue;
+      final attempts = _homeArtworkHydrationAttempts[key] ?? 0;
+      if (attempts >= maxAttempts) continue;
+      candidatesByKey[key] = item;
+    }
+    final pendingEntries = candidatesByKey.entries.toList(growable: false)
+      ..sort((left, right) {
+        final attemptDelta = (_homeArtworkHydrationAttempts[left.key] ?? 0)
+            .compareTo(_homeArtworkHydrationAttempts[right.key] ?? 0);
+        if (attemptDelta != 0) return attemptDelta;
+        return left.key.compareTo(right.key);
+      });
+    final pending = Map<String, _TvItem>.fromEntries(
+      pendingEntries.take(batchLimit),
+    );
+    for (final key in pending.keys) {
+      _homeArtworkHydrationAttempts[key] =
+          (_homeArtworkHydrationAttempts[key] ?? 0) + 1;
+    }
+    if (pending.isEmpty) return;
+    final shouldContinue = pendingEntries.length > batchLimit;
+    _homeArtworkHydrating = true;
+    final byKey = <String, _TvItem>{};
+    try {
+      final hydrated = <MapEntry<String, _TvItem>>[];
+      for (final entry in pending.entries) {
+        hydrated.add(
+          MapEntry(
+            entry.key,
+            await _hydrateHeroArtworkItem(entry.value),
+          ),
+        );
+        if (!mounted) return;
+      }
+      if (!mounted) return;
+      for (final entry in hydrated) {
+        final item = entry.value;
+        final hasArtwork = _hasPrimaryTvArtwork(item) ||
+            (item.logo ?? '').trim().isNotEmpty ||
+            (item.description ?? '').trim().isNotEmpty;
+        if (hasArtwork) {
+          byKey[entry.key] = item;
+          for (final key in _homeArtworkKeys(item)) {
+            byKey[key] = item;
+          }
+          final requested = pending[entry.key];
+          if (requested != null) {
+            for (final key in _homeArtworkKeys(requested)) {
+              byKey[key] = item;
+            }
+          }
+        }
+        if (_hasCompleteTvArtwork(_applyHomeArtwork(item))) {
+          _homeArtworkHydrationKeys.addAll({
+            entry.key,
+            ..._homeArtworkKeys(item),
+            if (pending[entry.key] != null)
+              ..._homeArtworkKeys(pending[entry.key]!),
+          });
+        }
+      }
+    } finally {
+      _homeArtworkHydrating = false;
+    }
+    if (byKey.isNotEmpty) {
+      setState(() {
+        _homeArtworkByKey.addAll(byKey);
+        _mergeArtworkInto(_items, byKey);
+        _mergeArtworkInto(_movies, byKey);
+        _mergeArtworkInto(_series, byKey);
+        _mergeArtworkInto(_animation, byKey);
+        _mergeArtworkInto(_liveTv, byKey);
+        _mergeArtworkInto(_upcomingPicks, byKey);
+        _mergeArtworkInto(_recentItems, byKey);
+        _topSignalRemoteItems = _mergedArtworkList(
+          _topSignalRemoteItems,
+          byKey,
+        );
+        _todaySignalRemoteItems = _mergedArtworkList(
+          _todaySignalRemoteItems,
+          byKey,
+        );
+        _juicrTopSignalRemoteItems = _mergedArtworkList(
+          _juicrTopSignalRemoteItems,
+          byKey,
+        );
+        _heroEditorialItems = _mergedArtworkList(_heroEditorialItems, byKey);
+      });
+    }
+    if (shouldContinue && mounted) {
+      unawaited(
+        Future<void>.delayed(
+          const Duration(milliseconds: 120),
+        ).then((_) => _refreshHomeRailArtwork()),
+      );
+    }
+  }
+
+  void _mergeArtworkInto(List<_TvItem> items, Map<String, _TvItem> hydrated) {
+    for (var index = 0; index < items.length; index++) {
+      final other = _homeArtworkFor(items[index], hydrated);
+      if (other != null) items[index] = items[index].merge(other);
+    }
+  }
+
+  List<_TvItem> _mergedArtworkList(
+    List<_TvItem> items,
+    Map<String, _TvItem> hydrated,
+  ) {
+    return [
+      for (final item in items)
+        item.merge(_homeArtworkFor(item, hydrated) ?? item),
+    ];
+  }
+
+  _TvItem? _homeArtworkFor(_TvItem item, Map<String, _TvItem> hydrated) {
+    for (final key in _homeArtworkKeys(item)) {
+      final other = hydrated[key];
+      if (other != null) return other;
+    }
+    return null;
+  }
+
+  _TvItem _applyHomeArtwork(_TvItem item) {
+    return item.merge(_homeArtworkFor(item, _homeArtworkByKey) ?? item);
+  }
+
+  Map<String, _TvItem> _homeArtworkMap(Iterable<_TvItem> items) {
+    final byKey = <String, _TvItem>{};
+    for (final item in items) {
+      final hasArtwork = _hasPrimaryTvArtwork(item) ||
+          (item.logo ?? '').trim().isNotEmpty ||
+          (item.description ?? '').trim().isNotEmpty;
+      if (!hasArtwork) continue;
+      for (final key in _homeArtworkKeys(item)) {
+        byKey[key] = item;
+      }
+    }
+    return byKey;
   }
 
   Future<List<_TvItem>> _hydrateHomeSignalRail(
@@ -758,9 +1709,8 @@ class _TvHomePageState extends State<TvHomePage> {
           tmdbId: signal.tmdbId,
         );
         try {
-          final meta = await _api
-              .meta(metaSeed)
-              .timeout(const Duration(seconds: 5));
+          final meta =
+              await _api.meta(metaSeed).timeout(const Duration(seconds: 5));
           if (_itemMatchesHomeSignal(meta, signal)) match = meta;
         } catch (_) {
           // Fall through to catalog search.
@@ -829,11 +1779,52 @@ class _TvHomePageState extends State<TvHomePage> {
   }
 
   _TvItem _normalizeCatalogLane(_TvItem item) {
-    if (_isLiveTvItem(item)) return item.withType('live');
+    if (_isExplicitLiveTvType(item.type)) return item.withType('live');
     if (item.type == 'series' && _hasAnimationSignal(item)) {
       return item.withType('animation');
     }
     return item;
+  }
+
+  bool _hasTvDiscoveryArtwork(_TvItem item) {
+    if (_isExplicitLiveTvType(item.type)) {
+      return item.poster != null ||
+          item.background != null ||
+          item.logo != null;
+    }
+    return item.poster != null || item.background != null;
+  }
+
+  bool _hasPrimaryTvArtwork(_TvItem item) {
+    return (item.poster ?? '').trim().isNotEmpty ||
+        (item.background ?? '').trim().isNotEmpty;
+  }
+
+  bool _hasCompleteTvArtwork(_TvItem item) {
+    return (item.poster ?? '').trim().isNotEmpty &&
+        (item.background ?? '').trim().isNotEmpty &&
+        (item.logo ?? '').trim().isNotEmpty &&
+        (item.description ?? '').trim().isNotEmpty;
+  }
+
+  bool _matchesDiscoveryLaneKind(_TvItem item, _TvDiscoveryKind kind) {
+    final type = item.type.trim().toLowerCase();
+    return switch (kind) {
+      _TvDiscoveryKind.movie => type == 'movie',
+      _TvDiscoveryKind.series => type == 'series',
+      _TvDiscoveryKind.animation =>
+        type == 'animation' || _isAnimationOrAnimationItem(item),
+      _TvDiscoveryKind.liveTv => _isExplicitLiveTvType(type),
+    };
+  }
+
+  bool _isExplicitLiveTvType(String type) {
+    final normalized = type.trim().toLowerCase().replaceAll('-', '_');
+    return normalized == 'live' ||
+        normalized == 'live_tv' ||
+        normalized == 'livetv' ||
+        normalized == 'channel' ||
+        normalized == 'channels';
   }
 
   String? _fallbackTypeForDiscovery(
@@ -895,8 +1886,9 @@ class _TvHomePageState extends State<TvHomePage> {
 
   Future<void> _restoreTvSettings() async {
     var restored = const _TvSettingsState();
+    SharedPreferences? prefs;
     try {
-      final prefs = await SharedPreferences.getInstance();
+      prefs = await SharedPreferences.getInstance();
       final encoded = prefs.getString(_tvSettingsPrefsKey);
       if (encoded != null && encoded.trim().isNotEmpty) {
         final decoded = jsonDecode(encoded);
@@ -914,12 +1906,10 @@ class _TvHomePageState extends State<TvHomePage> {
     }
     if (!mounted) return;
     setState(() => _tvSettings = restored);
-    if (restored.hasCatalogSource) {
-      unawaited(_loadCatalog());
-    } else {
-      setState(() => _loading = false);
-      _focusNavigationAfterFrame();
+    if (_tvSettings.hasCatalogSource && prefs != null) {
+      await _restoreCatalogWarmSnapshot(prefs);
     }
+    unawaited(_loadCatalog(force: true));
   }
 
   Future<void> _persistTvSettings(_TvSettingsState settings) async {
@@ -930,6 +1920,65 @@ class _TvHomePageState extends State<TvHomePage> {
       debugPrint(
         'Juicr TV settings save skipped '
         'bucket=settings_save errorType=${error.runtimeType}',
+      );
+    }
+  }
+
+  Future<void> _restoreVerifiedPlaybackSessions() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = prefs.getString(_tvVerifiedPlaybackSessionsPrefsKey);
+      if (encoded == null || encoded.trim().isEmpty) return;
+      final decoded = jsonDecode(encoded);
+      if (decoded is! Map) return;
+      final restored = <String, List<_TvVerifiedPlaybackSession>>{};
+      for (final entry in decoded.entries) {
+        final key = entry.key.toString().trim();
+        if (key.isEmpty || entry.value is! List) continue;
+        final sessions = <_TvVerifiedPlaybackSession>[
+          for (final raw in (entry.value as List).whereType<Map>())
+            _TvVerifiedPlaybackSession.fromJson(
+              Map<String, dynamic>.from(raw),
+            ),
+        ].where(_verifiedPlaybackSessionUsable).toList(growable: false);
+        if (sessions.isNotEmpty) restored[key] = _rankVerifiedSessions(sessions);
+      }
+      if (!mounted) return;
+      setState(() {
+        _verifiedPlaybackSessions
+          ..clear()
+          ..addAll(restored);
+      });
+      debugPrint(
+        'Juicr TV verified playback cache restored keys=${restored.length}',
+      );
+    } catch (error) {
+      debugPrint(
+        'Juicr TV verified playback cache restore skipped '
+        'bucket=verified_playback_restore errorType=${error.runtimeType}',
+      );
+    }
+  }
+
+  Future<void> _persistVerifiedPlaybackSessions() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = jsonEncode(
+        _verifiedPlaybackSessions.map(
+          (key, value) => MapEntry(
+            key,
+            _rankVerifiedSessions(value)
+                .take(3)
+                .map((entry) => entry.toJson())
+                .toList(growable: false),
+          ),
+        ),
+      );
+      await prefs.setString(_tvVerifiedPlaybackSessionsPrefsKey, encoded);
+    } catch (error) {
+      debugPrint(
+        'Juicr TV verified playback cache save skipped '
+        'bucket=verified_playback_save errorType=${error.runtimeType}',
       );
     }
   }
@@ -956,8 +2005,7 @@ class _TvHomePageState extends State<TvHomePage> {
       var session = restored.session;
       var profile = restored.profile;
       if (session != null) {
-        profile =
-            await _api
+        profile = await _api
                 .refreshAuthSession(session.token)
                 .timeout(const Duration(seconds: 9)) ??
             profile;
@@ -1018,20 +2066,36 @@ class _TvHomePageState extends State<TvHomePage> {
       setState(() => _accountSyncState = _TvAccountSyncState.syncing);
     }
     try {
+      await _api.syncAccountWatchMetrics(
+        token: session!.token,
+        activeWatchSeconds: store.state.activeWatchSeconds,
+      );
+      final accountWatchSeconds = await _api.fetchAccountActiveWatchSeconds(
+        session.token,
+      );
       if (fetchRemote) {
-        final remote = await _api.fetchAccountLibrarySnapshot(session!.token);
+        final remote = await _api.fetchAccountLibrarySnapshot(session.token);
         final remoteSnapshot = remote?.snapshot;
         if (remoteSnapshot != null && remoteSnapshot.isNotEmpty) {
           _accountLibraryRevision = remote!.revision;
-          final merged = store.state.mergeMobileLibraryBackup(remoteSnapshot);
-          await store.save(merged);
+          final accountState = const TvLibraryState().mergeMobileLibraryBackup(
+            remoteSnapshot,
+          );
+          await store.save(accountState);
           if (mounted) {
-            setState(() => _applyLibraryState(store.state));
+            setState(() {
+              _accountActiveWatchSeconds = accountWatchSeconds;
+              _applyLibraryState(store.state);
+            });
           }
+          if (mounted) {
+            setState(() => _accountSyncState = _TvAccountSyncState.synced);
+          }
+          return true;
         }
       }
       final push = await _api.pushAccountLibrarySnapshot(
-        token: session!.token,
+        token: session.token,
         snapshot: store.state.toMobileLibraryBackup(),
         baseRevision: _accountLibraryRevision,
       );
@@ -1051,12 +2115,11 @@ class _TvHomePageState extends State<TvHomePage> {
       } else if (push.ok) {
         _accountLibraryRevision = push.revision;
       }
-      await _api.syncAccountWatchMetrics(
-        token: session.token,
-        activeWatchSeconds: store.state.activeWatchSeconds,
-      );
       if (mounted) {
-        setState(() => _accountSyncState = _TvAccountSyncState.synced);
+        setState(() {
+          _accountActiveWatchSeconds = accountWatchSeconds;
+          _accountSyncState = _TvAccountSyncState.synced;
+        });
       }
       return true;
     } catch (error) {
@@ -1100,7 +2163,7 @@ class _TvHomePageState extends State<TvHomePage> {
   }
 
   Future<void> _openAccountSignIn() async {
-    final credentials = await showDialog<_TvAccountSignInResult>(
+    final credentials = await _showTvDialog<_TvAccountSignInResult>(
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) => _TvAccountSignInDialog(api: _api),
@@ -1135,6 +2198,202 @@ class _TvHomePageState extends State<TvHomePage> {
     }
   }
 
+  Future<void> _openAccountLibrary() async {
+    if (!_accountSignedIn) {
+      await _openAccountSignIn();
+      if (!mounted || !_accountSignedIn) return;
+    }
+    await _openAccountManager();
+  }
+
+  Future<void> _openAccountManager() async {
+    final profile = _accountProfile;
+    if (profile == null || !_accountSignedIn) return;
+    await _showTvDialog<void>(
+      context: context,
+      builder: (dialogContext) => _TvAccountLibraryDialog(
+        profile: profile,
+        accountLabel: _accountLabel,
+        accountSyncLabel: _accountSyncLabel,
+        recentCount: _recentLibraryCount,
+        savedCount: _savedLibraryCount,
+        completedCount: _completedLibraryCount,
+        savedMovieCount: _savedMovieLibraryCount,
+        savedSeriesCount: _savedSeriesLibraryCount,
+        savedAnimationCount: _savedAnimationLibraryCount,
+        savedLiveTvCount: _savedLiveTvLibraryCount,
+        activeWatchLabel: _activeWatchLabel,
+        onSync: _syncAccountNow,
+        onSaveProfile: _saveAccountProfile,
+        onClearContinue: _clearAccountContinueWatching,
+        onClearSaved: _clearAccountSavedTitles,
+        onClearMovies: _clearAccountSavedMovies,
+        onClearSeries: _clearAccountSavedSeries,
+        onClearAnimation: _clearAccountSavedAnimation,
+        onClearLiveTv: _clearAccountSavedLiveTv,
+        onClearLists: _clearAccountLibraryLists,
+        onClearCompleted: _clearAccountCompletedHistory,
+        onSignOut: _signOutAccount,
+        onDeleteAccount: _deleteAccountAndLocalLibrary,
+      ),
+    );
+  }
+
+  Future<TvAccountProfile> _saveAccountProfile({
+    required String username,
+    required String emoji,
+    required bool leaderboardOptIn,
+  }) async {
+    final session = _accountSession;
+    if (session?.isValid != true) {
+      throw const _TvApiException('auth_required');
+    }
+    final profile = await _api.updateAccountProfile(
+      token: session!.token,
+      username: username,
+      emoji: emoji,
+      leaderboardOptIn: leaderboardOptIn,
+    );
+    await _accountStore.save(session: session, profile: profile);
+    if (mounted) {
+      setState(() => _accountProfile = profile);
+    }
+    return profile;
+  }
+
+  Future<void> _saveAccountLibraryState(TvLibraryState state) async {
+    final store = _libraryStore;
+    if (store == null) return;
+    await store.save(state);
+    if (!mounted) return;
+    setState(() => _applyLibraryState(store.state));
+    _scheduleAccountLibraryPush();
+  }
+
+  Future<void> _clearAccountContinueWatching() async {
+    final store = _libraryStore;
+    if (store == null) return;
+    await _saveAccountLibraryState(
+      store.state.copyWith(
+        recentItems: const <TvRecentItemSnapshot>[],
+        progress: const <String, TvPlaybackProgress>{},
+      ),
+    );
+  }
+
+  Future<void> _clearAccountSavedTitles() async {
+    final store = _libraryStore;
+    if (store == null) return;
+    await _saveAccountLibraryState(
+      store.state.copyWith(likedKeys: const <String>{}),
+    );
+  }
+
+  Future<void> _clearAccountSavedMovies() {
+    return _clearAccountSavedWhere(
+      (item) => item.type.trim().toLowerCase() == 'movie',
+      fallbackTypes: const {'movie'},
+    );
+  }
+
+  Future<void> _clearAccountSavedSeries() {
+    return _clearAccountSavedWhere(
+      (item) => item.type.trim().toLowerCase() == 'series',
+      fallbackTypes: const {'series'},
+    );
+  }
+
+  Future<void> _clearAccountSavedAnimation() {
+    return _clearAccountSavedWhere(
+      _isAnimationOrAnimationItem,
+      fallbackTypes: const {'animation'},
+    );
+  }
+
+  Future<void> _clearAccountSavedLiveTv() {
+    return _clearAccountSavedWhere(
+      _isLiveTvItem,
+      fallbackTypes: const {'live', 'live_tv', 'livetv', 'channel', 'tv'},
+    );
+  }
+
+  Future<void> _clearAccountSavedWhere(
+    bool Function(_TvItem item) matches, {
+    required Set<String> fallbackTypes,
+  }) async {
+    final store = _libraryStore;
+    if (store == null) return;
+    final itemByKey = <String, _TvItem>{};
+    for (final item in [
+      ..._items,
+      ..._movies,
+      ..._series,
+      ..._animation,
+      ..._liveTv,
+      ..._recentItems,
+    ]) {
+      itemByKey.putIfAbsent(_itemKey(item), () => item);
+    }
+    final nextLiked = <String>{
+      for (final key in store.state.likedKeys)
+        if (!_savedLibraryKeyMatches(
+          key,
+          itemByKey[key],
+          matches,
+          fallbackTypes,
+        ))
+          key,
+    };
+    await _saveAccountLibraryState(store.state.copyWith(likedKeys: nextLiked));
+  }
+
+  bool _savedLibraryKeyMatches(
+    String key,
+    _TvItem? item,
+    bool Function(_TvItem item) matches,
+    Set<String> fallbackTypes,
+  ) {
+    if (item != null) return matches(item);
+    final type = key.split(':').first.trim().toLowerCase();
+    return fallbackTypes.contains(type);
+  }
+
+  Future<void> _clearAccountLibraryLists() async {
+    final store = _libraryStore;
+    if (store == null) return;
+    await _saveAccountLibraryState(
+      store.state.copyWith(libraryLists: const <TvLibraryList>[]),
+    );
+  }
+
+  Future<void> _clearAccountCompletedHistory() async {
+    final store = _libraryStore;
+    if (store == null) return;
+    await _saveAccountLibraryState(
+      store.state.copyWith(completedKeys: const <String>{}),
+    );
+  }
+
+  Future<void> _deleteAccountAndLocalLibrary() async {
+    final token = _accountSession?.token ?? '';
+    await _api.deleteAccount(token);
+    await _libraryStore?.clear();
+    await _accountStore.clear();
+    _accountLibraryPushTimer?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _accountSession = null;
+      _accountProfile = null;
+      _accountLibraryRevision = '';
+      _accountActiveWatchSeconds = null;
+      _accountSyncState = _TvAccountSyncState.guest;
+      _applyLibraryState(const TvLibraryState());
+    });
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(content: Text('Account deleted.')));
+  }
+
   Future<void> _signOutAccount() async {
     final token = _accountSession?.token ?? '';
     try {
@@ -1154,6 +2413,7 @@ class _TvHomePageState extends State<TvHomePage> {
       _accountSession = null;
       _accountProfile = null;
       _accountLibraryRevision = '';
+      _accountActiveWatchSeconds = null;
       _accountSyncState = _TvAccountSyncState.guest;
     });
     ScaffoldMessenger.of(context)
@@ -1171,8 +2431,8 @@ class _TvHomePageState extends State<TvHomePage> {
           content: Text(
             _accountSignedIn
                 ? synced
-                      ? 'Library sync updated.'
-                      : 'Library sync needs attention.'
+                    ? 'Library sync updated.'
+                    : 'Library sync needs attention.'
                 : 'Sign in to sync your library.',
           ),
         ),
@@ -1191,12 +2451,73 @@ class _TvHomePageState extends State<TvHomePage> {
 
   int get _savedLibraryCount => _likedItemKeys.length;
 
-  int get _recentLibraryCount => _recentItems.length;
+  int get _savedMovieLibraryCount => _likedItems
+      .where((item) => item.type.trim().toLowerCase() == 'movie')
+      .length;
+
+  int get _savedSeriesLibraryCount => _likedItems
+      .where((item) => item.type.trim().toLowerCase() == 'series')
+      .length;
+
+  int get _savedAnimationLibraryCount =>
+      _likedItems.where(_isAnimationOrAnimationItem).length;
+
+  int get _savedLiveTvLibraryCount => _likedItems.where(_isLiveTvItem).length;
+
+  int get _recentLibraryCount => _continueItems.length;
+
+  List<_TvItem> get _continueItems {
+    final candidates = <String, _TvItem>{};
+    for (final item in [
+      ..._recentItems,
+      ..._items,
+      ..._movies,
+      ..._series,
+      ..._animation,
+    ]) {
+      candidates.putIfAbsent(_itemKey(item), () => item);
+    }
+    return [
+      for (final item in _recentItems)
+        if (_hasUnfinishedPlaybackProgress(item)) item,
+      for (final item in candidates.values)
+        if (!_recentItems.any((recent) => _itemKey(recent) == _itemKey(item)) &&
+            _hasUnfinishedPlaybackProgress(item))
+          item,
+    ];
+  }
+
+  bool _hasUnfinishedPlaybackProgress(_TvItem item) {
+    if (_isLiveTvItem(item)) return false;
+    final itemKey = _itemKey(item);
+    final legacyItemKey = item.id.trim();
+    for (final entry in _watchedProgress.entries) {
+      final progressKey = entry.key;
+      final matchesCurrentKey =
+          progressKey == itemKey || progressKey.startsWith('$itemKey:');
+      final matchesLegacyKey = legacyItemKey.isNotEmpty &&
+          (progressKey == legacyItemKey ||
+              progressKey.startsWith('$legacyItemKey:'));
+      if (!matchesCurrentKey && !matchesLegacyKey) {
+        continue;
+      }
+      final progress = entry.value;
+      if (progress.position > Duration.zero && !_isPlaybackComplete(progress)) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   int get _completedLibraryCount =>
       _libraryStore?.state.completedKeys.length ?? 0;
 
-  int get _activeWatchSeconds => _libraryStore?.state.activeWatchSeconds ?? 0;
+  int get _activeWatchSeconds {
+    if (_accountSignedIn && _accountActiveWatchSeconds != null) {
+      return _accountActiveWatchSeconds!;
+    }
+    return _libraryStore?.state.activeWatchSeconds ?? 0;
+  }
 
   String get _activeWatchLabel {
     final seconds = _activeWatchSeconds;
@@ -1216,170 +2537,197 @@ class _TvHomePageState extends State<TvHomePage> {
     };
 
     void addRail({
-      required String title,
-      required String subtitle,
+      required _TvHomeEditorialRail editorial,
       required List<_TvItem> primary,
-      List<_TvItem> fallback = const <_TvItem>[],
       int limit = 20,
       bool preservePrimaryRank = false,
       bool showRank = true,
+      bool posterCards = false,
     }) {
       final items = _backfilledHomeRailItems(
         primary,
-        fallbackPool: fallback,
+        fallbackPool: const <_TvItem>[],
         usedKeys: usedKeys,
         limit: limit,
         preservePrimaryRank: preservePrimaryRank,
       );
       if (items.isEmpty) return;
-      rails.add(_TvRail(title, subtitle, items, showRank: showRank));
+      rails.add(
+        _TvRail(
+          editorial.title,
+          editorial.subtitle,
+          items,
+          showRank: showRank,
+          posterCards: posterCards,
+        ),
+      );
       usedKeys.addAll(items.map(_homeUsedKey));
     }
 
-    final todayEditorial = _editorialOrFallback(
-      editorial?.todaySignal,
-      _dailyTopSignalEditorial(),
-    );
-    final todayRemoteItems = _remoteHomeSignalItems(
-      _todaySignalRemoteItems,
-      todayEditorial,
-    );
-    addRail(
-      title: todayEditorial.title,
-      subtitle: todayEditorial.subtitle,
-      primary: todayRemoteItems.length >= 3
-          ? todayRemoteItems
-          : _itemsForEditorial(todayEditorial),
-      fallback: todayRemoteItems.length >= 3
-          ? const <_TvItem>[]
-          : _topSignalFallbackItems(todayEditorial),
-      limit: 20,
-      preservePrimaryRank: todayRemoteItems.length >= 3,
-    );
+    final todayEditorial = editorial?.todaySignal;
+    if (_hasHomeEditorialScope(todayEditorial)) {
+      final todayRemoteItems = _remoteHomeSignalItems(
+        _todaySignalRemoteItems,
+        todayEditorial!,
+      );
+      addRail(
+        editorial: todayEditorial,
+        primary: todayRemoteItems.isNotEmpty
+            ? todayRemoteItems
+            : _itemsForEditorial(todayEditorial),
+        limit: 20,
+        preservePrimaryRank: todayRemoteItems.isNotEmpty,
+      );
+    }
 
-    final weekEditorial = _editorialOrFallback(
-      editorial?.topSignal,
-      _weeklyTopSignalEditorial(),
-    );
-    final weekRemoteItems = _remoteHomeSignalItems(
-      _topSignalRemoteItems,
-      weekEditorial,
-    );
-    addRail(
-      title: weekEditorial.title,
-      subtitle: weekEditorial.subtitle,
-      primary: weekRemoteItems.length >= 3
-          ? weekRemoteItems
-          : _itemsForEditorial(weekEditorial),
-      fallback: weekRemoteItems.length >= 3
-          ? const <_TvItem>[]
-          : _topSignalFallbackItems(weekEditorial),
-      limit: 20,
-      preservePrimaryRank: weekRemoteItems.length >= 3,
-    );
+    final weekEditorial = editorial?.topSignal;
+    if (_hasHomeEditorialScope(weekEditorial)) {
+      final weekRemoteItems = _remoteHomeSignalItems(
+        _topSignalRemoteItems,
+        weekEditorial!,
+      );
+      addRail(
+        editorial: weekEditorial,
+        primary: weekRemoteItems.isNotEmpty
+            ? weekRemoteItems
+            : _itemsForEditorial(weekEditorial),
+        limit: 20,
+        preservePrimaryRank: weekRemoteItems.isNotEmpty,
+      );
+    }
 
-    final topTenEditorial = _editorialOrFallback(
-      editorial?.juicrTopSignal,
-      _juicrTopSignalEditorial(),
+    final topTenEditorial = editorial?.juicrTopSignal;
+    if (_hasHomeEditorialScope(topTenEditorial)) {
+      final topTenRemoteItems = _remoteHomeSignalItems(
+        _juicrTopSignalRemoteItems,
+        topTenEditorial!,
+      );
+      addRail(
+        editorial: topTenEditorial,
+        primary: topTenRemoteItems.isNotEmpty
+            ? topTenRemoteItems
+            : _itemsForEditorial(topTenEditorial),
+        limit: 10,
+        preservePrimaryRank: topTenRemoteItems.isNotEmpty,
+      );
+    }
+
+    final rawUpcomingEditorial = _hasHomeEditorialScope(editorial?.upcoming)
+        ? editorial!.upcoming
+        : const _TvHomeEditorialRail(
+            id: 'upcomingEditorial',
+            title: 'Upcoming This Year',
+            subtitle: '',
+          );
+    final upcomingEditorial = _TvHomeEditorialRail(
+      id: rawUpcomingEditorial.id,
+      title: 'Upcoming This Year',
+      subtitle: '',
+      kind: rawUpcomingEditorial.kind,
+      types: rawUpcomingEditorial.types,
+      genres: rawUpcomingEditorial.genres,
+      sort: rawUpcomingEditorial.sort,
+      perType: rawUpcomingEditorial.perType,
+      requireGenreMatch: rawUpcomingEditorial.requireGenreMatch,
+      intent: rawUpcomingEditorial.intent,
+      curationKind: rawUpcomingEditorial.curationKind,
+      releaseWindow: rawUpcomingEditorial.releaseWindow,
+      theme: rawUpcomingEditorial.theme,
+      seasonalWindow: rawUpcomingEditorial.seasonalWindow,
+      query: rawUpcomingEditorial.query,
+      items: rawUpcomingEditorial.items,
     );
-    final topTenRemoteItems = _remoteHomeSignalItems(
-      _juicrTopSignalRemoteItems,
-      topTenEditorial,
-    );
-    addRail(
-      title: topTenEditorial.title,
-      subtitle: topTenEditorial.subtitle,
-      primary: topTenRemoteItems.length >= 3
-          ? topTenRemoteItems
-          : _itemsForEditorial(topTenEditorial),
-      fallback: topTenRemoteItems.length >= 3
-          ? const <_TvItem>[]
-          : _topSignalFallbackItems(topTenEditorial),
-      limit: 10,
-      preservePrimaryRank: topTenRemoteItems.length >= 3,
-    );
+    final upcomingLaneItems = _discoveryLaneItems[_tvDiscoveryLaneKey(
+          _TvDiscoveryKind.movie,
+          _TvDiscoverySort.upcoming,
+        )] ??
+        const <_TvItem>[];
+    final upcomingPrimary = upcomingLaneItems.isNotEmpty
+        ? upcomingLaneItems
+        : (_upcomingPicks.isNotEmpty
+            ? _upcomingPicks
+            : _itemsForEditorial(upcomingEditorial));
+    if (upcomingPrimary.isNotEmpty) {
+      addRail(
+        editorial: upcomingEditorial,
+        primary: upcomingPrimary,
+        limit: 20,
+        showRank: false,
+        posterCards: true,
+      );
+    }
 
     addRail(
-      title: 'Saved For Later',
-      subtitle: 'Titles you marked to revisit.',
+      editorial: const _TvHomeEditorialRail(
+        id: 'savedForLater',
+        title: 'Saved For Later',
+        subtitle: 'Titles you marked to revisit.',
+      ),
       primary: _likedItems,
       limit: 12,
-    );
-
-    final upcomingEditorial = _editorialOrFallback(
-      editorial?.upcoming,
-      _upcomingThisYearEditorial(),
-    );
-    addRail(
-      title: upcomingEditorial.title,
-      subtitle: '',
-      primary: _upcomingPicks,
-      fallback: const <_TvItem>[],
-      limit: 20,
       showRank: false,
     );
 
-    if (rails.isNotEmpty) return rails;
-    return [
-      _TvRail(
-        'Trending Today',
-        'Fresh picks moving fastest right now.',
-        _availableHomeItems(_items).take(10).toList(),
-      ),
-      _TvRail(
-        'Trending This Week',
-        'The picks that keep winning the room.',
-        _availableHomeItems(_movies).take(10).toList(),
-      ),
-      _TvRail(
-        "Juicr's Top 10",
-        'Movies and shows with the strongest score signal.',
-        _availableHomeItems(_series).take(10).toList(),
-      ),
-    ].where((rail) => rail.items.isNotEmpty).toList();
+    return rails;
   }
 
   List<_TvItem> get _homeHeroItems {
     if (_heroEditorialItems.isNotEmpty) {
-      return _heroEditorialItems.take(8).toList();
+      return [
+        for (final item in _heroEditorialItems.take(8)) _applyHomeArtwork(item),
+      ];
     }
     final editorial = _homeEditorial;
-    if (editorial != null) {
+    if (editorial != null && _hasHomeEditorialScope(editorial.hero)) {
       final curated = _itemsForEditorial(editorial.hero);
-      if (curated.isNotEmpty) return curated.take(8).toList();
+      if (curated.isNotEmpty) {
+        return [
+          for (final item in curated.take(8)) _applyHomeArtwork(item),
+        ];
+      }
     }
-    final fallback = _availableHomeItems([
-      ..._movies,
-      ..._series,
-      ..._animation,
-      ..._items,
-    ]);
-    return _stableDailyShuffle(
-      fallback,
-      seed: 'tv-home-hero'.hashCode,
-    ).take(8).toList();
+    return const <_TvItem>[];
   }
 
   _TvHomeEditorialRail get _homeHeroEditorial {
-    return _editorialOrFallback(_homeEditorial?.hero, _dailyHeroEditorial());
+    return _homeEditorial?.hero ??
+        const _TvHomeEditorialRail(id: 'hero', title: '', subtitle: '');
   }
 
   Future<List<_TvItem>> _loadCuratedHeroItems(
-    _TvHomeEditorialRail editorial,
-  ) async {
-    if (!_hasHeroEditorialScope(editorial)) return const <_TvItem>[];
+    _TvHomeEditorialRail editorial, {
+    required List<_TvItem> seedItems,
+  }) async {
+    const heroLimit = 12;
+    const heroCandidateLimit = 36;
+    const heroArtworkCandidateLimit = 16;
+    if (!_hasHeroEditorialScope(editorial)) {
+      final hydrated = await _hydrateHeroArtworkItems(
+        _itemsForEditorial(
+          editorial,
+          seedItems,
+        ).take(heroArtworkCandidateLimit),
+        limit: heroLimit,
+      );
+      return hydrated;
+    }
     final ranked = await _hydrateHomeSignalRail(
       editorial,
-      seedItems: _items,
-      limit: 12,
+      seedItems: seedItems,
+      limit: heroCandidateLimit,
     );
-    if (ranked.isNotEmpty) return ranked.take(12).toList(growable: false);
+    if (ranked.isNotEmpty) {
+      final hydratedRanked = await _hydrateHeroArtworkItems(
+        ranked.take(heroArtworkCandidateLimit),
+        limit: heroLimit,
+      );
+      if (_hasLogoArtwork(hydratedRanked)) return hydratedRanked;
+    }
     final types = editorial.types.isEmpty
         ? const ['movie', 'series', 'animation']
         : editorial.types;
-    final genre = editorial.genres.isEmpty
-        ? 'All genres'
-        : editorial.genres.first;
+    final genre =
+        editorial.genres.isEmpty ? 'All genres' : editorial.genres.first;
     final perType = editorial.perType.clamp(1, 12).toInt();
     final buckets = await Future.wait<List<_TvItem>>([
       for (final type in types)
@@ -1387,10 +2735,85 @@ class _TvHomePageState extends State<TvHomePage> {
           type: type,
           editorial: editorial,
           genre: genre,
-          limit: perType,
+          limit: perType * 3,
         ),
     ]);
-    return _interleaveHeroBuckets(buckets).take(12).toList(growable: false);
+    final interleaved = _interleaveHeroBuckets(
+      buckets,
+    ).take(heroCandidateLimit).toList();
+    if (interleaved.isNotEmpty) {
+      return _hydrateHeroArtworkItems(
+        interleaved.take(heroArtworkCandidateLimit),
+        limit: heroLimit,
+      );
+    }
+    final editorialFallback = _itemsForEditorial(editorial, seedItems);
+    return _hydrateHeroArtworkItems(
+      editorialFallback.take(heroArtworkCandidateLimit),
+      limit: heroLimit,
+    );
+  }
+
+  Future<List<_TvItem>> _hydrateHeroArtworkItems(
+    Iterable<_TvItem> sourceItems, {
+    int limit = 12,
+  }) async {
+    final items = sourceItems.toList(growable: false);
+    if (items.isEmpty) return const <_TvItem>[];
+    final hydrated = await Future.wait([
+      for (final item in items) _hydrateHeroArtworkItem(item),
+    ]);
+    final withLogo = hydrated
+        .where((item) => (item.logo ?? '').trim().isNotEmpty)
+        .toList(growable: false);
+    if (withLogo.isEmpty) return hydrated.take(limit).toList(growable: false);
+    final withoutLogo = hydrated
+        .where((item) => (item.logo ?? '').trim().isEmpty)
+        .toList(growable: false);
+    return [...withLogo, ...withoutLogo].take(limit).toList(growable: false);
+  }
+
+  bool _hasLogoArtwork(Iterable<_TvItem> items) {
+    return items.any((item) => (item.logo ?? '').trim().isNotEmpty);
+  }
+
+  Future<_TvItem> _hydrateHeroArtworkItem(_TvItem item) async {
+    if ((item.poster ?? '').trim().isNotEmpty &&
+        (item.logo ?? '').trim().isNotEmpty &&
+        (item.background ?? '').trim().isNotEmpty &&
+        (item.description ?? '').trim().isNotEmpty) {
+      return item;
+    }
+    try {
+      final metaSeed = item.tmdbId == null
+          ? item
+          : _TvItem(
+              id: 'tmdb:${item.tmdbId}',
+              type: item.type,
+              title: item.title,
+              color: item.color,
+              poster: item.poster,
+              background: item.background,
+              logo: item.logo,
+              year: item.year,
+              tmdbId: item.tmdbId,
+              genres: item.genres,
+              description: item.description,
+              imdbRating: item.imdbRating,
+              releaseDate: item.releaseDate,
+              isUpcoming: item.isUpcoming,
+              runtime: item.runtime,
+            );
+      final meta =
+          await _api.meta(metaSeed).timeout(const Duration(seconds: 8));
+      return item.merge(meta);
+    } catch (error) {
+      debugPrint(
+        'Juicr TV hero artwork hydrate skipped '
+        'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+      );
+      return item;
+    }
   }
 
   bool _hasHeroEditorialScope(_TvHomeEditorialRail editorial) {
@@ -1399,6 +2822,15 @@ class _TvHomePageState extends State<TvHomePage> {
             editorial.query.isNotEmpty ||
             editorial.items.isNotEmpty ||
             _isInTheatersEditorial(editorial));
+  }
+
+  bool _hasHomeEditorialScope(_TvHomeEditorialRail? editorial) {
+    if (editorial == null) return false;
+    return editorial.title.trim().isNotEmpty ||
+        editorial.subtitle.trim().isNotEmpty ||
+        editorial.items.isNotEmpty ||
+        editorial.query.trim().isNotEmpty ||
+        editorial.genres.isNotEmpty;
   }
 
   Future<List<_TvItem>> _loadCuratedHeroBucket({
@@ -1410,34 +2842,39 @@ class _TvHomePageState extends State<TvHomePage> {
     final gathered = <_TvItem>[];
     final seen = <String>{};
     for (final sort in _curatedHeroSortFallbacks(editorial.sort)) {
-      try {
-        final items = await _api
-            .catalog(
-              type: type,
-              sort: sort,
-              genre: genre,
-              search: editorial.query,
-              deepSearch: editorial.query.isNotEmpty,
-              preferDefaultCatalog: true,
-            )
-            .timeout(const Duration(seconds: 8));
-        for (final item in items.map(_normalizeCatalogLane)) {
-          if (item.poster == null || _isLiveTvItem(item)) continue;
-          if (!_homeItemMatchesEditorialIntent(item, editorial)) continue;
-          if (seen.add(_homeUsedKey(item))) gathered.add(item);
+      for (var page = 1; page <= 3; page += 1) {
+        try {
+          final items = await _api
+              .catalog(
+                type: type,
+                sort: sort,
+                page: page,
+                genre: genre,
+                search: editorial.query,
+                deepSearch: editorial.query.isNotEmpty,
+                preferDefaultCatalog: true,
+              )
+              .timeout(const Duration(seconds: 8));
+          if (items.isEmpty) break;
+          for (final item in items.map(_normalizeCatalogLane)) {
+            if (item.poster == null || _isLiveTvItem(item)) continue;
+            if (!_homeItemMatchesEditorialIntent(item, editorial)) continue;
+            if (seen.add(_homeUsedKey(item))) gathered.add(item);
+          }
+          final matches = _bestEditorialMatches(
+            gathered,
+            editorial,
+            limit,
+            allowUnknownGenre: true,
+          );
+          if (matches.length >= limit) return matches;
+        } catch (error) {
+          debugPrint(
+            'Juicr TV hero editorial bucket skipped '
+            'type=$type page=$page bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+          );
+          break;
         }
-        final matches = _bestEditorialMatches(
-          gathered,
-          editorial,
-          limit,
-          allowUnknownGenre: true,
-        );
-        if (matches.length >= limit) return matches;
-      } catch (error) {
-        debugPrint(
-          'Juicr TV hero editorial bucket skipped '
-          'type=$type bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
-        );
       }
     }
     return _bestEditorialMatches(
@@ -1449,9 +2886,8 @@ class _TvHomePageState extends State<TvHomePage> {
   }
 
   List<String> _curatedHeroSortFallbacks(String preferred) {
-    final normalized = preferred.trim().isEmpty
-        ? 'imdbRating'
-        : preferred.trim();
+    final normalized =
+        preferred.trim().isEmpty ? 'imdbRating' : preferred.trim();
     return [
       normalized,
       for (final sort in const ['imdbRating', 'top', 'year'])
@@ -1496,9 +2932,8 @@ class _TvHomePageState extends State<TvHomePage> {
     final haystack = _normalizeHomeText(
       [item.title, item.id, item.year ?? '', ...item.genres].join(' '),
     );
-    final tokens = cleaned
-        .split(RegExp(r'[\s:_-]+'))
-        .where((token) => token.length >= 3);
+    final tokens =
+        cleaned.split(RegExp(r'[\s:_-]+')).where((token) => token.length >= 3);
     if (tokens.isEmpty) return haystack.contains(cleaned);
     return tokens.every(haystack.contains);
   }
@@ -1513,14 +2948,12 @@ class _TvHomePageState extends State<TvHomePage> {
       for (final item in items)
         if (_homeItemMatchesEditorialIntent(item, editorial)) item,
     ];
-    final genreMatches = scoped
-        .where((item) {
-          if (_itemMatchesAnyEditorialGenre(item, editorial.genres)) {
-            return true;
-          }
-          return allowUnknownGenre && item.genres.isEmpty;
-        })
-        .toList(growable: false);
+    final genreMatches = scoped.where((item) {
+      if (_itemMatchesAnyEditorialGenre(item, editorial.genres)) {
+        return true;
+      }
+      return allowUnknownGenre && item.genres.isEmpty;
+    }).toList(growable: false);
     final ranked = (editorial.genres.isEmpty ? scoped : genreMatches)
       ..sort(
         (left, right) =>
@@ -1530,14 +2963,13 @@ class _TvHomePageState extends State<TvHomePage> {
       return _dedupeHomeItems(ranked).take(limit).toList(growable: false);
     }
     final matched = {for (final item in ranked) _homeUsedKey(item)};
-    final fallback =
-        [
-          for (final item in scoped)
-            if (!matched.contains(_homeUsedKey(item))) item,
-        ]..sort(
-          (left, right) =>
-              _homeSignalScore(right).compareTo(_homeSignalScore(left)),
-        );
+    final fallback = [
+      for (final item in scoped)
+        if (!matched.contains(_homeUsedKey(item))) item,
+    ]..sort(
+        (left, right) =>
+            _homeSignalScore(right).compareTo(_homeSignalScore(left)),
+      );
     return _dedupeHomeItems([
       ...ranked,
       ...fallback,
@@ -1567,77 +2999,6 @@ class _TvHomePageState extends State<TvHomePage> {
         window == 'now_playing';
   }
 
-  _TvHomeEditorialRail _dailyHeroEditorial() {
-    return _pickDailyHeroEditorial(const [
-      _TvHomeEditorialRail(
-        id: 'hero',
-        title: 'In Theaters',
-        subtitle: 'Big-screen energy, couch-ready.',
-        types: ['movie'],
-        sort: 'nowPlaying',
-        intent: 'theatrical_trailers',
-        releaseWindow: 'now_playing',
-      ),
-      _TvHomeEditorialRail(
-        id: 'hero',
-        title: 'New This Week',
-        subtitle: 'Fresh before the rush.',
-        genres: ['thriller', 'mystery', 'action', 'drama'],
-        sort: 'year',
-        intent: 'current_releases',
-        releaseWindow: 'current_year',
-        requireGenreMatch: true,
-      ),
-      _TvHomeEditorialRail(
-        id: 'hero',
-        title: 'Horror night',
-        subtitle: 'Every hallway is suspicious.',
-        types: ['movie', 'series', 'animation'],
-        genres: ['horror'],
-        sort: 'imdbRating',
-        perType: 3,
-        requireGenreMatch: true,
-      ),
-      _TvHomeEditorialRail(
-        id: 'hero',
-        title: 'Story momentum',
-        subtitle: 'Series and animation with room to pull you in.',
-        types: ['series', 'animation'],
-        genres: ['drama', 'adventure', 'action', 'mystery'],
-        requireGenreMatch: true,
-      ),
-      _TvHomeEditorialRail(
-        id: 'hero',
-        title: 'Weekend Picks',
-        subtitle: 'Snacks, couch, low pressure.',
-        genres: ['comedy', 'drama', 'adventure'],
-        requireGenreMatch: true,
-      ),
-    ], offset: 3);
-  }
-
-  _TvHomeEditorialRail _pickDailyHeroEditorial(
-    List<_TvHomeEditorialRail> rails, {
-    int offset = 0,
-  }) {
-    return rails[_editorialBucket(offset: offset) % rails.length];
-  }
-
-  _TvHomeEditorialRail _editorialOrFallback(
-    _TvHomeEditorialRail? remote,
-    _TvHomeEditorialRail fallback,
-  ) {
-    if (remote == null ||
-        (remote.title.isEmpty &&
-            remote.subtitle.isEmpty &&
-            remote.items.isEmpty &&
-            remote.query.isEmpty &&
-            remote.genres.isEmpty)) {
-      return fallback;
-    }
-    return remote;
-  }
-
   List<_TvItem> _remoteHomeSignalItems(
     List<_TvItem> items,
     _TvHomeEditorialRail editorial,
@@ -1657,70 +3018,34 @@ class _TvHomePageState extends State<TvHomePage> {
     return ranked;
   }
 
-  _TvHomeEditorialRail _dailyTopSignalEditorial() {
-    return const _TvHomeEditorialRail(
-      id: 'todaySignal',
-      kind: 'ranked',
-      title: 'Trending Today',
-      subtitle: 'Fresh picks moving fastest right now.',
-      types: ['movie', 'series'],
-      perType: 20,
-      intent: 'local_trending_fallback',
-      releaseWindow: 'local_trends',
-    );
-  }
-
-  _TvHomeEditorialRail _weeklyTopSignalEditorial() {
-    return const _TvHomeEditorialRail(
-      id: 'topSignal',
-      kind: 'ranked',
-      title: 'Trending This Week',
-      subtitle: 'The picks that keep winning the room.',
-      types: ['movie', 'series'],
-      perType: 20,
-      intent: 'local_trending_fallback',
-      releaseWindow: 'local_trends',
-    );
-  }
-
-  _TvHomeEditorialRail _juicrTopSignalEditorial() {
-    return const _TvHomeEditorialRail(
-      id: 'juicrTopSignal',
-      kind: 'ranked',
-      title: "Juicr's Top 10",
-      subtitle: 'Movies and shows with the strongest score signal.',
-      types: ['movie', 'series'],
-      perType: 10,
-      intent: 'local_score_fallback',
-      releaseWindow: 'local_trends',
-    );
-  }
-
-  _TvHomeEditorialRail _upcomingThisYearEditorial() {
-    return const _TvHomeEditorialRail(
-      id: 'upcoming',
-      kind: 'ranked',
-      title: 'Upcoming This Year',
-      subtitle: 'Movies expected this year.',
-      types: ['movie'],
-      sort: 'year',
-      perType: 20,
-      intent: 'upcoming',
-      releaseWindow: 'current_year',
-    );
-  }
-
   String _homeUsedKey(_TvItem item) {
     final tmdbId = item.tmdbId;
     if (tmdbId != null) return '${item.type}:tmdb:$tmdbId';
     return '${item.type}:${_normalizeHomeText(item.title)}:${item.year ?? ''}';
   }
 
+  Set<String> _homeArtworkKeys(_TvItem item) {
+    final keys = <String>{_homeUsedKey(item)};
+    final normalizedTitle = _normalizeHomeText(item.title);
+    if (normalizedTitle.isNotEmpty) {
+      keys.add('${item.type}:$normalizedTitle:${item.year ?? ''}');
+    }
+    final tmdbId = item.tmdbId;
+    if (tmdbId != null) keys.add('${item.type}:tmdb:$tmdbId');
+    final rawId = item.id.trim();
+    if (rawId.isNotEmpty) keys.add('${item.type}:id:$rawId');
+    return keys;
+  }
+
   List<_TvItem> _availableHomeItems(Iterable<_TvItem> items) {
-    return [
-      for (final item in items)
-        if (item.poster != null && !_isLiveTvItem(item)) item,
-    ];
+    final result = <_TvItem>[];
+    for (final item in items) {
+      final decorated = _applyHomeArtwork(item);
+      if (decorated.poster != null && !_isLiveTvItem(decorated)) {
+        result.add(decorated);
+      }
+    }
+    return result;
   }
 
   List<_TvItem> _dedupeHomeItems(Iterable<_TvItem> items) {
@@ -1756,24 +3081,6 @@ class _TvHomePageState extends State<TvHomePage> {
     return result;
   }
 
-  List<_TvItem> _topSignalFallbackItems(_TvHomeEditorialRail editorial) {
-    final pool = _availableHomeItems([
-      ..._movies,
-      ..._series,
-      ..._animation,
-      ..._likedItems,
-      ..._recentItems,
-    ]);
-    final scored =
-        [for (final item in pool) _ScoredTvItem(item, _homeSignalScore(item))]
-          ..sort((left, right) {
-            final score = right.score.compareTo(left.score);
-            if (score != 0) return score;
-            return _homeUsedKey(left.item).compareTo(_homeUsedKey(right.item));
-          });
-    return _dedupeHomeItems(scored.map((entry) => entry.item));
-  }
-
   double _homeSignalScore(_TvItem item) {
     var score = _ratingDouble(item.imdbRating) * 10;
     final year = _yearInt(item.year);
@@ -1796,15 +3103,17 @@ class _TvHomePageState extends State<TvHomePage> {
         .replaceAll(RegExp(r'\s+'), ' ');
   }
 
-  List<_TvItem> _itemsForEditorial(_TvHomeEditorialRail editorial) {
-    var candidates = _availableHomeItems(_items);
+  List<_TvItem> _itemsForEditorial(
+    _TvHomeEditorialRail editorial, [
+    List<_TvItem>? sourceItems,
+  ]) {
+    var candidates = _availableHomeItems(sourceItems ?? _items);
     final ranked = _rankedItemsForEditorial(editorial, candidates);
     if (ranked.isNotEmpty) return ranked;
     if (editorial.types.isNotEmpty) {
       final types = editorial.types.toSet();
-      candidates = candidates
-          .where((item) => types.contains(item.type))
-          .toList();
+      candidates =
+          candidates.where((item) => types.contains(item.type)).toList();
     }
     if (editorial.query.isNotEmpty) {
       final query = _normalizeHomeText(editorial.query);
@@ -1816,9 +3125,8 @@ class _TvHomePageState extends State<TvHomePage> {
       }).toList();
     }
     if (editorial.genres.isNotEmpty) {
-      final genres = editorial.genres
-          .map((genre) => genre.toLowerCase())
-          .toSet();
+      final genres =
+          editorial.genres.map((genre) => genre.toLowerCase()).toSet();
       final genreMatches = candidates.where((item) {
         return item.genres.any((genre) => genres.contains(genre.toLowerCase()));
       }).toList();
@@ -1868,7 +3176,7 @@ class _TvHomePageState extends State<TvHomePage> {
       final normalizedTitle = _normalizeHomeText(item.title);
       final match = item.tmdbId == null
           ? byTitle['${item.type}:$normalizedTitle:${item.year ?? ''}'] ??
-                byTitle['${item.type}:$normalizedTitle:']
+              byTitle['${item.type}:$normalizedTitle:']
           : byTmdb['${item.type}:${item.tmdbId}'];
       if (match != null && seen.add(_itemKey(match))) {
         ranked.add(match);
@@ -1896,17 +3204,66 @@ class _TvHomePageState extends State<TvHomePage> {
     return days + offset;
   }
 
-  void _selectTab(int index) {
+  void _selectTab(int index, {bool resetLibraryFilter = false}) {
+    _cancelPreparingPlayback();
     setState(() {
       _selectedTab = index;
       _selectedItem = null;
       _expandedRail = null;
       _searchOpen = false;
+      if (index == 0) {
+        _lastPageFocusNodes[0] = _homeHeroWatchFocusNode;
+        _lastPageFocusItemKeys[0] = null;
+        _pendingPageFocusItemKeys[0] = null;
+      }
+      if (resetLibraryFilter) {
+        _libraryFilter = _TvLibraryFilter.continueWatching;
+      }
+    });
+    if (index == 1) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _selectedTab != 1) return;
+        _ensureSelectedDiscoveryLaneLoaded();
+      });
+    }
+  }
+
+  void _restoreHomeHero() {
+    _revealHomeHeroAfterFrame(requestHeroFocus: true);
+  }
+
+  void _revealHomeHeroAfterFrame({
+    required bool requestHeroFocus,
+    bool focusNavigationAfterReveal = false,
+  }) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (requestHeroFocus) {
+        _homeHeroWatchFocusNode.requestFocus();
+      }
+      final heroContext = _homeHeroKey.currentContext;
+      if (heroContext != null && heroContext.mounted) {
+        try {
+          Scrollable.ensureVisible(
+            heroContext,
+            duration: _tvDuration(180),
+            curve: Curves.easeOutCubic,
+            alignment: 0,
+            alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+          );
+        } on FlutterError {
+          // Home can rebuild while catalog rails hydrate; focus is enough.
+        }
+      }
+      if (focusNavigationAfterReveal) {
+        _navigationRailKey.currentState?.focusSelected();
+      }
     });
   }
 
   void _selectNavigationItem(int index) {
     if (_navItems[index].label == 'Search') {
+      _cancelPreparingPlayback();
       setState(() {
         _selectedItem = null;
         _expandedRail = null;
@@ -1916,17 +3273,28 @@ class _TvHomePageState extends State<TvHomePage> {
     }
     final tabIndex = _tabIndexForNavIndex(index);
     if (tabIndex != null) {
+      final selectingLibrary = _tabItems[tabIndex].label == 'Library';
       if (tabIndex == _selectedTab) {
+        if (selectingLibrary &&
+            _libraryFilter != _TvLibraryFilter.continueWatching) {
+          setState(() {
+            _expandedRail = null;
+            _selectedItem = null;
+            _searchOpen = false;
+            _libraryFilter = _TvLibraryFilter.continueWatching;
+          });
+        }
         _enterSelectedTabContent();
         return;
       }
-      _selectTab(tabIndex);
+      _selectTab(tabIndex, resetLibraryFilter: selectingLibrary);
       _enterSelectedTabContentAfterNavigation();
     }
   }
 
   void _moveRightFromNavigation(int index) {
     if (_navItems[index].label == 'Search') {
+      _cancelPreparingPlayback();
       setState(() {
         _selectedItem = null;
         _expandedRail = null;
@@ -1967,40 +3335,82 @@ class _TvHomePageState extends State<TvHomePage> {
     return tabIndex == -1 ? null : tabIndex;
   }
 
+  void _pauseHomeHeroCarousel() {
+    setState(() => _homeHeroCarouselPauseDepth += 1);
+  }
+
+  void _resumeHomeHeroCarousel() {
+    if (_homeHeroCarouselPauseDepth <= 0) return;
+    setState(() => _homeHeroCarouselPauseDepth -= 1);
+  }
+
   Future<void> _openItem(_TvItem item) async {
+    final openedFromHomeHero =
+        _selectedTab == 0 && !_searchOpen && _homeHeroWatchFocusNode.hasFocus;
+    final pauseHomeHeroCarousel = _selectedTab == 0 && !_searchOpen;
+    final previousFocus = FocusManager.instance.primaryFocus;
+    final openedItemKey = _itemKey(item);
+    if (pauseHomeHeroCarousel) {
+      _pauseHomeHeroCarousel();
+    }
     _rememberItem(item);
-    if (_searchOpen) setState(() => _searchOpen = false);
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
-        builder: (_) => _TvDetailsPage(
-          item: item,
-          settings: _tvSettings,
-          liked: _isItemLiked(item),
-          libraryLists: _libraryStore?.state.libraryLists ?? const [],
-          onPlay: (detailsItem) => _play(detailsItem),
-          onPlayEpisode: (detailsItem, season, episode) =>
-              _play(detailsItem, season: season, episode: episode),
-          onOpenItem: _openItem,
-          onToggleSaved: _toggleLike,
-          onCreateList: _createLibraryListForItem,
-          onToggleList: _toggleItemInLibraryList,
-          isItemSaved: _isItemLiked,
-          isItemInList: _isItemInLibraryList,
+    final openedFromSearch = _searchOpen;
+    try {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => _TvDetailsPage(
+            item: item,
+            settings: _tvSettings,
+            liked: _isItemLiked(item),
+            libraryLists: _libraryStore?.state.libraryLists ?? const [],
+            onCancelPreparing: _cancelPreparingPlayback,
+            onPlay: (detailsItem) =>
+                _play(detailsItem, returnToDetailsOnClose: false),
+            onPlayEpisode: (detailsItem, season, episode) => _play(
+              detailsItem,
+              season: season,
+              episode: episode,
+              returnToDetailsOnClose: false,
+            ),
+            onOpenItem: _openItem,
+            onToggleSaved: _toggleLike,
+            onCreateList: _createLibraryListForItem,
+            onToggleList: _toggleItemInLibraryList,
+            isItemSaved: _isItemLiked,
+            isItemInList: _isItemInLibraryList,
+            progressForPlayback: _watchedProgressForPlayback,
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      if (mounted && pauseHomeHeroCarousel) {
+        _resumeHomeHeroCarousel();
+      }
+    }
     if (!mounted) return;
+    final homeRouteIsCurrent = ModalRoute.of(context)?.isCurrent ?? true;
+    if (!homeRouteIsCurrent) {
+      _restoreTvFocusAfterRoutePop(previousFocus);
+      return;
+    }
+    if (openedFromSearch && _searchOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_searchOpen) return;
+        _searchOverlayKey.currentState?.restoreFocus(openedItemKey);
+      });
+      return;
+    }
+    if (openedFromHomeHero) {
+      _lastPageFocusNodes[0] = _homeHeroWatchFocusNode;
+      _restoreHomeHero();
+      return;
+    }
+    _queuePageItemFocus(openedItemKey);
     _focusRememberedPageNode();
   }
 
   void _rememberItem(_TvItem item) {
-    _recentItems.removeWhere(
-      (candidate) => candidate.type == item.type && candidate.id == item.id,
-    );
-    _recentItems.insert(0, item);
-    if (_recentItems.length > 24) {
-      _recentItems.removeRange(24, _recentItems.length);
-    }
+    _rememberRecentItem(item);
     if (_tvSettings.keepHistory) {
       unawaited(
         _libraryStore?.addRecentItem(
@@ -2011,6 +3421,38 @@ class _TvHomePageState extends State<TvHomePage> {
             Future<void>.value(),
       );
       _scheduleAccountLibraryPush();
+    }
+  }
+
+  void _rememberContinueItem(_TvItem item) {
+    _rememberRecentItem(item);
+    unawaited(
+      _libraryStore?.addRecentItem(
+            key: _itemKey(item),
+            itemId: item.id,
+            snapshot: _itemSnapshot(item),
+          ) ??
+          Future<void>.value(),
+    );
+  }
+
+  void _rememberRecentItem(_TvItem item) {
+    _recentItems.removeWhere(
+      (candidate) => candidate.type == item.type && candidate.id == item.id,
+    );
+    _recentItems.insert(0, item);
+    if (_recentItems.length > 24) {
+      _recentItems.removeRange(24, _recentItems.length);
+    }
+  }
+
+  void _cancelPreparingPlayback() {
+    _playRequestGeneration++;
+    if (_preparingPlaybackKey == null) return;
+    if (mounted) {
+      setState(() => _preparingPlaybackKey = null);
+    } else {
+      _preparingPlaybackKey = null;
     }
   }
 
@@ -2029,6 +3471,11 @@ class _TvHomePageState extends State<TvHomePage> {
       title: title,
       color: _colorFromText(itemId),
       year: snapshot.year,
+      poster: snapshot.poster,
+      background: snapshot.background,
+      logo: snapshot.logo,
+      tmdbId: snapshot.tmdbId,
+      imdbId: snapshot.imdbId,
     );
   }
 
@@ -2038,6 +3485,12 @@ class _TvHomePageState extends State<TvHomePage> {
       'type': item.type,
       'title': item.title,
       if (item.year != null) 'year': item.year,
+      if ((item.poster ?? '').trim().isNotEmpty) 'poster': item.poster,
+      if ((item.background ?? '').trim().isNotEmpty)
+        'background': item.background,
+      if ((item.logo ?? '').trim().isNotEmpty) 'logo': item.logo,
+      if (item.tmdbId != null) 'tmdbId': item.tmdbId,
+      if ((item.imdbId ?? '').trim().isNotEmpty) 'imdbId': item.imdbId,
     };
   }
 
@@ -2055,9 +3508,28 @@ class _TvHomePageState extends State<TvHomePage> {
   bool _isItemLiked(_TvItem item) => _likedItemKeys.contains(_itemKey(item));
 
   List<_TvItem> get _likedItems {
+    final candidates = <String, _TvItem>{};
+    for (final item in [
+      ..._items,
+      ..._movies,
+      ..._series,
+      ..._animation,
+      ..._recentItems,
+    ]) {
+      candidates[_itemKey(item)] = item;
+    }
+    final snapshotsByKey = {
+      for (final snapshot
+          in _libraryStore?.state.recentItems ?? const <TvRecentItemSnapshot>[])
+        snapshot.key: snapshot,
+    };
     return [
-      for (final item in _items)
-        if (_isItemLiked(item)) item,
+      for (final key in _likedItemKeys)
+        if (candidates[key] != null)
+          candidates[key]!
+        else if (snapshotsByKey[key] != null &&
+            _itemFromRecentSnapshot(snapshotsByKey[key]!) != null)
+          _itemFromRecentSnapshot(snapshotsByKey[key]!)!,
     ];
   }
 
@@ -2073,6 +3545,9 @@ class _TvHomePageState extends State<TvHomePage> {
     unawaited(
       _libraryStore?.setLiked(_itemKey(item), liked) ?? Future<void>.value(),
     );
+    if (liked) {
+      _rememberContinueItem(item);
+    }
     _scheduleAccountLibraryPush();
   }
 
@@ -2088,6 +3563,7 @@ class _TvHomePageState extends State<TvHomePage> {
     );
     if (!mounted) return list;
     setState(() => _likedItemKeys.add(_itemKey(item)));
+    _rememberContinueItem(item);
     _scheduleAccountLibraryPush();
     return list;
   }
@@ -2104,6 +3580,7 @@ class _TvHomePageState extends State<TvHomePage> {
     );
     if (!mounted) return selected;
     setState(() => _likedItemKeys.add(_itemKey(item)));
+    _rememberContinueItem(item);
     _scheduleAccountLibraryPush();
     return selected;
   }
@@ -2113,7 +3590,9 @@ class _TvHomePageState extends State<TvHomePage> {
   }
 
   void _updateTvSettings(_TvSettingsState next) {
-    final hadCatalogSource = _tvSettings.hasCatalogSource;
+    final shouldRefreshCatalog =
+        _tvSettings.builtInCatalog != next.builtInCatalog ||
+            _tvSettings.builtInLiveTv != next.builtInLiveTv;
     setState(() {
       _tvSettings = next;
       if (!next.keepHistory) {
@@ -2127,20 +3606,51 @@ class _TvHomePageState extends State<TvHomePage> {
       }
     });
     unawaited(_persistTvSettings(next));
-    if (!hadCatalogSource && next.hasCatalogSource) {
-      unawaited(_loadCatalog());
-    } else if (hadCatalogSource && !next.hasCatalogSource) {
-      unawaited(_loadCatalog());
+    if (shouldRefreshCatalog) {
+      unawaited(_loadCatalog(force: true));
     }
   }
 
+  void _ensureSelectedDiscoveryLaneLoaded() {
+    if (!_tvSettings.hasCatalogSource) return;
+    final laneKey = _tvDiscoveryLaneKey(
+      _discoveryKind,
+      _discoverySort,
+      genre: _discoveryGenre,
+    );
+    if ((_discoveryLaneItems[laneKey] ?? const <_TvItem>[]).isNotEmpty) return;
+    if (_discoveryLaneLoading.contains(laneKey) ||
+        _discoveryLaneExhausted.contains(laneKey)) {
+      return;
+    }
+    unawaited(_loadMoreDiscoveryLane());
+  }
+
   void _closeOverlay({bool focusNavigation = false}) {
+    _cancelPreparingPlayback();
+    final wasSearchOpen = _searchOpen;
     setState(() {
       _selectedItem = null;
       _searchOpen = false;
+      if (wasSearchOpen && _selectedTab == 0) {
+        _lastPageFocusNodes[0] = _homeHeroWatchFocusNode;
+        _lastPageFocusItemKeys[0] = null;
+        _pendingPageFocusItemKeys[0] = null;
+      }
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      if (wasSearchOpen && _selectedTab == 0) {
+        if (focusNavigation) {
+          _revealHomeHeroAfterFrame(
+            requestHeroFocus: false,
+            focusNavigationAfterReveal: true,
+          );
+        } else {
+          _restoreHomeHero();
+        }
+        return;
+      }
       if (focusNavigation) {
         _navigationRailKey.currentState?.focusSelected();
       } else if (_focusRememberedPageNode()) {
@@ -2153,14 +3663,17 @@ class _TvHomePageState extends State<TvHomePage> {
 
   void _handleBackPressed() {
     final now = DateTime.now();
-    final duplicateBack =
-        _lastBackDispatchAt != null &&
+    final duplicateBack = _lastBackDispatchAt != null &&
         now.difference(_lastBackDispatchAt!) <
             const Duration(milliseconds: 180);
     if (duplicateBack) return;
     _lastBackDispatchAt = now;
-    if (_selectedItem != null || _searchOpen) {
-      _closeOverlay(focusNavigation: _searchOpen);
+    if (_searchOpen) {
+      _closeOverlay(focusNavigation: true);
+      return;
+    }
+    if (_selectedItem != null) {
+      _closeOverlay();
       return;
     }
     if (_expandedRail != null) {
@@ -2176,15 +3689,18 @@ class _TvHomePageState extends State<TvHomePage> {
     }
     if (_selectedTab != 0) {
       _lastExitBackPressAt = null;
-      _selectTab(0);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        _navigationRailKey.currentState?.focusSelected();
+      _cancelPreparingPlayback();
+      setState(() {
+        _selectedTab = 0;
+        _expandedRail = null;
+        _selectedItem = null;
+        _searchOpen = false;
       });
+      _lastPageFocusNodes[0] = _homeHeroWatchFocusNode;
+      _restoreHomeHero();
       return;
     }
-    final shouldExit =
-        _lastExitBackPressAt != null &&
+    final shouldExit = _lastExitBackPressAt != null &&
         now.difference(_lastExitBackPressAt!) < const Duration(seconds: 2);
     if (shouldExit) {
       SystemNavigator.pop();
@@ -2200,7 +3716,7 @@ class _TvHomePageState extends State<TvHomePage> {
 
   Future<void> _openDiscoveryMenu() async {
     var changed = false;
-    await showDialog<void>(
+    await _showTvDialog<void>(
       context: context,
       builder: (context) => _TvDiscoveryMenuDialog(
         kind: _discoveryKind,
@@ -2223,6 +3739,7 @@ class _TvHomePageState extends State<TvHomePage> {
       if (!mounted) return;
       if (changed) {
         _rememberPageFocus(_pageEntryFocusNodes[_selectedTab]);
+        _ensureSelectedDiscoveryLaneLoaded();
         _focusPageEntry();
         return;
       }
@@ -2232,19 +3749,40 @@ class _TvHomePageState extends State<TvHomePage> {
   }
 
   List<String> get _availableDiscoveryGenres {
-    final genres = <String>{};
-    for (final item in _items) {
-      genres.addAll(item.genres.where((genre) => genre.trim().isNotEmpty));
+    final genres = <String, String>{};
+    final candidates = <String, _TvItem>{
+      for (final item in _items) '${item.type}:${item.id}': item,
+      for (final entry in _discoveryLaneItems.entries)
+        for (final item in entry.value) '${item.type}:${item.id}': item,
+    }.values;
+    for (final item in candidates) {
+      if (!_matchesDiscoveryLaneKind(item, _discoveryKind)) continue;
+      for (final rawGenre in item.genres) {
+        final genre = rawGenre.trim();
+        if (genre.isEmpty) continue;
+        final key = genre.toLowerCase();
+        genres.putIfAbsent(key, () => _formatDiscoveryGenreLabel(genre));
+      }
     }
-    final sorted = genres.toList()
+    final sorted = genres.values.toList()
       ..sort(
         (left, right) => left.toLowerCase().compareTo(right.toLowerCase()),
       );
     return sorted;
   }
 
+  String _formatDiscoveryGenreLabel(String genre) {
+    return genre
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .map((part) {
+      if (part.length <= 2 && part == part.toUpperCase()) return part;
+      return part[0].toUpperCase() + part.substring(1).toLowerCase();
+    }).join(' ');
+  }
+
   Future<void> _openLibraryMenu() async {
-    await showDialog<void>(
+    await _showTvDialog<void>(
       context: context,
       builder: (context) => _TvLibraryMenuDialog(
         filter: _libraryFilter,
@@ -2261,6 +3799,54 @@ class _TvHomePageState extends State<TvHomePage> {
     });
   }
 
+  Future<void> _openItemLibraryMenu(_TvItem item) async {
+    final saved = _isItemLiked(item);
+    final action = await _showTvDialog<_TvLibraryAction>(
+      context: context,
+      builder: (_) => _TvLibraryActionDialog(saved: saved),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case _TvLibraryAction.toggleSaved:
+        _toggleLike(item);
+      case _TvLibraryAction.addToList:
+        await _openItemListPicker(item);
+    }
+  }
+
+  Future<void> _openItemListPicker(_TvItem item) async {
+    final result = await _showTvDialog<Object>(
+      context: context,
+      builder: (_) => _TvListPickerDialog(
+        item: item,
+        lists: _libraryStore?.state.libraryLists ?? const [],
+        isItemInList: _isItemInLibraryList,
+      ),
+    );
+    if (!mounted || result == null) return;
+    if (result is TvLibraryList) {
+      final selected = await _toggleItemInLibraryList(item, result);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              selected
+                  ? 'Added to ${result.name}'
+                  : 'Removed from ${result.name}',
+            ),
+          ),
+        );
+    } else if (result is String) {
+      final list = await _createLibraryListForItem(item, result);
+      if (!mounted || list == null) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('Added to ${list.name}')));
+    }
+  }
+
   void _focusPageEntry() {
     if (!mounted) return;
     if (_selectedTab == 0) {
@@ -2268,40 +3854,60 @@ class _TvHomePageState extends State<TvHomePage> {
         if (!mounted) return;
         final watchContext = _homeHeroWatchFocusNode.context;
         if (watchContext == null) {
-          final firstRailContext = _pageEntryFocusNodes[0].context;
-          if (firstRailContext != null) {
-            _pageEntryFocusNodes[0].requestFocus();
-            Scrollable.ensureVisible(
-              firstRailContext,
-              duration: const Duration(milliseconds: 180),
-              curve: Curves.easeOutCubic,
-              alignment: 0.36,
-              alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
-            );
-          }
+          _pageEntryFocusNodes[0].requestFocus();
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted || !_pageEntryFocusNodes[0].hasFocus) return;
+            final firstRailContext = _pageEntryFocusNodes[0].context;
+            if (firstRailContext == null || !firstRailContext.mounted) return;
+            try {
+              Scrollable.ensureVisible(
+                firstRailContext,
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                alignment: 0.36,
+                alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+              );
+            } on FlutterError {
+              // The first rail can be replaced during catalog hydration.
+            }
+          });
           return;
         }
         _rememberPageFocus(_homeHeroWatchFocusNode);
         _homeHeroWatchFocusNode.requestFocus();
-        final heroContext = _homeHeroKey.currentContext;
-        if (heroContext != null) {
-          Scrollable.ensureVisible(
-            heroContext,
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOutCubic,
-            alignment: 0,
-            alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
-          );
-        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_homeHeroWatchFocusNode.hasFocus) return;
+          final heroContext = _homeHeroKey.currentContext;
+          if (heroContext == null || !heroContext.mounted) return;
+          try {
+            Scrollable.ensureVisible(
+              heroContext,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              alignment: 0,
+              alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+            );
+          } on FlutterError {
+            // The hero can be replaced during catalog hydration.
+          }
+        });
       }
 
       focusHero();
       WidgetsBinding.instance.addPostFrameCallback((_) => focusHero());
+      for (final delay in const <int>[120, 280, 520, 900]) {
+        Future<void>.delayed(
+          Duration(milliseconds: delay),
+          () {
+            if (!mounted || !_primaryFocusNeedsRestore) return;
+            focusHero();
+          },
+        );
+      }
       return;
     }
-    final index = _selectedTab
-        .clamp(0, _pageEntryFocusNodes.length - 1)
-        .toInt();
+    final index =
+        _selectedTab.clamp(0, _pageEntryFocusNodes.length - 1).toInt();
     final node = _pageEntryFocusNodes[index];
     if (node.context != null) {
       node.requestFocus();
@@ -2314,9 +3920,9 @@ class _TvHomePageState extends State<TvHomePage> {
           node.requestFocus();
           return;
         }
-        if (attempt >= 2) return;
+        if (attempt >= 6) return;
         Future<void>.delayed(
-          const Duration(milliseconds: 70),
+          Duration(milliseconds: 70 + attempt * 35),
           () => retryFocus(attempt + 1),
         );
       });
@@ -2327,9 +3933,8 @@ class _TvHomePageState extends State<TvHomePage> {
 
   void _focusPageContent() {
     if (!mounted) return;
-    final index = _selectedTab
-        .clamp(0, _pageContentFocusNodes.length - 1)
-        .toInt();
+    final index =
+        _selectedTab.clamp(0, _pageContentFocusNodes.length - 1).toInt();
     final node = _pageContentFocusNodes[index];
     if (node.context != null) {
       _rememberPageFocus(node);
@@ -2344,9 +3949,9 @@ class _TvHomePageState extends State<TvHomePage> {
           node.requestFocus();
           return;
         }
-        if (attempt >= 2) return;
+        if (attempt >= 6) return;
         Future<void>.delayed(
-          const Duration(milliseconds: 70),
+          Duration(milliseconds: 70 + attempt * 35),
           () => retryFocus(attempt + 1),
         );
       });
@@ -2355,13 +3960,49 @@ class _TvHomePageState extends State<TvHomePage> {
     retryFocus();
   }
 
-  void _rememberPageFocus(FocusNode node) {
+  void _rememberPageFocus(FocusNode node, {_TvItem? item}) {
     if (!mounted ||
         _selectedTab < 0 ||
         _selectedTab >= _lastPageFocusNodes.length) {
       return;
     }
     _lastPageFocusNodes[_selectedTab] = node;
+    if (item != null) {
+      _lastPageFocusItemKeys[_selectedTab] = _itemKey(item);
+    }
+  }
+
+  void _rememberPageItemFocus(FocusNode node, _TvItem item) {
+    _rememberPageFocus(node, item: item);
+  }
+
+  void _queueRememberedPageItemFocus() {
+    if (!mounted ||
+        _selectedTab < 0 ||
+        _selectedTab >= _pendingPageFocusItemKeys.length) {
+      return;
+    }
+    _queuePageItemFocus(_lastPageFocusItemKeys[_selectedTab]);
+  }
+
+  void _queuePageItemFocus(String? itemKey) {
+    if (itemKey == null ||
+        itemKey.trim().isEmpty ||
+        _selectedTab < 0 ||
+        _selectedTab >= _pendingPageFocusItemKeys.length) {
+      return;
+    }
+    setState(() => _pendingPageFocusItemKeys[_selectedTab] = itemKey);
+  }
+
+  void _consumePageItemFocus(String itemKey) {
+    if (!mounted ||
+        _selectedTab < 0 ||
+        _selectedTab >= _pendingPageFocusItemKeys.length) {
+      return;
+    }
+    if (_pendingPageFocusItemKeys[_selectedTab] != itemKey) return;
+    setState(() => _pendingPageFocusItemKeys[_selectedTab] = null);
   }
 
   bool _focusRememberedPageNode({double alignment = 0.38}) {
@@ -2372,23 +4013,41 @@ class _TvHomePageState extends State<TvHomePage> {
     }
     final node = _lastPageFocusNodes[_selectedTab];
     final context = node?.context;
-    if (node == null || context == null || !node.canRequestFocus) {
+    if (node == null ||
+        context == null ||
+        !context.mounted ||
+        !node.canRequestFocus) {
+      _lastPageFocusNodes[_selectedTab] = null;
+      _queueRememberedPageItemFocus();
       return false;
     }
     node.requestFocus();
-    Scrollable.ensureVisible(
-      context,
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOutCubic,
-      alignment: alignment,
-      alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
-    );
+    try {
+      final alignmentPolicy = _selectedTab == 0
+          ? ScrollPositionAlignmentPolicy.keepVisibleAtEnd
+          : ScrollPositionAlignmentPolicy.explicit;
+      Scrollable.ensureVisible(
+        context,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+        alignment: alignment,
+        alignmentPolicy: alignmentPolicy,
+      );
+    } on FlutterError {
+      _lastPageFocusNodes[_selectedTab] = null;
+      _queueRememberedPageItemFocus();
+      return false;
+    }
     return true;
   }
 
   void _enterSelectedTabContent() {
     if (_selectedTab != 0) {
       _focusSelectedTabFirstItem();
+      return;
+    }
+    if (_lastPageFocusNodes[0] == _homeHeroWatchFocusNode) {
+      _restoreHomeHero();
       return;
     }
     if (_focusRememberedPageNode()) return;
@@ -2414,69 +4073,366 @@ class _TvHomePageState extends State<TvHomePage> {
   List<_PlaybackSession> _orderedPlaybackSessions(
     List<_PlaybackSession> sessions,
   ) {
-    final ordered = [...sessions];
+    final ordered = [
+      for (final session in sessions)
+        if (_tvSettings.p2pPlaybackEnabled || !_isP2pPlaybackSession(session))
+          session,
+    ];
     int rank(_PlaybackSession session) {
       final type = session.sourceType.toLowerCase();
-      final adaptive =
-          type.contains('hls') ||
+      final p2p = _isP2pPlaybackSession(session);
+      if (p2p && !_tvSettings.p2pSourcePrioritiesEnabled) return 20;
+      if (p2p) return 10 + _p2pPlaybackSessionRank(session);
+      final adaptive = type.contains('hls') ||
           type.contains('m3u8') ||
           type.contains('dash') ||
           type.contains('mpd');
       final direct = type.contains('mp4') || type.contains('video');
       return switch (_tvSettings.preferredQuality) {
-        'Best available' =>
-          adaptive
-              ? 0
-              : direct
-              ? 1
-              : 2,
-        'Data saver' =>
-          direct
-              ? 0
-              : adaptive
-              ? 1
-              : 2,
-        _ =>
-          adaptive
-              ? 0
-              : direct
-              ? 1
-              : 2,
+        'Best available' => adaptive
+            ? 0
+            : direct
+                ? 1
+                : 2,
+        'Data saver' => direct
+            ? 0
+            : adaptive
+                ? 1
+                : 2,
+        _ => adaptive
+            ? 0
+            : direct
+                ? 1
+                : 2,
       };
     }
 
     ordered.sort((left, right) => rank(left).compareTo(rank(right)));
-    return ordered;
+    if (!_tvSettings.p2pPlaybackEnabled ||
+        !_tvSettings.p2pSourcePrioritiesEnabled) {
+      return ordered;
+    }
+    final p2pQualityCounts = <String, int>{};
+    return [
+      for (final session in ordered)
+        if (!_isP2pPlaybackSession(session) ||
+            (p2pQualityCounts.update(
+                  _playbackQualityBucket(session.sourceType.toLowerCase()),
+                  (count) => count + 1,
+                  ifAbsent: () => 1,
+                ) <=
+                _tvSettings.p2pResultsPerQuality))
+          session,
+    ];
+  }
+
+  bool _isP2pPlaybackSession(_PlaybackSession session) {
+    final type = session.sourceType.toLowerCase();
+    final url = session.mediaUrl.toLowerCase();
+    return type.contains('p2p') ||
+        type.contains('torrent') ||
+        type.contains('magnet') ||
+        url.startsWith('magnet:') ||
+        url.contains('btih:');
+  }
+
+  int _p2pPlaybackSessionRank(_PlaybackSession session) {
+    final type = session.sourceType.toLowerCase();
+    final risky = _tvSettings.p2pAvoidRiskyFormats &&
+        (type.contains('cam') ||
+            type.contains('ts') ||
+            type.contains('telecine') ||
+            type.contains('telesync') ||
+            type.contains('scr'));
+    final riskyPenalty = risky ? 8 : 0;
+    final qualityRank = _playbackQualityRank(type);
+    return switch (_tvSettings.p2pPriorityMode) {
+      kTvP2pPriorityQualityFirst => qualityRank + riskyPenalty,
+      kTvP2pPriorityAvailabilityFirst => riskyPenalty,
+      kTvP2pPrioritySmallerFasterFiles =>
+        _playbackSizeRank(type) + riskyPenalty,
+      kTvP2pPriorityBalanced =>
+        ((qualityRank + _playbackSizeRank(type)) ~/ 2) + riskyPenalty,
+      _ => riskyPenalty + math.min(qualityRank, _playbackSizeRank(type)),
+    };
+  }
+
+  int _playbackQualityRank(String type) {
+    if (type.contains('2160') || type.contains('4k') || type.contains('uhd')) {
+      return 0;
+    }
+    if (type.contains('1080')) return 1;
+    if (type.contains('720')) return 2;
+    if (type.contains('480')) return 3;
+    return 4;
+  }
+
+  String _playbackQualityBucket(String type) {
+    if (type.contains('2160') || type.contains('4k') || type.contains('uhd')) {
+      return '2160';
+    }
+    if (type.contains('1080')) return '1080';
+    if (type.contains('720')) return '720';
+    if (type.contains('480')) return '480';
+    return 'auto';
+  }
+
+  int _playbackSizeRank(String type) {
+    final match = RegExp(r'(\d+(?:\.\d+)?)\s*(gb|mb)').firstMatch(type);
+    if (match == null) return 2;
+    final amount = double.tryParse(match.group(1) ?? '') ?? 0;
+    final unit = match.group(2) ?? 'mb';
+    final sizeMb = unit == 'gb' ? amount * 1024 : amount;
+    final limit = _tvSettings.p2pSizeLimitMb;
+    if (limit > 0 && sizeMb > limit) return 10;
+    if (sizeMb <= 1400) return 0;
+    if (sizeMb <= 4096) return 1;
+    if (sizeMb <= 8192) return 2;
+    return 3;
   }
 
   String _playbackProgressKey(_TvItem item, int season, int episode) {
     return '${item.type}:${item.id}:$season:$episode';
   }
 
+  String _verifiedPlaybackSessionKey(_TvItem item, int season, int episode) {
+    final type = _normalizeType(item.type);
+    final id = item.id.trim().isNotEmpty
+        ? item.id.trim()
+        : (item.tmdbId?.toString() ?? item.title.trim());
+    if (type == 'live') return 'live:$id';
+    return '$type:$id:$season:$episode';
+  }
+
+  bool _verifiedPlaybackSessionUsable(_TvVerifiedPlaybackSession entry) {
+    if (entry.session.mediaUrl.trim().isEmpty) return false;
+    if (entry.session.mediaUrl.startsWith('http://127.0.0.1') ||
+        entry.session.mediaUrl.startsWith('http://localhost')) {
+      return false;
+    }
+    if (DateTime.now().difference(entry.cachedAt) > const Duration(hours: 6)) {
+      return false;
+    }
+    if (entry.confidence < 8) return false;
+    if (_isP2pPlaybackSession(entry.session) && !_tvSettings.p2pPlaybackEnabled) {
+      return false;
+    }
+    return true;
+  }
+
+  List<_TvVerifiedPlaybackSession> _rankVerifiedSessions(
+    Iterable<_TvVerifiedPlaybackSession> entries,
+  ) {
+    final ranked = entries.where(_verifiedPlaybackSessionUsable).toList()
+      ..sort((left, right) {
+        final confidence = right.confidence.compareTo(left.confidence);
+        if (confidence != 0) return confidence;
+        final success = right.successCount.compareTo(left.successCount);
+        if (success != 0) return success;
+        return right.cachedAt.compareTo(left.cachedAt);
+      });
+    return ranked.take(3).toList(growable: false);
+  }
+
+  List<_PlaybackSession> _verifiedPlaybackSessionsFor(String key) {
+    final entries = _rankVerifiedSessions(
+      _verifiedPlaybackSessions[key] ?? const <_TvVerifiedPlaybackSession>[],
+    );
+    return entries.map((entry) => entry.session).toList(growable: false);
+  }
+
+  void _rememberVerifiedPlaybackSession(
+    String key,
+    _PlaybackSession session,
+    String engineId,
+  ) {
+    if (key.trim().isEmpty ||
+        session.mediaUrl.trim().isEmpty ||
+        session.mediaUrl.startsWith('http://127.0.0.1') ||
+        session.mediaUrl.startsWith('http://localhost')) {
+      return;
+    }
+    final current = List<_TvVerifiedPlaybackSession>.from(
+      _verifiedPlaybackSessions[key] ?? const <_TvVerifiedPlaybackSession>[],
+    );
+    final index = current.indexWhere(
+      (entry) => entry.session.mediaUrl == session.mediaUrl,
+    );
+    if (index >= 0) {
+      final previous = current[index];
+      current[index] = previous.copyWith(
+        session: session,
+        engineId: engineId,
+        cachedAt: DateTime.now(),
+        confidence: (previous.confidence + 10).clamp(0, 100),
+        successCount: previous.successCount + 1,
+        failureCount: previous.failureCount,
+      );
+    } else {
+      current.add(
+        _TvVerifiedPlaybackSession(
+          session: session,
+          engineId: engineId,
+          cachedAt: DateTime.now(),
+          confidence: 12,
+        ),
+      );
+    }
+    setState(() {
+      _verifiedPlaybackSessions[key] = _rankVerifiedSessions(current);
+    });
+    unawaited(_persistVerifiedPlaybackSessions());
+    debugPrint('Juicr TV verified playback cache stored key=[redacted]');
+  }
+
+  void _forgetVerifiedPlaybackSessions(String key) {
+    if (!_verifiedPlaybackSessions.containsKey(key)) return;
+    setState(() => _verifiedPlaybackSessions.remove(key));
+    unawaited(_persistVerifiedPlaybackSessions());
+    debugPrint('Juicr TV verified playback cache cleared key=[redacted]');
+  }
+
+  void _forgetRejectedVerifiedPlaybackSession(
+    String key,
+    _PlaybackSession session,
+  ) {
+    final current =
+        _verifiedPlaybackSessions[key] ?? const <_TvVerifiedPlaybackSession>[];
+    final rejectedUrl = session.mediaUrl.trim();
+    if (current.isEmpty || rejectedUrl.isEmpty) return;
+    final filtered = current
+        .where((entry) => entry.session.mediaUrl.trim() != rejectedUrl)
+        .toList(growable: false);
+    if (filtered.length == current.length) return;
+    setState(() {
+      if (filtered.isEmpty) {
+        _verifiedPlaybackSessions.remove(key);
+      } else {
+        _verifiedPlaybackSessions[key] = filtered;
+      }
+    });
+    unawaited(_persistVerifiedPlaybackSessions());
+    debugPrint('Juicr TV verified playback cache rejected key=[redacted]');
+  }
+
   bool _shouldOfferResume(_TvPlaybackProgress progress) {
     if (!_tvSettings.resumePrompt) return false;
-    if (progress.position < const Duration(seconds: 45)) return false;
+    if (progress.position <= Duration.zero) return false;
     if (progress.duration <= Duration.zero) return true;
     return progress.duration - progress.position > const Duration(minutes: 2);
   }
 
-  Future<Duration?> _resumePositionFor(
+  _TvPlaybackProgress? _resumeProgressFor(
     _TvItem item,
     int season,
     int episode,
-  ) async {
-    final progress =
-        _watchedProgress[_playbackProgressKey(item, season, episode)];
-    if (progress == null || !_shouldOfferResume(progress)) return Duration.zero;
-    final continuePlayback = await showDialog<bool>(
-      context: context,
-      builder: (context) => _TvResumePlaybackDialog(progress: progress),
-    );
-    if (!mounted || continuePlayback == null) return null;
-    return continuePlayback ? progress.position : Duration.zero;
+  ) {
+    final progress = _watchedProgressForPlayback(item, season, episode);
+    if (progress == null || !_shouldOfferResume(progress)) return null;
+    return progress;
   }
 
-  Future<void> _play(_TvItem item, {int season = 1, int episode = 1}) async {
+  _TvPlaybackProgress? _watchedProgressForPlayback(
+    _TvItem item,
+    int season,
+    int episode,
+  ) {
+    final exactKey = _playbackProgressKey(item, season, episode);
+    final itemKey = _itemKey(item);
+    final legacyItemKey = item.id.trim();
+    final candidates = <String>[
+      exactKey,
+      if (legacyItemKey.isNotEmpty) '$legacyItemKey:$season:$episode',
+      if (season == 1 && episode == 1) itemKey,
+      if (season == 1 && episode == 1 && legacyItemKey.isNotEmpty)
+        legacyItemKey,
+    ];
+    _TvPlaybackProgress? best;
+    for (final key in candidates) {
+      final progress = _watchedProgress[key];
+      if (progress == null) continue;
+      if (best == null ||
+          progress.position > best.position ||
+          (progress.position == best.position &&
+              progress.duration > best.duration)) {
+        best = progress;
+      }
+    }
+    return best;
+  }
+
+  ({int season, int episode, _TvPlaybackProgress progress})?
+      _latestWatchedProgressForItem(_TvItem item) {
+    final itemKey = _itemKey(item);
+    final legacyItemKey = item.id.trim();
+    ({int season, int episode})? parseKey(String key) {
+      if (key == itemKey ||
+          (legacyItemKey.isNotEmpty && key == legacyItemKey)) {
+        return (season: 1, episode: 1);
+      }
+      final prefixes = <String>[
+        '$itemKey:',
+        if (legacyItemKey.isNotEmpty) '$legacyItemKey:',
+      ];
+      for (final prefix in prefixes) {
+        if (!key.startsWith(prefix)) continue;
+        final parts = key.substring(prefix.length).split(':');
+        if (parts.length != 2) continue;
+        final season = int.tryParse(parts[0]);
+        final episode = int.tryParse(parts[1]);
+        if (season == null || episode == null) continue;
+        if (season <= 0 || episode <= 0) continue;
+        return (season: season, episode: episode);
+      }
+      return null;
+    }
+
+    ({int season, int episode, _TvPlaybackProgress progress})? best;
+    for (final entry in _watchedProgress.entries) {
+      final parsed = parseKey(entry.key);
+      if (parsed == null) continue;
+      final progress = entry.value;
+      if (progress.position <= Duration.zero) continue;
+      if (!_shouldOfferResume(progress)) continue;
+      if (best == null ||
+          parsed.season > best.season ||
+          (parsed.season == best.season && parsed.episode > best.episode) ||
+          (parsed.season == best.season &&
+              parsed.episode == best.episode &&
+              progress.position > best.progress.position)) {
+        best = (
+          season: parsed.season,
+          episode: parsed.episode,
+          progress: progress,
+        );
+      }
+    }
+    return best;
+  }
+
+  ({int season, int episode, _TvPlaybackProgress? progress})
+      _resolvePlaybackTarget(_TvItem item, int season, int episode) {
+    final exactProgress = _resumeProgressFor(item, season, episode);
+    if (exactProgress != null || season != 1 || episode != 1) {
+      return (season: season, episode: episode, progress: exactProgress);
+    }
+    final latestProgress = _latestWatchedProgressForItem(item);
+    if (latestProgress != null) {
+      return (
+        season: latestProgress.season,
+        episode: latestProgress.episode,
+        progress: latestProgress.progress,
+      );
+    }
+    return (season: season, episode: episode, progress: null);
+  }
+
+  Future<void> _play(
+    _TvItem item, {
+    int season = 1,
+    int episode = 1,
+    bool returnToDetailsOnClose = true,
+  }) async {
     if (!_tvSettings.hasPlaybackSource) {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
@@ -2490,70 +4446,185 @@ class _TvHomePageState extends State<TvHomePage> {
         );
       return;
     }
-    final playbackKey = '${item.type}:${item.id}:$season:$episode';
+    final target = _resolvePlaybackTarget(item, season, episode);
+    final targetSeason = target.season;
+    final targetEpisode = target.episode;
+    final playbackKey = _playbackProgressKey(item, targetSeason, targetEpisode);
+    final verifiedCacheKey =
+        _verifiedPlaybackSessionKey(item, targetSeason, targetEpisode);
     if (_preparingPlaybackKey != null) return;
     if (!mounted) return;
+    final requestGeneration = ++_playRequestGeneration;
     setState(() => _preparingPlaybackKey = playbackKey);
     debugPrint(
       'Juicr TV playback requested hasSource=${_tvSettings.hasPlaybackSource}',
     );
     final messenger = ScaffoldMessenger.of(context);
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('Press Back to cancel while Juicr prepares playback.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
     try {
-      final resumePosition = await _resumePositionFor(item, season, episode);
-      if (resumePosition == null) return;
+      final resumeProgress = target.progress;
       if (!mounted) return;
-      messenger
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text('Preparing playback...'),
-            duration: Duration(seconds: 1),
-          ),
+      final cachedSessions = _verifiedPlaybackSessionsFor(verifiedCacheKey);
+      final usedVerifiedPlaybackCache = cachedSessions.isNotEmpty;
+      if (usedVerifiedPlaybackCache) {
+        debugPrint(
+          'Juicr TV playback using verified source cache '
+          'key=[redacted] count=${cachedSessions.length}',
         );
-      final subtitles = await _subtitlesForPlayback(
-        item,
-        season: season,
-        episode: episode,
+      }
+      Future<List<_PlaybackSession>> fetchFreshPlaybackSessions(
+        String reason,
+      ) async {
+        try {
+          final sessions = await _api
+              .playbackSessions(
+                item,
+                season: targetSeason,
+                episode: targetEpisode,
+              )
+              .timeout(const Duration(seconds: 45));
+          final ordered = _orderedPlaybackSessions(sessions);
+          debugPrint(
+            'Juicr TV fresh playback $reason ready '
+            'count=${ordered.length}',
+          );
+          return ordered;
+        } catch (error) {
+          debugPrint(
+            'Juicr TV fresh playback $reason failed '
+            'errorType=${error.runtimeType}',
+          );
+          return const <_PlaybackSession>[];
+        }
+      }
+
+      Future<List<_PlaybackSession>>? freshFallbackFuture;
+      List<_PlaybackSession> freshSessions = const <_PlaybackSession>[];
+      if (usedVerifiedPlaybackCache) {
+        debugPrint(
+          'Juicr TV fresh playback source refresh warming '
+          'while using verified cache',
+        );
+        freshFallbackFuture = fetchFreshPlaybackSessions('source refresh');
+      } else {
+        freshSessions = await fetchFreshPlaybackSessions('initial lookup');
+      }
+      final sessions = usedVerifiedPlaybackCache
+          ? _orderedPlaybackSessions(cachedSessions)
+          : _orderedPlaybackSessions(freshSessions);
+      if (!mounted || requestGeneration != _playRequestGeneration) return;
+      final seededSubtitles = _subtitlesFromPlaybackSessions(sessions);
+      debugPrint(
+        'Juicr TV subtitle seed count=${seededSubtitles.length} '
+        'sessions=${sessions.length}',
       );
-      final sessions = _orderedPlaybackSessions(
-        await _api
-            .playbackSessions(item, season: season, episode: episode)
-            .timeout(const Duration(seconds: 75)),
-      );
-      if (!mounted) return;
-      final progress = await Navigator.of(context).push<_TvPlaybackProgress>(
-        MaterialPageRoute<_TvPlaybackProgress>(
+      final previousFocus = FocusManager.instance.primaryFocus;
+      final result = await Navigator.of(context).push<Object?>(
+        MaterialPageRoute<Object?>(
           builder: (_) => _TvPlaybackPage(
             item: item,
             sessions: sessions,
             initialSessionIndex: 0,
-            initialSeason: season,
-            initialEpisode: episode,
-            initialResumePosition: resumePosition,
+            initialSeason: targetSeason,
+            initialEpisode: targetEpisode,
+            initialResumePosition: Duration.zero,
+            initialResumeProgress: resumeProgress,
             settings: _tvSettings,
-            subtitles: subtitles,
-            initialSubtitleIndex: subtitles.isEmpty ? -1 : 0,
+            subtitles: seededSubtitles,
+            initialSubtitleIndex: -1,
+            resolveSubtitles: () => _subtitlesForPlayback(
+              item,
+              season: targetSeason,
+              episode: targetEpisode,
+            ),
+            resolveFreshSessions: usedVerifiedPlaybackCache
+                ? () async {
+                    debugPrint(
+                      'Juicr TV fresh playback fallback requested '
+                      'cacheKey=[redacted]',
+                    );
+                    final warmed =
+                        await (freshFallbackFuture ??
+                            Future<List<_PlaybackSession>>.value(
+                              const <_PlaybackSession>[],
+                            ));
+                    if (warmed.isNotEmpty) return warmed;
+                    debugPrint(
+                      'Juicr TV fresh playback retry requested '
+                      'after cache rejection',
+                    );
+                    return fetchFreshPlaybackSessions(
+                      'retry after cache rejection',
+                    );
+                  }
+                : null,
+            onProgress: (season, episode, progress) {
+              final progressKey = _playbackProgressKey(item, season, episode);
+              _savePlaybackProgressForItem(
+                item,
+                progressKey,
+                progress,
+                markHistory: true,
+              );
+            },
+            onVerifiedSession: (session, engineId) {
+              _rememberVerifiedPlaybackSession(
+                verifiedCacheKey,
+                session,
+                engineId,
+              );
+            },
+            onRejectedSession: (session) {
+              _forgetRejectedVerifiedPlaybackSession(
+                verifiedCacheKey,
+                session,
+              );
+            },
           ),
         ),
       );
-      if (progress != null && progress.duration > Duration.zero) {
-        _watchedProgress[playbackKey] = progress;
-        unawaited(
-          _libraryStore?.updateProgress(
-                key: playbackKey,
-                positionMillis: progress.position.inMilliseconds,
-                durationMillis: progress.duration.inMilliseconds,
-              ) ??
-              Future<void>.value(),
-        );
-        if (_isPlaybackComplete(progress)) {
-          unawaited(
-            _libraryStore?.markCompleted(playbackKey) ?? Future<void>.value(),
-          );
+      if (!mounted || requestGeneration != _playRequestGeneration) return;
+      if (!returnToDetailsOnClose) {
+        _restoreTvFocusAfterRoutePop(previousFocus);
+      }
+      if (result is _TvPlaybackUnavailable) {
+        if (usedVerifiedPlaybackCache) {
+          _forgetVerifiedPlaybackSessions(verifiedCacheKey);
         }
-        _scheduleAccountLibraryPush();
+        messenger
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(result.message),
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        if (returnToDetailsOnClose) {
+          if (mounted && _preparingPlaybackKey == playbackKey) {
+            setState(() => _preparingPlaybackKey = null);
+          }
+          await _openItem(item);
+        }
+        return;
+      }
+      final progress = result is _TvPlaybackProgress ? result : null;
+      if (progress != null) {
+        _savePlaybackProgressForItem(item, playbackKey, progress);
       }
       if (_tvSettings.keepHistory) _rememberItem(item);
+      if (returnToDetailsOnClose) {
+        if (mounted && _preparingPlaybackKey == playbackKey) {
+          setState(() => _preparingPlaybackKey = null);
+        }
+        await _openItem(item);
+      }
     } catch (error) {
       if (!mounted) return;
       messenger
@@ -2564,11 +4635,52 @@ class _TvHomePageState extends State<TvHomePage> {
             duration: const Duration(seconds: 3),
           ),
         );
+      if (returnToDetailsOnClose) {
+        if (mounted && _preparingPlaybackKey == playbackKey) {
+          setState(() => _preparingPlaybackKey = null);
+        }
+        await _openItem(item);
+      }
     } finally {
       if (mounted && _preparingPlaybackKey == playbackKey) {
         setState(() => _preparingPlaybackKey = null);
       }
     }
+  }
+
+  void _savePlaybackProgressForItem(
+    _TvItem item,
+    String playbackKey,
+    _TvPlaybackProgress progress, {
+    bool markHistory = false,
+  }) {
+    if (progress.position <= Duration.zero) return;
+    final normalizedProgress = progress.duration > Duration.zero
+        ? progress
+        : _TvPlaybackProgress(
+            position: progress.position,
+            duration: Duration.zero,
+          );
+    _watchedProgress[playbackKey] = normalizedProgress;
+    unawaited(
+      _libraryStore?.updateProgress(
+            key: playbackKey,
+            positionMillis: normalizedProgress.position.inMilliseconds,
+            durationMillis: normalizedProgress.duration > Duration.zero
+                ? normalizedProgress.duration.inMilliseconds
+                : null,
+          ) ??
+          Future<void>.value(),
+    );
+    if (_isPlaybackComplete(normalizedProgress)) {
+      unawaited(
+        _libraryStore?.markCompleted(playbackKey) ?? Future<void>.value(),
+      );
+    }
+    _rememberContinueItem(item);
+    if (markHistory && _tvSettings.keepHistory) _rememberItem(item);
+    _scheduleAccountLibraryPush();
+    if (mounted) setState(() {});
   }
 
   bool _isPlaybackComplete(_TvPlaybackProgress progress) {
@@ -2585,13 +4697,62 @@ class _TvHomePageState extends State<TvHomePage> {
     required int season,
     required int episode,
   }) async {
-    if (!_tvSettings.subtitles || !_tvSettings.builtInSubtitles) {
+    final canUseHostedSubtitles = _tvSettings.hasBuiltInSubtitleSource;
+    final canUseAddOnSubtitles = _tvSettings.hasAddOnSubtitleSource;
+    if (!canUseHostedSubtitles && !canUseAddOnSubtitles) {
+      debugPrint(
+        'Juicr TV subtitle lookup skipped gate=source '
+        'enabled=${_tvSettings.subtitles}',
+      );
       return const <_TvSubtitle>[];
     }
     try {
-      return await _api
-          .subtitles(item, season: season, episode: episode)
-          .timeout(const Duration(seconds: 10));
+      var lookupItem = item;
+      final needsSubtitleIdentityHydration =
+          _tvImdbIdForHostedLookup(lookupItem) == null ||
+              lookupItem.tmdbId == null;
+      if (needsSubtitleIdentityHydration) {
+        lookupItem = await _api
+            .meta(lookupItem)
+            .timeout(const Duration(seconds: 6))
+            .catchError((_) => lookupItem);
+      }
+      final addOnSubtitles = canUseAddOnSubtitles
+          ? await _api
+              .addOnSubtitles(
+                _tvSettings.userAddOns,
+                lookupItem,
+                season: season,
+                episode: episode,
+              )
+              .timeout(const Duration(seconds: 14))
+              .catchError((error) {
+              debugPrint(
+                'Juicr TV add-on subtitle lookup failed '
+                'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+              );
+              return const <_TvSubtitle>[];
+            })
+          : const <_TvSubtitle>[];
+      debugPrint(
+        'Juicr TV add-on subtitle lookup count=${addOnSubtitles.length}',
+      );
+      final hostedSubtitles = canUseHostedSubtitles
+          ? await _api
+              .subtitles(lookupItem, season: season, episode: episode)
+              .timeout(const Duration(seconds: 10))
+              .catchError((error) {
+              debugPrint(
+                'Juicr TV hosted subtitle lookup failed '
+                'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+              );
+              return const <_TvSubtitle>[];
+            })
+          : const <_TvSubtitle>[];
+      debugPrint(
+        'Juicr TV hosted subtitle lookup count=${hostedSubtitles.length}',
+      );
+      return _mergeTvSubtitles(addOnSubtitles, hostedSubtitles);
     } catch (error) {
       debugPrint(
         'Juicr TV subtitle lookup skipped '
@@ -2599,6 +4760,39 @@ class _TvHomePageState extends State<TvHomePage> {
       );
       return const <_TvSubtitle>[];
     }
+  }
+
+  List<_TvSubtitle> _mergeTvSubtitles(
+    List<_TvSubtitle> first,
+    List<_TvSubtitle> second,
+  ) {
+    final seen = <String>{};
+    final merged = <_TvSubtitle>[];
+    for (final subtitle in [...first, ...second]) {
+      final key = subtitle.id.trim().isNotEmpty
+          ? subtitle.id.trim()
+          : '${subtitle.url}|${subtitle.language}|${subtitle.label}';
+      if (subtitle.url.isEmpty || !seen.add(key)) continue;
+      merged.add(subtitle);
+    }
+    return merged.toList(growable: false);
+  }
+
+  List<_TvSubtitle> _subtitlesFromPlaybackSessions(
+    List<_PlaybackSession> sessions,
+  ) {
+    final seen = <String>{};
+    final subtitles = <_TvSubtitle>[];
+    for (final session in sessions) {
+      for (final subtitle in session.subtitles) {
+        final key = subtitle.id.trim().isNotEmpty
+            ? subtitle.id.trim()
+            : '${subtitle.url}|${subtitle.language}|${subtitle.label}';
+        if (subtitle.url.isEmpty || !seen.add(key)) continue;
+        subtitles.add(subtitle);
+      }
+    }
+    return subtitles.toList(growable: false);
   }
 
   Future<void> _playTrailer(_TvItem item) async {
@@ -2625,9 +4819,8 @@ class _TvHomePageState extends State<TvHomePage> {
         ),
       );
     try {
-      final trailers = await _api
-          .trailers(item)
-          .timeout(const Duration(seconds: 18));
+      final trailers =
+          await _api.trailers(item).timeout(const Duration(seconds: 18));
       _TvTrailer? trailer;
       for (final candidate in trailers) {
         if (candidate.isTvPlayable || candidate.isExternalLaunchable) {
@@ -2702,6 +4895,22 @@ class _TvHomePageState extends State<TvHomePage> {
 
   KeyEventResult _traceUnhandledTvKey(KeyEvent event) {
     if (event is KeyDownEvent || event is KeyRepeatEvent) {
+      final key = event.logicalKey;
+      final isNavigationKey = key == LogicalKeyboardKey.arrowLeft ||
+          key == LogicalKeyboardKey.arrowRight ||
+          key == LogicalKeyboardKey.arrowUp ||
+          key == LogicalKeyboardKey.arrowDown ||
+          key == LogicalKeyboardKey.select ||
+          key == LogicalKeyboardKey.enter ||
+          key == LogicalKeyboardKey.numpadEnter ||
+          key == LogicalKeyboardKey.gameButtonA;
+      if (_selectedItem == null &&
+          !_searchOpen &&
+          isNavigationKey &&
+          _primaryFocusNeedsRestore) {
+        _enterSelectedTabContent();
+        return KeyEventResult.handled;
+      }
       debugPrint(
         'Juicr TV key trace '
         'logical=${event.logicalKey.keyLabel}|${event.logicalKey.debugName} '
@@ -2728,19 +4937,14 @@ class _TvHomePageState extends State<TvHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    _tvAccentColor = _accentForSetting(_tvSettings.accent);
-    _tvTextScale = _textScaleForSetting(_tvSettings.textSize);
-    _tvMotionEnabled = _tvSettings.motion;
-    final lightTheme = _tvSettings.theme == 'Light';
+    _applyTvSettingsGlobals(_tvSettings);
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (_, __) {
         _handleBackPressed();
       },
       child: Scaffold(
-        backgroundColor: lightTheme
-            ? const Color(0xFFFFFFFF)
-            : const Color(0xFF07080D),
+        backgroundColor: _tvTheme.background,
         body: MediaQuery(
           data: MediaQuery.of(
             context,
@@ -2808,6 +5012,9 @@ class _TvHomePageState extends State<TvHomePage> {
                                 expandedRail: _expandedRail,
                                 rails: _rails,
                                 homeHeroItems: _homeHeroItems,
+                                homeHeroIndex: _homeHeroIndex,
+                                homeHeroCarouselPaused:
+                                    _homeHeroCarouselPauseDepth > 0,
                                 homeHeroEditorial: _homeHeroEditorial,
                                 homeHeroKey: _homeHeroKey,
                                 homeHeroWatchFocusNode: _homeHeroWatchFocusNode,
@@ -2817,30 +5024,45 @@ class _TvHomePageState extends State<TvHomePage> {
                                 animation: _animation,
                                 liveTv: _liveTv,
                                 discoveryLaneItems: _discoveryLaneItems,
-                                recentItems: _recentItems,
+                                recentItems: _continueItems,
                                 likedItems: _likedItems,
                                 libraryLists:
                                     _libraryStore?.state.libraryLists ??
-                                    const [],
+                                        const [],
                                 discoveryKind: _discoveryKind,
                                 discoverySort: _discoverySort,
                                 discoveryGenre: _discoveryGenre,
                                 discoveryLoading: _discoveryLaneLoading
-                                    .contains(
+                                        .contains(
                                       _tvDiscoveryLaneKey(
                                         _discoveryKind,
                                         _discoverySort,
                                         genre: _discoveryGenre,
                                       ),
-                                    ),
-                                discoveryExhausted: _discoveryLaneExhausted
-                                    .contains(
-                                      _tvDiscoveryLaneKey(
-                                        _discoveryKind,
-                                        _discoverySort,
-                                        genre: _discoveryGenre,
-                                      ),
-                                    ),
+                                    ) ||
+                                    (_tvSettings.hasCatalogSource &&
+                                        !_discoveryLaneItems.containsKey(
+                                          _tvDiscoveryLaneKey(
+                                            _discoveryKind,
+                                            _discoverySort,
+                                            genre: _discoveryGenre,
+                                          ),
+                                        ) &&
+                                        !_discoveryLaneExhausted.contains(
+                                          _tvDiscoveryLaneKey(
+                                            _discoveryKind,
+                                            _discoverySort,
+                                            genre: _discoveryGenre,
+                                          ),
+                                        )),
+                                discoveryExhausted:
+                                    _discoveryLaneExhausted.contains(
+                                  _tvDiscoveryLaneKey(
+                                    _discoveryKind,
+                                    _discoverySort,
+                                    genre: _discoveryGenre,
+                                  ),
+                                ),
                                 libraryFilter: _libraryFilter,
                                 accountSignedIn: _accountSignedIn,
                                 accountToken: _accountSession?.token ?? '',
@@ -2853,8 +5075,14 @@ class _TvHomePageState extends State<TvHomePage> {
                                 activeWatchSeconds: _activeWatchSeconds,
                                 tvSettings: _tvSettings,
                                 onTvSettingsChanged: _updateTvSettings,
+                                onLeaderboardScopeChanged: (scope) =>
+                                    _updateTvSettings(
+                                  _tvSettings.copyWith(
+                                    leaderboardScope: scope,
+                                  ),
+                                ),
                                 onAccountSignIn: () =>
-                                    unawaited(_openAccountSignIn()),
+                                    unawaited(_openAccountLibrary()),
                                 onAccountSignOut: () =>
                                     unawaited(_signOutAccount()),
                                 onAccountSync: () =>
@@ -2863,6 +5091,8 @@ class _TvHomePageState extends State<TvHomePage> {
                                 onDiscoveryLoadMore: () =>
                                     unawaited(_loadMoreDiscoveryLane()),
                                 onLibraryMenu: _openLibraryMenu,
+                                onOpenItemLibraryMenu: (item) =>
+                                    unawaited(_openItemLibraryMenu(item)),
                                 onOpenLibraryRanking: () => setState(
                                   () =>
                                       _libraryFilter = _TvLibraryFilter.ranking,
@@ -2872,11 +5102,13 @@ class _TvHomePageState extends State<TvHomePage> {
                                       _libraryFilter = _TvLibraryFilter.metrics,
                                 ),
                                 onOpenItem: _openItem,
+                                onHomeHeroIndexChanged: (index) {
+                                  if (_homeHeroIndex == index) return;
+                                  setState(() => _homeHeroIndex = index);
+                                },
                                 onPlayItem: (item) => _play(item),
                                 onTrailerItem: (item) =>
                                     unawaited(_playTrailer(item)),
-                                onToggleLike: _toggleLike,
-                                isItemLiked: _isItemLiked,
                                 onOpenRail: (rail) {
                                   setState(() => _expandedRail = rail);
                                   WidgetsBinding.instance.addPostFrameCallback((
@@ -2898,7 +5130,11 @@ class _TvHomePageState extends State<TvHomePage> {
                                 onFocusPageEntry: _focusPageEntry,
                                 onFocusPageContent: _focusPageContent,
                                 onRememberPageFocus: _rememberPageFocus,
-                                onRetry: _loadCatalog,
+                                onRememberPageItemFocus: _rememberPageItemFocus,
+                                onRestorePageItemFocus: _consumePageItemFocus,
+                                onRetry: () => _loadCatalog(force: true),
+                                restoreItemKey:
+                                    _pendingPageFocusItemKeys[_selectedTab],
                               ),
                             ),
                           ],
@@ -2908,8 +5144,7 @@ class _TvHomePageState extends State<TvHomePage> {
                         _TvDetailsOverlay(
                           item: _selectedItem!,
                           onClose: _closeOverlay,
-                          preparing:
-                              _preparingPlaybackKey?.startsWith(
+                          preparing: _preparingPlaybackKey?.startsWith(
                                 '${_selectedItem!.type}:${_selectedItem!.id}:',
                               ) ==
                               true,
@@ -2925,6 +5160,8 @@ class _TvHomePageState extends State<TvHomePage> {
                         ),
                       if (_searchOpen)
                         _TvSearchOverlay(
+                          key: _searchOverlayKey,
+                          api: _api,
                           items: _items,
                           onClose: () => _closeOverlay(focusNavigation: true),
                           onOpenItem: _openItem,

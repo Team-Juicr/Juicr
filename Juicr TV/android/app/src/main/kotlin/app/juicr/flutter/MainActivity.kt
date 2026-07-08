@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.speech.RecognizerIntent
+import android.view.KeyEvent
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -12,9 +13,14 @@ import java.util.Locale
 
 class MainActivity : FlutterActivity() {
     private var pendingVoiceResult: MethodChannel.Result? = null
+    private var remoteKeyChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        remoteKeyChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            REMOTE_KEY_CHANNEL
+        )
         flutterEngine
             .platformViewsController
             .registry
@@ -37,6 +43,15 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "openTrailer" -> openTrailer(call.argument<String>("url").orEmpty(), result)
+                else -> result.notImplemented()
+            }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            QUICK_LINK_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "open" -> openQuickLink(call.argument<String>("url").orEmpty(), result)
                 else -> result.notImplemented()
             }
         }
@@ -106,6 +121,31 @@ class MainActivity : FlutterActivity() {
         result.error("unavailable", "No TV app can open this trailer.", null)
     }
 
+    private fun openQuickLink(url: String, result: MethodChannel.Result) {
+        val cleanUrl = url.trim()
+        if (cleanUrl.isEmpty()) {
+            result.error("invalid", "Link is unavailable.", null)
+            return
+        }
+        val uri = Uri.parse(cleanUrl)
+        val scheme = uri.scheme?.lowercase(Locale.US).orEmpty()
+        if (scheme != "https" && scheme != "http") {
+            result.error("invalid", "Only web links can be opened.", null)
+            return
+        }
+        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            startActivity(intent)
+            result.success(true)
+        } catch (_: ActivityNotFoundException) {
+            result.success(false)
+        } catch (_: SecurityException) {
+            result.success(false)
+        }
+    }
+
     private fun youtubeIdFrom(uri: Uri): String? {
         val host = uri.host?.lowercase(Locale.US).orEmpty()
         if (host.contains("youtu.be")) {
@@ -139,9 +179,46 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
     }
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (isTvRemoteKey(event.keyCode)) {
+            remoteKeyChannel?.invokeMethod(
+                "key",
+                mapOf(
+                    "keyCode" to event.keyCode,
+                    "action" to event.action,
+                    "repeatCount" to event.repeatCount
+                )
+            )
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun isTvRemoteKey(keyCode: Int): Boolean {
+        return when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT,
+            KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_SPACE,
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+            KeyEvent.KEYCODE_MEDIA_PLAY,
+            KeyEvent.KEYCODE_MEDIA_PAUSE,
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+            KeyEvent.KEYCODE_MEDIA_REWIND,
+            KeyEvent.KEYCODE_BACK,
+            KeyEvent.KEYCODE_ESCAPE -> true
+            else -> false
+        }
+    }
+
     companion object {
         private const val VOICE_CHANNEL = "app.juicr.flutter/voice_search"
         private const val TRAILER_CHANNEL = "app.juicr.flutter/trailer"
+        private const val QUICK_LINK_CHANNEL = "app.juicr.flutter/quick_links"
+        private const val REMOTE_KEY_CHANNEL = "app.juicr.flutter/tv_remote_keys"
         private const val MEDIA3_PLAYER_VIEW = "app.juicr.flutter/media3_player"
         private const val VOICE_REQUEST_CODE = 7301
     }
