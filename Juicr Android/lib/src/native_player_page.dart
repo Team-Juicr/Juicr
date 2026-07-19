@@ -7471,9 +7471,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$recoveryTickLimit position=${position.inSeconds}s recoveryPosition=${persistentBufferingRecoveryPosition.inSeconds}s action=hold_quiet reason=verified_controller_buffering_grace',
           );
         }
-        _clearTransientBufferingWaitMessage(
-          reason: 'verified_controller_buffering_grace',
-        );
+        if (_bufferingWaitMessageReady(
+          _bufferingWatchdogTicks,
+          recoveryTickLimit,
+        )) {
+          _showPlaybackWaitMessage(
+            'Buffering stream...',
+            reason: 'verified_controller_buffering_grace',
+            pausePlayback: false,
+          );
+        } else {
+          _clearTransientBufferingWaitMessage(
+            reason: 'verified_controller_buffering_grace',
+          );
+        }
         return;
       }
       final persistentBufferingRepairLimit = recoveryTickLimit *
@@ -8644,6 +8655,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _resumeProgressAnchorPosition >= const Duration(seconds: 5) ||
         _lastSavedSecond >= 5;
     if (!hasRuntimeProof) return false;
+    final hasActiveVisualProof =
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+            controller.isPlaying &&
+            !controller.isBuffering &&
+            _sourceHasRawVisualPlaybackProof(controller);
+    if (hasActiveVisualProof) {
+      return true;
+    }
     if (severeRendererDrift && unstableFor >= const Duration(seconds: 3)) {
       return false;
     }
@@ -9135,6 +9154,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
     if (source.sourceClass == PlaybackSourceClass.p2p) return false;
     if (recoveryPosition < const Duration(seconds: 5)) return false;
+    if (_shouldHoldProvenMedia3PersistentBuffering(
+      controller,
+      source,
+      recoveryPosition,
+    )) {
+      return false;
+    }
     final hasStableAnchor =
         _lastKnownPlaybackPosition >= const Duration(seconds: 5) ||
             _lastCrediblePlaybackPosition >= const Duration(seconds: 5) ||
@@ -9151,6 +9177,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     PlaybackSource? source,
     Duration recoveryPosition,
   ) {
+    final quietTickLimit = _bufferingRecoveryTickLimitForSource(source) *
+        _persistentBufferingAnchorRepairLimitForSource(source);
     if (source != null &&
         _inRendererRecoveryAnchorWindow &&
         _media3RendererDriftActiveSourceMatches(source) &&
@@ -9164,17 +9192,39 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           _rendererRecoveryAnchorPosition >= const Duration(seconds: 3)
               ? _rendererRecoveryAnchorPosition
               : recoveryPosition;
-      if (anchorPosition >= const Duration(seconds: 3)) {
-        _bufferingWatchdogTicks = 0;
+      if (anchorPosition >= const Duration(seconds: 3) &&
+          (_bufferingWatchdogTicks < quietTickLimit ||
+              _shouldHoldProvenMedia3PersistentBuffering(
+                controller,
+                source,
+                recoveryPosition,
+              ))) {
         _lastWatchdogPosition = anchorPosition;
-        DiagnosticLog.add(
-          'native buffering watchdog provider=${source.providerId} position=${anchorPosition.inSeconds}s action=hold_quiet reason=renderer_recovery_buffering_hold',
-        );
+        if (_bufferingWatchdogTicks == 1 ||
+            _bufferingWatchdogTicks == quietTickLimit ||
+            _bufferingWatchdogTicks % quietTickLimit == 0) {
+          DiagnosticLog.add(
+            'native buffering watchdog provider=${source.providerId} tick=$_bufferingWatchdogTicks limit=$quietTickLimit position=${anchorPosition.inSeconds}s action=hold_quiet reason=renderer_recovery_buffering_hold',
+          );
+        }
         return true;
       }
     }
-    final quietTickLimit = _bufferingRecoveryTickLimitForSource(source) *
-        _persistentBufferingAnchorRepairLimitForSource(source);
+    if (_bufferingWatchdogTicks >= quietTickLimit &&
+        _shouldHoldProvenMedia3PersistentBuffering(
+          controller,
+          source,
+          recoveryPosition,
+        )) {
+      _lastWatchdogPosition = recoveryPosition;
+      if (_bufferingWatchdogTicks == quietTickLimit ||
+          _bufferingWatchdogTicks % quietTickLimit == 0) {
+        DiagnosticLog.add(
+          'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$quietTickLimit position=${recoveryPosition.inSeconds}s action=hold_current_source reason=verified_media3_buffering_anchor_hold',
+        );
+      }
+      return true;
+    }
     if (_bufferingWatchdogTicks >= quietTickLimit) {
       return false;
     }
@@ -9183,6 +9233,29 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       source,
       recoveryPosition,
     );
+  }
+
+  bool _shouldHoldProvenMedia3PersistentBuffering(
+    _NativePlaybackController controller,
+    PlaybackSource? source,
+    Duration recoveryPosition,
+  ) {
+    if (source == null) return false;
+    if (controller.engine != _NativePlaybackEngine.exoplayer) return false;
+    if (!controller.isInitialized ||
+        !controller.isBuffering ||
+        controller.hasError ||
+        controller.duration <= Duration.zero ||
+        controller.size == Size.zero ||
+        _activeSourceHasZeroClockMetadata) {
+      return false;
+    }
+    if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
+    if (source.sourceClass == PlaybackSourceClass.p2p) return false;
+    if (recoveryPosition < const Duration(seconds: 5)) return false;
+    return _activeSourceVerifiedForSession ||
+        _sourceHasRawVisualPlaybackProof(controller) ||
+        _sourceHasVisualPlaybackProof(controller);
   }
 
   bool _shouldHoldHealthyBufferingSource(
