@@ -1233,6 +1233,17 @@ class _HomePageState extends State<HomePage>
                           : null,
                       _dailyHeroEditorial(),
                     );
+                    final catalogPool = _dedupeItems([
+                      ..._topSignalRemoteItems,
+                      ..._todaySignalRemoteItems,
+                      ..._juicrTopSignalRemoteItems,
+                      ..._newMovies,
+                      ..._newSeries,
+                      ..._topMovies,
+                      ..._topSeries,
+                      ..._animationPicks,
+                      if (insightsEnabled) ...library.values,
+                    ]);
                     final heroItems = _withoutContinueWatching(
                       _dedupeItems(_heroEditorialItems),
                       continueKeys,
@@ -1240,7 +1251,10 @@ class _HomePageState extends State<HomePage>
                     final displayHeroEditorial =
                         heroEditorial ??
                         const _EditorialRail(title: '', subtitle: '');
-                    final displayHeroItems = heroItems;
+                    final displayHeroItems = _mergeHomeHeroDisplayItems(
+                      heroItems,
+                      catalogPool,
+                    );
                     if (heroEditorial != null &&
                         displayHeroItems.length < _minimumServerHeroItems) {
                       DiagnosticLog.add(
@@ -1255,17 +1269,6 @@ class _HomePageState extends State<HomePage>
                       if (!mounted) return;
                       _warmHeroTrailerAvailability(displayHeroItems.take(8));
                     });
-                    final catalogPool = _dedupeItems([
-                      ..._topSignalRemoteItems,
-                      ..._todaySignalRemoteItems,
-                      ..._juicrTopSignalRemoteItems,
-                      ..._newMovies,
-                      ..._newSeries,
-                      ..._topMovies,
-                      ..._topSeries,
-                      ..._animationPicks,
-                      if (insightsEnabled) ...library.values,
-                    ]);
                     final topSignalEditorial = _editorialOrNull(
                       AppState.defaultCatalogEnabled.value
                           ? _remoteEditorial?.topSignal
@@ -1707,6 +1710,25 @@ List<CatalogItem> _mergeHomeRailRefreshItems(
               ?.merge(item) ??
           item,
   ];
+}
+
+List<CatalogItem> _mergeHomeHeroDisplayItems(
+  List<CatalogItem> heroes,
+  List<CatalogItem> catalogPool,
+) {
+  if (heroes.isEmpty || catalogPool.isEmpty) return heroes;
+  final byItemKey = {for (final item in catalogPool) _itemKey(item): item};
+  final byContentKey = <String, CatalogItem>{
+    for (final item in catalogPool)
+      if (_homeContentKey(item).isNotEmpty) _homeContentKey(item): item,
+  };
+  final merged = <CatalogItem>[];
+  for (final hero in heroes) {
+    final richer =
+        byItemKey[_itemKey(hero)] ?? byContentKey[_homeContentKey(hero)];
+    merged.add(richer == null ? hero : hero.merge(richer));
+  }
+  return merged;
 }
 
 String _heroTrailerAvailabilityKey(CatalogItem item) {
@@ -2710,6 +2732,7 @@ const int _minimumHomeRailItems = 10;
 const int _targetHomeRailItems = 10;
 const int _minimumServerHeroItems = 3;
 const int _targetHeroItems = 12;
+const double _homeHeroViewportFraction = 0.76;
 
 List<CatalogItem> _dailyShuffle(List<CatalogItem> items, {required int seed}) {
   final copy = items.toList(growable: false);
@@ -2768,7 +2791,10 @@ class _HeroCarouselState extends State<_HeroCarousel>
     super.initState();
     _index = 0;
     _page = _initialLoopPageForItemCount(widget.items.length);
-    _controller = PageController(viewportFraction: 0.76, initialPage: _page);
+    _controller = PageController(
+      viewportFraction: _homeHeroViewportFraction,
+      initialPage: _page,
+    );
     _trailerBusyController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 900),
@@ -2928,7 +2954,13 @@ class _HeroCarouselState extends State<_HeroCarousel>
   @override
   Widget build(BuildContext context) {
     final compactLandscape = JuicrVisual.compactLandscape(context);
-    final stageHeight = compactLandscape ? 166.0 : 218.0;
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
+    final stageHeight = _homeHeroStageHeight(context);
+    final heroItemPadding = phoneLandscape
+        ? 34.0
+        : compactLandscape
+        ? 18.0
+        : 2.0;
     return Padding(
       padding: EdgeInsets.fromLTRB(
         compactLandscape ? 14 : 18,
@@ -2940,7 +2972,7 @@ class _HeroCarouselState extends State<_HeroCarousel>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Center(child: _HeroEditorialHeader(title: widget.title)),
-          SizedBox(height: compactLandscape ? 5 : 10),
+          SizedBox(height: compactLandscape ? (phoneLandscape ? 1 : 5) : 10),
           SizedBox(
             height: stageHeight,
             child: PageView.builder(
@@ -2974,16 +3006,42 @@ class _HeroCarouselState extends State<_HeroCarousel>
                         : _page.toDouble();
                     final pageOffset = (page - rawPage).clamp(-1.0, 1.0);
                     final distance = pageOffset.abs();
-                    final scale = 1 - (distance * 0.16);
-                    final xOffset = -pageOffset * 18;
+                    final scale =
+                        1 -
+                        (distance *
+                            (phoneLandscape
+                                ? 0.30
+                                : compactLandscape
+                                ? 0.24
+                                : 0.16));
+                    final opacity =
+                        (1.0 -
+                                distance *
+                                    (phoneLandscape
+                                        ? 0.58
+                                        : compactLandscape
+                                        ? 0.42
+                                        : 0.0))
+                            .clamp(0.0, 1.0)
+                            .toDouble();
+                    final xOffset =
+                        -pageOffset *
+                        (phoneLandscape
+                            ? 96
+                            : compactLandscape
+                            ? 74
+                            : 18);
                     final yOffset = distance * 16;
-                    return Transform.translate(
-                      offset: Offset(xOffset, yOffset),
-                      child: Transform.scale(scale: scale, child: child),
+                    return Opacity(
+                      opacity: opacity,
+                      child: Transform.translate(
+                        offset: Offset(xOffset, yOffset),
+                        child: Transform.scale(scale: scale, child: child),
+                      ),
                     );
                   },
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 2),
+                    padding: EdgeInsets.symmetric(horizontal: heroItemPadding),
                     child: _HeroSlide(
                       item: item,
                       loading: widget.loading,
@@ -3042,6 +3100,19 @@ class _HeroCarouselState extends State<_HeroCarousel>
   }
 }
 
+double _homeHeroStageHeight(BuildContext context) {
+  if (!JuicrVisual.compactLandscape(context)) {
+    return 218.0;
+  }
+  final phoneLandscape = JuicrVisual.phoneLandscape(context);
+  final availableWidth = MediaQuery.sizeOf(context).width - 28.0;
+  final focusedCardWidth = availableWidth * _homeHeroViewportFraction;
+  final aspect = phoneLandscape ? 3.05 : 2.36;
+  final minHeight = phoneLandscape ? 144.0 : 198.0;
+  final maxHeight = phoneLandscape ? 172.0 : 252.0;
+  return (focusedCardWidth / aspect).clamp(minHeight, maxHeight).toDouble();
+}
+
 String _heroCarouselItemsSignature(List<CatalogItem> items) {
   return items.map(_homeContentKey).join('|');
 }
@@ -3055,6 +3126,7 @@ class _HeroEditorialHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final displayTitle = _titleCaseHomeLabel(title);
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3063,24 +3135,25 @@ class _HeroEditorialHeader extends StatelessWidget {
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.labelSmall?.copyWith(
             color: colorScheme.primary.withValues(alpha: 0.78),
-            fontSize: 9.5,
+            fontSize: phoneLandscape ? 8.0 : 9.5,
             fontWeight: FontWeight.w900,
             letterSpacing: 1.2,
           ),
         ),
-        const SizedBox(height: 3),
+        SizedBox(height: phoneLandscape ? 1 : 3),
         SizedBox(
-          height: 22,
+          height: phoneLandscape ? 16 : 22,
           child: _AutoScrollTitle(
             text: displayTitle,
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              fontSize: phoneLandscape ? 13 : null,
               fontWeight: FontWeight.w900,
               letterSpacing: -0.35,
             ),
           ),
         ),
-        const SizedBox(height: 6),
+        SizedBox(height: phoneLandscape ? 3 : 6),
         DecoratedBox(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(999),
@@ -3244,6 +3317,9 @@ class _HeroSlide extends StatelessWidget {
     final image = item?.background ?? item?.poster;
     final colorScheme = Theme.of(context).colorScheme;
     final compactLandscape = JuicrVisual.compactLandscape(context);
+    final heroImageAlignment = compactLandscape
+        ? const Alignment(0, -0.72)
+        : Alignment.center;
     final cacheWidth = _homeImageCacheWidth(
       context,
       MediaQuery.sizeOf(context).width * (compactLandscape ? 0.72 : 0.82),
@@ -3277,6 +3353,7 @@ class _HeroSlide extends StatelessWidget {
                   Image.network(
                     image,
                     fit: BoxFit.cover,
+                    alignment: heroImageAlignment,
                     cacheWidth: cacheWidth,
                     loadingBuilder: (context, child, loadingProgress) {
                       if (loadingProgress == null) return child;
@@ -3496,15 +3573,29 @@ class _HeroCardCaption extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final compactLandscape = JuicrVisual.compactLandscape(context);
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
     final title = loading
         ? 'Loading picks...'
         : item?.name ?? 'Find your next watch';
     final subtitle = loading
         ? 'A little shelf we would point at today.'
         : _heroCardSubtitle(item, editorialGenres);
+    final titleHeight = focused
+        ? (phoneLandscape
+              ? 25.0
+              : compactLandscape
+              ? 34.0
+              : 38.0)
+        : 18.0;
     final titleStyle = Theme.of(context).textTheme.titleLarge?.copyWith(
       color: Colors.white,
-      fontSize: focused ? (compactLandscape ? 18 : 21) : 11,
+      fontSize: focused
+          ? (phoneLandscape
+                ? 15
+                : compactLandscape
+                ? 18
+                : 21)
+          : 11,
       fontWeight: FontWeight.w900,
       letterSpacing: focused ? -0.8 : -0.2,
       shadows: [
@@ -3520,17 +3611,33 @@ class _HeroCardCaption extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         SizedBox(
-          height: focused ? (compactLandscape ? 23 : 27) : 15,
-          child: _AutoScrollTitle(text: title, style: titleStyle),
+          height: titleHeight,
+          child: _HeroTitleWheelArtwork(
+            item: loading ? null : item,
+            maxHeight: titleHeight,
+            fallback: _AutoScrollTitle(text: title, style: titleStyle),
+          ),
         ),
-        SizedBox(height: compactLandscape ? 2 : 3),
+        SizedBox(height: phoneLandscape ? 1 : compactLandscape ? 2 : 3),
         SizedBox(
-          height: focused ? (compactLandscape ? 15 : 17) : 12,
+          height: focused
+              ? (phoneLandscape
+                    ? 13
+                    : compactLandscape
+                    ? 15
+                    : 17)
+              : 12,
           child: _AutoScrollTitle(
             text: subtitle,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: Colors.white.withValues(alpha: 0.82),
-              fontSize: focused ? (compactLandscape ? 11 : 12) : 8,
+              fontSize: focused
+                  ? (phoneLandscape
+                        ? 9.5
+                        : compactLandscape
+                        ? 11
+                        : 12)
+                  : 8,
               fontWeight: FontWeight.w700,
               shadows: [
                 Shadow(
@@ -3543,6 +3650,45 @@ class _HeroCardCaption extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _HeroTitleWheelArtwork extends StatelessWidget {
+  const _HeroTitleWheelArtwork({
+    required this.item,
+    required this.maxHeight,
+    required this.fallback,
+  });
+
+  final CatalogItem? item;
+  final double maxHeight;
+  final Widget fallback;
+
+  @override
+  Widget build(BuildContext context) {
+    final logo = item?.logo?.trim();
+    if (logo == null || logo.isEmpty || _isSvgLikeImage(logo)) {
+      return fallback;
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxHeight),
+        child: Image.network(
+          logo,
+          fit: BoxFit.contain,
+          alignment: Alignment.centerLeft,
+          cacheWidth: _homeImageCacheWidth(context, 180),
+          gaplessPlayback: true,
+          filterQuality: FilterQuality.medium,
+          errorBuilder: (_, __, ___) => fallback,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return fallback;
+          },
+        ),
+      ),
     );
   }
 }
@@ -3816,6 +3962,7 @@ class _ContinuePromptCardState extends State<_ContinuePromptCard> {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final compactLandscape = JuicrVisual.compactLandscape(context);
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
     final summaries = _continuePromptSummaries(widget.entries);
     final summary = summaries[_summaryIndex.clamp(0, summaries.length - 1)];
     return Padding(
@@ -3831,7 +3978,7 @@ class _ContinuePromptCardState extends State<_ContinuePromptCard> {
           borderRadius: BorderRadius.circular(18),
           onTap: widget.onTap,
           child: Container(
-            padding: EdgeInsets.all(compactLandscape ? 10 : 14),
+            padding: EdgeInsets.all(phoneLandscape ? 8 : compactLandscape ? 10 : 14),
             decoration: JuicrVisual.elevatedCardDecoration(
               colorScheme,
               radius: 18,
@@ -3843,8 +3990,8 @@ class _ContinuePromptCardState extends State<_ContinuePromptCard> {
             child: Row(
               children: [
                 Container(
-                  width: compactLandscape ? 34 : 42,
-                  height: compactLandscape ? 34 : 42,
+                  width: phoneLandscape ? 28 : compactLandscape ? 34 : 42,
+                  height: phoneLandscape ? 28 : compactLandscape ? 34 : 42,
                   decoration: JuicrVisual.elevatedIconDecoration(
                     colorScheme,
                     radius: 14,
@@ -3869,11 +4016,11 @@ class _ContinuePromptCardState extends State<_ContinuePromptCard> {
                         'continue-icon-${summary.icon.codePoint}-${summary.icon.fontFamily}-${summary.subtitle}',
                       ),
                       color: colorScheme.primary,
-                      size: compactLandscape ? 19 : 22,
+                      size: phoneLandscape ? 16 : compactLandscape ? 19 : 22,
                     ),
                   ),
                 ),
-                SizedBox(width: compactLandscape ? 10 : 12),
+                SizedBox(width: phoneLandscape ? 8 : compactLandscape ? 10 : 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -3884,6 +4031,7 @@ class _ContinuePromptCardState extends State<_ContinuePromptCard> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: textTheme.titleSmall?.copyWith(
+                          fontSize: phoneLandscape ? 13 : null,
                           fontWeight: FontWeight.w900,
                           letterSpacing: -0.2,
                         ),
@@ -4001,6 +4149,7 @@ class _HomeRail extends StatelessWidget {
   Widget build(BuildContext context) {
     final displayTitle = _titleCaseHomeLabel(title);
     final compactLandscape = JuicrVisual.compactLandscape(context);
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
     return SliverToBoxAdapter(
       child: Padding(
         padding: EdgeInsets.only(bottom: compactLandscape ? 12 : 20),
@@ -4055,7 +4204,11 @@ class _HomeRail extends StatelessWidget {
             ),
             SizedBox(height: compactLandscape ? 6 : 10),
             SizedBox(
-              height: compactLandscape ? 158 : 206,
+              height: phoneLandscape
+                  ? 104
+                  : compactLandscape
+                  ? 122
+                  : 206,
               child: ListView.separated(
                 padding: EdgeInsets.symmetric(
                   horizontal: compactLandscape ? 14 : 18,
@@ -4066,6 +4219,12 @@ class _HomeRail extends StatelessWidget {
                     SizedBox(width: compactLandscape ? 8 : 10),
                 itemBuilder: (context, index) {
                   final entry = entries[index];
+                  if (compactLandscape) {
+                    return _HomeLandscapeCard(
+                      entry: entry,
+                      onTap: () => onTap(entry.item),
+                    );
+                  }
                   return _HomePosterCard(
                     entry: entry,
                     onTap: () => onTap(entry.item),
@@ -4134,6 +4293,7 @@ class _RankedHomeRail extends StatelessWidget {
   Widget build(BuildContext context) {
     final displayTitle = _titleCaseHomeLabel(title);
     final compactLandscape = JuicrVisual.compactLandscape(context);
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
     return SliverToBoxAdapter(
       child: Padding(
         padding: EdgeInsets.only(bottom: compactLandscape ? 12 : 22),
@@ -4192,7 +4352,11 @@ class _RankedHomeRail extends StatelessWidget {
                   : (compactLandscape ? 7 : 12),
             ),
             SizedBox(
-              height: compactLandscape ? 150 : 194,
+              height: phoneLandscape
+                  ? 104
+                  : compactLandscape
+                  ? 122
+                  : 194,
               child: ListView.separated(
                 padding: EdgeInsets.symmetric(
                   horizontal: compactLandscape ? 14 : 18,
@@ -4203,6 +4367,13 @@ class _RankedHomeRail extends StatelessWidget {
                     SizedBox(width: compactLandscape ? 8 : 12),
                 itemBuilder: (context, index) {
                   final item = items[index];
+                  if (compactLandscape) {
+                    return _HomeLandscapeCard(
+                      entry: _HomeRailEntry(item: item),
+                      rank: showRankPills ? index + 1 : null,
+                      onTap: () => onTap(item),
+                    );
+                  }
                   if (showRankPills) {
                     return _RankedPosterCard(
                       item: item,
@@ -4241,6 +4412,7 @@ class _HomeShelfPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final displayTitle = _titleCaseHomeLabel(title);
+    final compactLandscape = JuicrVisual.compactLandscape(context);
     if (showRankPills) {
       return _TopTenShelfPage(
         title: displayTitle,
@@ -4265,14 +4437,25 @@ class _HomeShelfPage extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(18, 16, 18, 24),
                 sliver: SliverGrid.builder(
                   itemCount: items.length,
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 3,
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: compactLandscape ? 5 : 3,
                     crossAxisSpacing: 10,
-                    mainAxisSpacing: 16,
-                    childAspectRatio: 0.58,
+                    mainAxisSpacing: compactLandscape ? 10 : 16,
+                    childAspectRatio: compactLandscape ? 16 / 9 : 0.58,
                   ),
                   itemBuilder: (context, index) {
                     final item = items[index];
+                    if (compactLandscape && !item.type.isLive) {
+                      return _HomeShelfLandscapeGridCard(
+                        item: item,
+                        rank: showRankPills ? index + 1 : null,
+                        onTap: () => Navigator.of(context).push(
+                          AppPageRoute<void>(
+                            builder: (_) => DetailsPage(item: item),
+                          ),
+                        ),
+                      );
+                    }
                     return _HomeShelfGridCard(
                       item: item,
                       rank: showRankPills ? index + 1 : null,
@@ -4517,6 +4700,95 @@ class _TopTenWideCard extends StatelessWidget {
   }
 }
 
+class _HomeShelfLandscapeGridCard extends StatelessWidget {
+  const _HomeShelfLandscapeGridCard({
+    required this.item,
+    required this.onTap,
+    this.rank,
+  });
+
+  final CatalogItem item;
+  final VoidCallback onTap;
+  final int? rank;
+
+  @override
+  Widget build(BuildContext context) {
+    final imageUrl = item.background ?? item.poster;
+    final cacheWidth = _homeImageCacheWidth(context, 190);
+    return Semantics(
+      button: true,
+      label: 'Open ${item.name}',
+      hint: 'Show details',
+      child: ExcludeSemantics(
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (imageUrl != null && imageUrl.isNotEmpty)
+                  Image.network(
+                    imageUrl,
+                    fit: BoxFit.cover,
+                    cacheWidth: cacheWidth,
+                    errorBuilder: (_, __, ___) =>
+                        const AppShimmerBox(radius: 12),
+                  )
+                else
+                  const AppShimmerBox(radius: 12),
+                const Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.bottomCenter,
+                        end: Alignment.topCenter,
+                        colors: [
+                          Color(0xD607080D),
+                          Color(0x7807080D),
+                          Color(0x0807080D),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: 8,
+                  top: 8,
+                  child: _MetaBadge(item: item, compact: true),
+                ),
+                Positioned(
+                  left: 10,
+                  right: rank == null ? 10 : 70,
+                  bottom: 10,
+                  child: _HomeLandscapeTitleWheel(item: item),
+                ),
+                if (rank != null)
+                  Positioned(
+                    right: 8,
+                    bottom: 8,
+                    child: _RankBadge(rank: rank!),
+                  ),
+                Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.1),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _HomeShelfGridCard extends StatelessWidget {
   const _HomeShelfGridCard({
     required this.item,
@@ -4710,6 +4982,177 @@ class _RankBadge extends StatelessWidget {
       ),
     );
   }
+}
+
+class _HomeLandscapeCard extends StatelessWidget {
+  const _HomeLandscapeCard({
+    required this.entry,
+    required this.onTap,
+    this.rank,
+  });
+
+  static const double _radius = 16;
+
+  final _HomeRailEntry entry;
+  final VoidCallback onTap;
+  final int? rank;
+
+  @override
+  Widget build(BuildContext context) {
+    final item = entry.item;
+    final image = item.background ?? item.poster;
+    final imageUrl = image?.trim();
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
+    final cardWidth = phoneLandscape ? 164.0 : 198.0;
+    final cardHeight = phoneLandscape ? 94.0 : 112.0;
+    final cacheWidth = _homeImageCacheWidth(context, cardWidth);
+    final titleBottom = entry.progress == null ? 12.0 : 20.0;
+    final rankLabel = rank == null ? null : ' rank $rank';
+    return SizedBox(
+      width: cardWidth,
+      height: cardHeight,
+      child: Semantics(
+        button: true,
+        label: 'Open${rankLabel ?? ''}, ${item.name}',
+        hint: 'Show details',
+        child: ExcludeSemantics(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(_radius),
+            onTap: onTap,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(_radius),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (imageUrl != null && imageUrl.isNotEmpty)
+                    Image.network(
+                      imageUrl,
+                      fit: BoxFit.cover,
+                      cacheWidth: cacheWidth,
+                      gaplessPlayback: true,
+                      filterQuality: FilterQuality.medium,
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return const _HomeArtworkFallback();
+                      },
+                      errorBuilder: (_, __, ___) =>
+                          const _HomeArtworkFallback(),
+                    )
+                  else
+                    const _HomeArtworkFallback(),
+                  const Positioned.fill(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.bottomCenter,
+                          end: Alignment.topCenter,
+                          colors: [
+                            Color(0xD607080D),
+                            Color(0x7607080D),
+                            Color(0x0007080D),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 8,
+                    top: 8,
+                    child: _MetaBadge(item: item, compact: true),
+                  ),
+                  Positioned(
+                    left: 12,
+                    right: rank == null ? 12 : 76,
+                    bottom: titleBottom,
+                    child: _HomeLandscapeTitleWheel(item: item),
+                  ),
+                  if (rank != null)
+                    Positioned(
+                      right: 8,
+                      bottom: entry.progress == null ? 8 : 18,
+                      child: _RankBadge(rank: rank!),
+                    ),
+                  if (entry.progress != null)
+                    Positioned(
+                      left: 10,
+                      right: 10,
+                      bottom: 9,
+                      child: LinearProgressIndicator(
+                        value: entry.progress!.progress
+                            .clamp(0.0, 1.0)
+                            .toDouble(),
+                        minHeight: 3,
+                        borderRadius: BorderRadius.circular(99),
+                        backgroundColor: Colors.white.withValues(alpha: 0.22),
+                      ),
+                    ),
+                  Positioned.fill(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(_radius),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.1),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HomeLandscapeTitleWheel extends StatelessWidget {
+  const _HomeLandscapeTitleWheel({required this.item});
+
+  final CatalogItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final logo = item.logo?.trim();
+    final fallback = Text(
+      item.name,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 13,
+        fontWeight: FontWeight.w900,
+        height: 1,
+      ),
+    );
+    if (logo == null || logo.isEmpty || _isSvgLikeImage(logo)) {
+      return fallback;
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 34),
+        child: Image.network(
+          logo,
+          fit: BoxFit.contain,
+          alignment: Alignment.centerLeft,
+          cacheWidth: _homeImageCacheWidth(context, 132),
+          gaplessPlayback: true,
+          filterQuality: FilterQuality.medium,
+          errorBuilder: (_, __, ___) => fallback,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return fallback;
+          },
+        ),
+      ),
+    );
+  }
+}
+
+bool _isSvgLikeImage(String value) {
+  final normalized = value.toLowerCase().split('?').first;
+  return normalized.endsWith('.svg');
 }
 
 class _HomePosterCard extends StatelessWidget {
@@ -5108,13 +5551,22 @@ class _HeroCarouselSkeletonStage extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final compactLandscape = JuicrVisual.compactLandscape(context);
+        final phoneLandscape = JuicrVisual.phoneLandscape(context);
         final cardWidth =
-            constraints.maxWidth * (compactLandscape ? 0.68 : 0.76);
+            (constraints.maxWidth *
+                (compactLandscape ? _homeHeroViewportFraction : 0.76)) -
+            (phoneLandscape
+                ? 68.0
+                : compactLandscape
+                ? 36.0
+                : 0.0);
         final sideOffset = compactLandscape
-            ? (cardWidth * 0.72).clamp(190.0, 250.0)
+            ? phoneLandscape
+                  ? (cardWidth * 0.32).clamp(86.0, 132.0)
+                  : (cardWidth * 0.56).clamp(148.0, 210.0)
             : (cardWidth * 0.92).clamp(270.0, 318.0);
-        final stageHeight = compactLandscape ? 166.0 : 218.0;
-        final cardHeight = compactLandscape ? 148.0 : 190.0;
+        final stageHeight = _homeHeroStageHeight(context);
+        final cardHeight = compactLandscape ? stageHeight - 18.0 : 190.0;
         final sideYOffset = compactLandscape ? 9.0 : 16.0;
         return SizedBox(
           height: stageHeight,

@@ -5,9 +5,39 @@ import 'package:flutter/material.dart';
 
 import 'motion.dart';
 
+enum JuicrDeviceClass { phone, tablet }
+
+enum JuicrLayoutClass {
+  phonePortrait,
+  phoneLandscape,
+  tabletPortrait,
+  tabletLandscape,
+}
+
+class JuicrLayoutDiagnostics {
+  const JuicrLayoutDiagnostics({
+    required this.deviceClassLabel,
+    required this.orientationLabel,
+    required this.layoutClassLabel,
+    required this.screenBucket,
+    required this.shortestSideBucket,
+    required this.widthBucket,
+    required this.heightBucket,
+  });
+
+  final String deviceClassLabel;
+  final String orientationLabel;
+  final String layoutClassLabel;
+  final String screenBucket;
+  final String shortestSideBucket;
+  final String widthBucket;
+  final String heightBucket;
+}
+
 class JuicrVisual {
   const JuicrVisual._();
 
+  static const double tabletShortestSideBreakpoint = 600;
   static const double cardRadius = 16;
   static const double cardStrokeWidth = 0.5;
   static const double softRadius = 14;
@@ -42,6 +72,83 @@ class JuicrVisual {
   static bool compactLandscape(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
     return size.width > size.height;
+  }
+
+  static JuicrDeviceClass deviceClassForSize(Size size) {
+    return size.shortestSide >= tabletShortestSideBreakpoint
+        ? JuicrDeviceClass.tablet
+        : JuicrDeviceClass.phone;
+  }
+
+  static JuicrDeviceClass deviceClass(BuildContext context) {
+    return deviceClassForSize(MediaQuery.sizeOf(context));
+  }
+
+  static JuicrLayoutClass layoutClassForSize(Size size) {
+    final landscape = size.width > size.height;
+    final tablet = deviceClassForSize(size) == JuicrDeviceClass.tablet;
+    if (tablet && landscape) return JuicrLayoutClass.tabletLandscape;
+    if (tablet) return JuicrLayoutClass.tabletPortrait;
+    if (landscape) return JuicrLayoutClass.phoneLandscape;
+    return JuicrLayoutClass.phonePortrait;
+  }
+
+  static JuicrLayoutClass layoutClass(BuildContext context) {
+    return layoutClassForSize(MediaQuery.sizeOf(context));
+  }
+
+  static bool phoneLandscape(BuildContext context) {
+    return layoutClass(context) == JuicrLayoutClass.phoneLandscape;
+  }
+
+  static bool tabletLandscape(BuildContext context) {
+    return layoutClass(context) == JuicrLayoutClass.tabletLandscape;
+  }
+
+  static JuicrLayoutDiagnostics layoutDiagnosticsForSize(Size size) {
+    final deviceClass = deviceClassForSize(size);
+    final layoutClass = layoutClassForSize(size);
+    return JuicrLayoutDiagnostics(
+      deviceClassLabel: _deviceClassLabel(deviceClass),
+      orientationLabel: size.width > size.height ? 'landscape' : 'portrait',
+      layoutClassLabel: _layoutClassLabel(layoutClass),
+      screenBucket: _screenBucket(size),
+      shortestSideBucket: _dimensionBucket(size.shortestSide),
+      widthBucket: _dimensionBucket(size.width),
+      heightBucket: _dimensionBucket(size.height),
+    );
+  }
+
+  static String _deviceClassLabel(JuicrDeviceClass value) {
+    return switch (value) {
+      JuicrDeviceClass.phone => 'phone',
+      JuicrDeviceClass.tablet => 'tablet',
+    };
+  }
+
+  static String _layoutClassLabel(JuicrLayoutClass value) {
+    return switch (value) {
+      JuicrLayoutClass.phonePortrait => 'phonePortrait',
+      JuicrLayoutClass.phoneLandscape => 'phoneLandscape',
+      JuicrLayoutClass.tabletPortrait => 'tabletPortrait',
+      JuicrLayoutClass.tabletLandscape => 'tabletLandscape',
+    };
+  }
+
+  static String _screenBucket(Size size) {
+    final shortest = size.shortestSide;
+    if (shortest < 360) return 'veryCompact';
+    if (shortest < tabletShortestSideBreakpoint) return 'compact';
+    if (shortest < 840) return 'medium';
+    return 'expanded';
+  }
+
+  static String _dimensionBucket(double value) {
+    if (value < 360) return '<360';
+    if (value < 600) return '360-599';
+    if (value < 840) return '600-839';
+    if (value < 1200) return '840-1199';
+    return '1200+';
   }
 
   static double topLevelTitleSpacingFor(BuildContext context) {

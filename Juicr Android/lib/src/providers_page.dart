@@ -69,29 +69,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _providerHealthSummaryNotifier = ValueNotifier(null);
   final Map<String, Future<AddonCapabilities>> _addonCapabilityFutures =
       <String, Future<AddonCapabilities>>{};
-  final List<ApiProvider> _nativeProviders = const [
-    ApiProvider(id: 'vidlink', name: 'Alpha'),
-    ApiProvider(id: 'vidsrc', name: 'Beta'),
-    ApiProvider(id: 'icefy', name: 'Delta'),
-    ApiProvider(id: 'vidnest', name: 'Epsilon'),
-    ApiProvider(id: 'xpass', name: 'Zeta'),
-    ApiProvider(id: 'moviesapi', name: 'Eta'),
-    ApiProvider(id: 'vidking', name: 'Nu'),
-    ApiProvider(id: 'popr', name: 'Theta'),
-    ApiProvider(id: 'cinesu', name: 'Rho'),
-    ApiProvider(id: 'rgshows', name: 'Iota'),
-    ApiProvider(id: 'vixsrc', name: 'Kappa'),
-    ApiProvider(id: 'vidrock', name: 'Lambda'),
-    ApiProvider(id: 'vidzee', name: 'Mu'),
-    ApiProvider(id: 'vidapi', name: 'Sigma'),
-    ApiProvider(id: 'xyra', name: 'Chi'),
-    ApiProvider(id: 'videasy', name: 'Tau'),
-    ApiProvider(id: 'vidfun', name: 'Upsilon'),
-    ApiProvider(id: 'flixhq', name: 'Phi'),
-    ApiProvider(id: 'flixer', name: 'Xi'),
-    ApiProvider(id: '7xstream', name: 'Omicron'),
-    ApiProvider(id: 'meowtv', name: 'Pi'),
-  ];
+  List<ApiProvider> _nativeProviders = AppState.nativeProviders.value;
 
   @override
   void initState() {
@@ -101,7 +79,9 @@ class _SettingsPageState extends State<SettingsPage> {
       DiagnosticLog.installInfo,
     );
     AppState.settingsIntent.addListener(_handleSettingsIntent);
+    AppState.nativeProviders.addListener(_handleNativeProvidersChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_loadNativeProvidersFromConfig());
       Future<void>.delayed(const Duration(milliseconds: 900), () {
         if (mounted) _scheduleLazyProviderHealthRefresh();
       });
@@ -112,6 +92,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void dispose() {
     AppState.settingsIntent.removeListener(_handleSettingsIntent);
+    AppState.nativeProviders.removeListener(_handleNativeProvidersChanged);
     _checkingProvidersNotifier.dispose();
     _checkingReleaseUpdatesNotifier.dispose();
     _releaseUpdatesRefreshTickNotifier.dispose();
@@ -121,6 +102,29 @@ class _SettingsPageState extends State<SettingsPage> {
     _providerHealthSummaryNotifier.dispose();
     _api.close();
     super.dispose();
+  }
+
+  void _handleNativeProvidersChanged() {
+    if (!mounted) return;
+    setState(() {
+      _nativeProviders = AppState.nativeProviders.value;
+    });
+    _scheduleLazyProviderHealthRefresh();
+  }
+
+  Future<void> _loadNativeProvidersFromConfig() async {
+    try {
+      final config = await _api.config();
+      AppState.applyNativeProvidersFromConfig(config.providers);
+    } catch (error) {
+      final cached = StreamApi.cachedConfig;
+      if (cached != null && cached.providers.isNotEmpty) {
+        AppState.applyNativeProvidersFromConfig(cached.providers);
+      }
+      DiagnosticLog.add(
+        'settings playback catalog config load failed; using cached catalog error=$error',
+      );
+    }
   }
 
   void _handleSettingsIntent() {
@@ -6079,6 +6083,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final compactLandscape = JuicrVisual.compactLandscape(context);
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
@@ -6105,6 +6110,156 @@ class _SettingsPageState extends State<SettingsPage> {
         valueListenable: AppState.preferencesReady,
         builder: (context, preferencesReady, _) {
           if (!preferencesReady) return const AppSettingsSkeleton();
+          if (phoneLandscape) {
+            return GridView.count(
+              padding: JuicrVisual.topLevelListPaddingFor(
+                context,
+                bottom: compactLandscape ? 16 : 24,
+              ),
+              crossAxisCount: 2,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+              childAspectRatio: 5.6,
+              children: [
+                AppReveal(
+                  delay: const Duration(milliseconds: 80),
+                  child: _SettingsHomeTile(
+                    icon: Icons.settings_rounded,
+                    title: 'General',
+                    subtitle: 'Theme, layout, and app appearance',
+                    onTap: (tileContext) => _openSettingsSection(
+                      title: 'General',
+                      child: _buildGeneralSettingsContent(),
+                      framed: false,
+                      sourceContext: tileContext,
+                      actions: [
+                        IconButton(
+                          tooltip: 'General guide',
+                          onPressed: _showGeneralHelpSheet,
+                          icon: const Icon(Icons.menu_book_outlined),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                AppReveal(
+                  delay: const Duration(milliseconds: 110),
+                  child: _SettingsHomeTile(
+                    icon: Icons.smart_display_rounded,
+                    title: 'Playback',
+                    subtitle: 'Player, language, and subtitle defaults',
+                    onTap: (tileContext) => _openSettingsSection(
+                      title: 'Playback',
+                      child: _buildPlaybackSettingsContent(),
+                      framed: false,
+                      sourceContext: tileContext,
+                      actions: [
+                        IconButton(
+                          tooltip: 'Playback guide',
+                          onPressed: _showPlaybackHelpSheet,
+                          icon: const Icon(Icons.menu_book_outlined),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                AppReveal(
+                  delay: const Duration(milliseconds: 145),
+                  child: _SettingsHomeTile(
+                    icon: Icons.battery_charging_full_rounded,
+                    title: 'Battery & data',
+                    subtitle: 'Saver mode, P2P limits, and playback safeguards',
+                    onTap: (tileContext) => _openSettingsSection(
+                      title: 'Battery & data',
+                      child: _buildBatteryDataSettingsContent(),
+                      framed: false,
+                      sourceContext: tileContext,
+                      actions: [
+                        IconButton(
+                          tooltip: 'Battery & data guide',
+                          onPressed: _showBatteryDataHelpSheet,
+                          icon: const Icon(Icons.menu_book_outlined),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                AppReveal(
+                  delay: const Duration(milliseconds: 215),
+                  child: _SettingsHomeTile(
+                    icon: Icons.extension_rounded,
+                    title: 'Add-ons',
+                    subtitle: 'Catalog, subtitle, stream, and TV sources',
+                    onTap: (tileContext) => _openAddOnsSection(),
+                  ),
+                ),
+                AppReveal(
+                  delay: const Duration(milliseconds: 250),
+                  child: _SettingsHomeTile(
+                    icon: Icons.dns_rounded,
+                    title: 'Personal servers',
+                    subtitle: 'Personal media servers and your own library',
+                    badgeLabel: 'Beta',
+                    badgeHint:
+                        'Personal servers are functional, but still being validated against real home server setups.',
+                    onTap: (tileContext) => _openPersonalServersSection(),
+                  ),
+                ),
+                AppReveal(
+                  delay: const Duration(milliseconds: 285),
+                  child: _SettingsHomeTile(
+                    icon: Icons.admin_panel_settings_outlined,
+                    title: 'Advanced',
+                    subtitle: 'Runtime controls and playback cleanup',
+                    onTap: (tileContext) => _openSettingsSection(
+                      title: 'Advanced',
+                      child: _buildAdvanceSettingsContent(),
+                      framed: false,
+                      sourceContext: tileContext,
+                      actions: [
+                        IconButton(
+                          tooltip: 'Advanced guide',
+                          onPressed: _showAdvanceHelpSheet,
+                          icon: const Icon(Icons.menu_book_outlined),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                AppReveal(
+                  delay: const Duration(milliseconds: 320),
+                  child: _SettingsHomeTile(
+                    icon: Icons.update_rounded,
+                    title: 'Updates',
+                    subtitle: 'Release checks and changelog',
+                    onTap: (tileContext) =>
+                        _openUpdatesSection(sourceContext: tileContext),
+                  ),
+                ),
+                AppReveal(
+                  delay: const Duration(milliseconds: 355),
+                  child: _SettingsHomeTile(
+                    icon: Icons.info_outline_rounded,
+                    title: 'About & diagnostics',
+                    subtitle: 'App version and diagnostic reports',
+                    onTap: (tileContext) => _openSettingsSection(
+                      title: 'About & diagnostics',
+                      child: _buildAboutDiagnosticsContent(),
+                      framed: false,
+                      sourceContext: tileContext,
+                      actions: [
+                        IconButton(
+                          tooltip: 'About & diagnostics guide',
+                          onPressed: _showAboutDiagnosticsHelpSheet,
+                          icon: const Icon(Icons.menu_book_outlined),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }
           return ListView(
             padding: JuicrVisual.topLevelListPaddingFor(
               context,

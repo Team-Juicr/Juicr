@@ -124,7 +124,7 @@ class LibraryListsGrid extends StatelessWidget {
         crossAxisCount: compactLandscape ? 5 : 3,
         crossAxisSpacing: compactLandscape ? 8 : 12,
         mainAxisSpacing: compactLandscape ? 8 : 12,
-        childAspectRatio: 2 / 3,
+        childAspectRatio: compactLandscape ? 16 / 9 : 2 / 3,
       ),
       itemCount: lists.length + 1,
       itemBuilder: (context, index) {
@@ -376,6 +376,7 @@ class LibraryCustomListPage extends StatelessWidget {
         }
         final currentList = list;
         final items = AppState.itemsForLibraryList(currentList);
+        final compactLandscape = JuicrVisual.compactLandscape(context);
         return Scaffold(
           appBar: AppBar(
             titleSpacing: 0,
@@ -415,11 +416,11 @@ class LibraryCustomListPage extends StatelessWidget {
               ? const Center(child: Text('No titles in this list yet.'))
               : GridView.builder(
                   padding: const EdgeInsets.fromLTRB(18, 10, 18, 22),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: 3,
                     crossAxisSpacing: 12,
                     mainAxisSpacing: 12,
-                    childAspectRatio: 2 / 3,
+                    childAspectRatio: compactLandscape ? 16 / 9 : 2 / 3,
                   ),
                   itemCount: items.length,
                   itemBuilder: (context, index) {

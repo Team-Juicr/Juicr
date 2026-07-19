@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_state.dart';
+import 'visual_style.dart';
 
 class DiagnosticLog {
   DiagnosticLog._();
@@ -482,10 +483,11 @@ class DiagnosticLog {
   }
 
   static String _sanitizeForStorage(String value) {
-    return value
+    final sanitized = value
         .replaceAll(RegExp(r'https?:\/\/[^\s,)]+'), '[url]')
         .replaceAll(RegExp(r'uri=\[url\]'), 'uri=[hidden]')
         .replaceAll(RegExp(r'url=\[url\]'), 'url=[hidden]');
+    return _sanitizeSensitiveReportTokens(_sanitizeProviderIds(sanitized));
   }
 
   static void _mirrorToAndroidLogcat(String value) {
@@ -537,9 +539,16 @@ class DiagnosticLog {
     }
     final view = views.first;
     final size = view.physicalSize / view.devicePixelRatio;
+    final layout = JuicrVisual.layoutDiagnosticsForSize(size);
     add(
       'screen $name size=${size.width.toStringAsFixed(1)}x${size.height.toStringAsFixed(1)} '
-      'orientation=${size.width > size.height ? 'landscape' : 'portrait'} '
+      'orientation=${layout.orientationLabel} '
+      'deviceClass=${layout.deviceClassLabel} '
+      'layoutClass=${layout.layoutClassLabel} '
+      'screenBucket=${layout.screenBucket} '
+      'shortestSideBucket=${layout.shortestSideBucket} '
+      'widthBucket=${layout.widthBucket} '
+      'heightBucket=${layout.heightBucket} '
       'dpr=${view.devicePixelRatio.toStringAsFixed(2)} '
       'padding=${_viewPadding(view.padding, view.devicePixelRatio)} '
       'viewInsets=${_viewPadding(view.viewInsets, view.devicePixelRatio)}',
@@ -560,6 +569,26 @@ class DiagnosticLog {
   static void asyncError(Object error, StackTrace stack) {
     add('ASYNC ERROR exception=$error');
     add('ASYNC STACK ${_trimStack(stack)}');
+  }
+
+  static List<String> _deviceLayoutLines() {
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    if (views.isEmpty) {
+      return const ['Layout metrics unavailable.'];
+    }
+    final view = views.first;
+    final size = view.physicalSize / view.devicePixelRatio;
+    final layout = JuicrVisual.layoutDiagnosticsForSize(size);
+    return [
+      'Device class: ${layout.deviceClassLabel}',
+      'Orientation: ${layout.orientationLabel}',
+      'Layout class: ${layout.layoutClassLabel}',
+      'Screen bucket: ${layout.screenBucket}',
+      'Shortest side bucket: ${layout.shortestSideBucket}',
+      'Width bucket: ${layout.widthBucket}',
+      'Height bucket: ${layout.heightBucket}',
+      'Device pixel ratio: ${view.devicePixelRatio.toStringAsFixed(2)}',
+    ];
   }
 
   static String report() {
@@ -586,6 +615,9 @@ class DiagnosticLog {
       if (_previousAndroidExitDescription.isNotEmpty)
         'Previous Android exit detail: $_previousAndroidExitDescription',
       'Previous app install changed: $_previousInstallChanged',
+      '',
+      '[Device Layout]',
+      ..._deviceLayoutLines(),
       '',
       '[App State]',
       'Theme: ${AppState.themeMode.value.name}',
@@ -712,6 +744,9 @@ class DiagnosticLog {
       'Previous session exit: $_previousSessionExit',
       'Previous Android exit reason: $_previousAndroidExitReason',
       'Previous app install changed: $_previousInstallChanged',
+      '',
+      '[Device Layout]',
+      ..._deviceLayoutLines(),
       '',
       '[App State]',
       'Theme: ${AppState.themeMode.value.name}',

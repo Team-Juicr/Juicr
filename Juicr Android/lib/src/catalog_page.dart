@@ -2697,6 +2697,7 @@ class _CatalogPageState extends State<CatalogPage>
           context,
         ).scale(1).clamp(1.0, 1.3);
         final compactLandscape = JuicrVisual.compactLandscape(context);
+        final phoneLandscape = JuicrVisual.phoneLandscape(context);
         final browseCardHeight =
             (compactLandscape ? 68.0 : 78.0) +
             ((textScale - 1.0) * 72.0).clamp(
@@ -2919,11 +2920,15 @@ class _CatalogPageState extends State<CatalogPage>
                                             _type,
                                             density,
                                             compactLandscape: compactLandscape,
+                                            phoneLandscape: phoneLandscape,
                                           ),
                                           crossAxisSpacing: spacing,
                                           mainAxisSpacing: spacing,
                                           childAspectRatio:
-                                              _type == MediaType.liveTv
+                                              compactLandscape &&
+                                                  _type != MediaType.liveTv
+                                              ? 16 / 9
+                                              : _type == MediaType.liveTv
                                               ? 1.45
                                               : 2 / 3,
                                         ),
@@ -2931,6 +2936,18 @@ class _CatalogPageState extends State<CatalogPage>
                                       (context, index) {
                                         final item = visibleItems[index];
                                         final entry = progressByItemId[item.id];
+                                        if (compactLandscape &&
+                                            _type != MediaType.liveTv) {
+                                          return _CatalogLandscapeTile(
+                                            api: _api,
+                                            item: item,
+                                            index: index,
+                                            entry: entry,
+                                            showReleaseDateBadge:
+                                                _sort ==
+                                                CatalogSort.upcoming,
+                                          );
+                                        }
                                         return _PosterTile(
                                           api: _api,
                                           item: item,
@@ -3499,10 +3516,18 @@ int _catalogGridColumns(
   MediaType type,
   String density, {
   bool compactLandscape = false,
+  bool phoneLandscape = false,
 }) {
   if (type == MediaType.liveTv) {
     if (compactLandscape) return density == 'large' ? 2 : 3;
     return density == 'large' ? 1 : 2;
+  }
+  if (phoneLandscape) {
+    return switch (density) {
+      'compact' => 6,
+      'large' => 4,
+      _ => 5,
+    };
   }
   if (compactLandscape) {
     return switch (density) {
@@ -5220,6 +5245,8 @@ class _CatalogSearchResultSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final spacing = _catalogGridSpacing(density);
+    final compactLandscape = JuicrVisual.compactLandscape(context);
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
     return SliverMainAxisGroup(
       slivers: [
         SliverToBoxAdapter(
@@ -5232,14 +5259,32 @@ class _CatalogSearchResultSection extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
           sliver: SliverGrid(
             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: _catalogGridColumns(type, density),
+              crossAxisCount: _catalogGridColumns(
+                type,
+                density,
+                compactLandscape: compactLandscape,
+                phoneLandscape: phoneLandscape,
+              ),
               crossAxisSpacing: spacing,
               mainAxisSpacing: spacing,
-              childAspectRatio: type == MediaType.liveTv ? 1.45 : 2 / 3,
+              childAspectRatio: compactLandscape && type != MediaType.liveTv
+                  ? 16 / 9
+                  : type == MediaType.liveTv
+                  ? 1.45
+                  : 2 / 3,
             ),
             delegate: SliverChildBuilderDelegate(
               (context, index) {
                 final item = items[index];
+                if (compactLandscape && type != MediaType.liveTv) {
+                  return _CatalogLandscapeTile(
+                    api: api,
+                    item: item,
+                    index: index,
+                    entry: progressByItemId[item.id],
+                    showReleaseDateBadge: false,
+                  );
+                }
                 return _PosterTile(
                   api: api,
                   item: item,
@@ -5492,6 +5537,290 @@ class _PosterTileState extends State<_PosterTile> {
       context,
     ).push(AppPageRoute<void>(builder: (_) => DetailsPage(item: item)));
   }
+}
+
+class _CatalogLandscapeTile extends StatefulWidget {
+  const _CatalogLandscapeTile({
+    required this.api,
+    required this.item,
+    required this.index,
+    required this.entry,
+    required this.showReleaseDateBadge,
+  });
+
+  final StreamApi api;
+  final CatalogItem item;
+  final int index;
+  final ContinueWatchingEntry? entry;
+  final bool showReleaseDateBadge;
+
+  @override
+  State<_CatalogLandscapeTile> createState() => _CatalogLandscapeTileState();
+}
+
+class _CatalogLandscapeTileState extends State<_CatalogLandscapeTile> {
+  CatalogItem? _hydratedItem;
+  bool _hydratingArtwork = false;
+
+  CatalogItem get _displayItem => _hydratedItem ?? widget.item;
+
+  @override
+  void initState() {
+    super.initState();
+    _maybeHydrateArtwork();
+  }
+
+  @override
+  void didUpdateWidget(covariant _CatalogLandscapeTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.item.id != widget.item.id ||
+        oldWidget.item.background != widget.item.background ||
+        oldWidget.item.logo != widget.item.logo) {
+      _hydratedItem = null;
+      _hydratingArtwork = false;
+      _maybeHydrateArtwork();
+    }
+  }
+
+  void _maybeHydrateArtwork() {
+    if (_hydratingArtwork || widget.item.tmdbId == null) return;
+    final hasBackdrop = widget.item.background?.trim().isNotEmpty ?? false;
+    final hasLogo = widget.item.logo?.trim().isNotEmpty ?? false;
+    if (hasBackdrop && hasLogo) return;
+    _hydratingArtwork = true;
+    unawaited(() async {
+      try {
+        final details = await widget.api.meta(widget.item);
+        final hydrated = widget.item.merge(details.item);
+        final hydratedBackdrop = hydrated.background?.trim();
+        final hydratedLogo = hydrated.logo?.trim();
+        final hasNewBackdrop =
+            hydratedBackdrop != null &&
+            hydratedBackdrop.isNotEmpty &&
+            hydratedBackdrop != widget.item.background?.trim();
+        final hasNewLogo =
+            hydratedLogo != null &&
+            hydratedLogo.isNotEmpty &&
+            hydratedLogo != widget.item.logo?.trim();
+        if (mounted && (hasNewBackdrop || hasNewLogo)) {
+          setState(() {
+            _hydratedItem = hydrated;
+            _hydratingArtwork = false;
+          });
+          DiagnosticLog.add(
+            'catalog landscape art hydrated type=${widget.item.type.compatTypeValue} id=${widget.item.id}',
+          );
+          return;
+        }
+      } catch (error) {
+        DiagnosticLog.add(
+          'catalog landscape art hydrate skipped type=${widget.item.type.compatTypeValue} id=${widget.item.id} error=${error.runtimeType}',
+        );
+      }
+      if (mounted) {
+        setState(() => _hydratingArtwork = false);
+      } else {
+        _hydratingArtwork = false;
+      }
+    }());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final item = _displayItem;
+    final imageUrl = item.background ?? item.poster;
+    final cacheWidth = _catalogImageCacheWidth(context, 190);
+    return RepaintBoundary(
+      child: Semantics(
+        button: true,
+        label: 'Open ${item.name}',
+        hint: 'Show details',
+        child: ExcludeSemantics(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => _openDetails(context),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (imageUrl == null || imageUrl.trim().isEmpty)
+                    const _CatalogArtworkFallback()
+                  else
+                    Image.network(
+                      imageUrl,
+                      fit: BoxFit.cover,
+                      cacheWidth: cacheWidth,
+                      gaplessPlayback: true,
+                      filterQuality: FilterQuality.medium,
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return const AppSkeletonCard(radius: 10);
+                      },
+                      errorBuilder: (_, __, ___) =>
+                          const _CatalogArtworkFallback(),
+                    ),
+                  const Positioned.fill(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.bottomCenter,
+                          end: Alignment.topCenter,
+                          colors: [
+                            Color(0xD607080D),
+                            Color(0x7807080D),
+                            Color(0x0807080D),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 8,
+                    top: 8,
+                    child: _CatalogMetaBadge(item: item),
+                  ),
+                  if (item.isLocalCatalogItem)
+                    const Positioned(
+                      left: 8,
+                      top: 36,
+                      child: _LocalPrivateBadge(),
+                    ),
+                  if (widget.entry case final badgeEntry?)
+                    _ContinueBadge(entry: badgeEntry),
+                  Positioned(
+                    left: 10,
+                    right: 10,
+                    bottom: widget.entry == null ? 10 : 18,
+                    child: _CatalogLandscapeTitleLogo(item: item),
+                  ),
+                  if (widget.showReleaseDateBadge &&
+                      item.releaseDate?.trim().isNotEmpty == true)
+                    Positioned(
+                      right: 8,
+                      top: 8,
+                      child: _UpcomingReleaseDateBadge(item: item),
+                    ),
+                  Positioned.fill(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.1),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openDetails(BuildContext context) {
+    final item = _displayItem;
+    DiagnosticLog.screen(context, 'Catalog landscape tap');
+    DiagnosticLog.add(
+      'catalog landscape tap index=${widget.index} id=${item.id} type=${item.type.compatTypeValue}',
+    );
+    unawaited(
+      JuicrAdPolicy.maybeShowInterstitial(reason: 'discovery_title_open'),
+    );
+    Navigator.of(
+      context,
+    ).push(AppPageRoute<void>(builder: (_) => DetailsPage(item: item)));
+  }
+}
+
+class _CatalogLandscapeTitleLogo extends StatelessWidget {
+  const _CatalogLandscapeTitleLogo({required this.item});
+
+  final CatalogItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final logo = item.logo?.trim();
+    final fallback = Text(
+      item.name,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 12,
+        fontWeight: FontWeight.w900,
+        height: 1,
+      ),
+    );
+    if (logo == null || logo.isEmpty || _catalogIsSvgLikeImage(logo)) {
+      return fallback;
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 30),
+        child: Image.network(
+          logo,
+          fit: BoxFit.contain,
+          alignment: Alignment.centerLeft,
+          cacheWidth: _catalogImageCacheWidth(context, 132),
+          gaplessPlayback: true,
+          filterQuality: FilterQuality.medium,
+          errorBuilder: (_, __, ___) => fallback,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return fallback;
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _CatalogMetaBadge extends StatelessWidget {
+  const _CatalogMetaBadge({required this.item});
+
+  final CatalogItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final rating = item.imdbRating?.trim();
+    final label = rating == null || rating.isEmpty ? 'IMDb' : 'IMDb $rating';
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(999),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.22),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 9,
+            fontWeight: FontWeight.w900,
+            height: 1,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+bool _catalogIsSvgLikeImage(String value) {
+  final normalized = value.toLowerCase().split('?').first;
+  return normalized.endsWith('.svg');
 }
 
 class _UpcomingReleaseDateBadge extends StatelessWidget {
@@ -5768,14 +6097,21 @@ class _PosterGridSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final liveTv = type == MediaType.liveTv;
+    final compactLandscape = JuicrVisual.compactLandscape(context);
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
       sliver: SliverGrid.builder(
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: liveTv ? 2 : 3,
+          crossAxisCount: liveTv
+              ? (compactLandscape ? 3 : 2)
+              : (compactLandscape ? 5 : 3),
           crossAxisSpacing: 12,
           mainAxisSpacing: 12,
-          childAspectRatio: liveTv ? 1.45 : 2 / 3,
+          childAspectRatio: liveTv
+              ? 1.45
+              : compactLandscape
+              ? 16 / 9
+              : 2 / 3,
         ),
         itemCount: liveTv ? 10 : 15,
         itemBuilder: (context, index) {
@@ -5784,6 +6120,8 @@ class _PosterGridSkeleton extends StatelessWidget {
             duration: const Duration(milliseconds: 420),
             child: liveTv
                 ? const AppLiveTileSkeleton()
+                : compactLandscape
+                ? const AppSkeletonCard(radius: 10)
                 : const _PosterTileSkeleton(),
           );
         },

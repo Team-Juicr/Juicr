@@ -467,6 +467,7 @@ class _LibraryPageState extends State<LibraryPage>
     }
     final colorScheme = Theme.of(context).colorScheme;
     final compactLandscape = JuicrVisual.compactLandscape(context);
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
     final motionDisabled = juicrMotionDisabled(context);
     final controlAnimationDuration = motionDisabled
         ? Duration.zero
@@ -715,22 +716,46 @@ class _LibraryPageState extends State<LibraryPage>
                                         compactLandscape ? 14 : 18,
                                         compactLandscape ? 14 : 22,
                                       ),
-                                      sliver: SliverList.separated(
-                                        itemCount: continueItems.length,
-                                        separatorBuilder: (_, __) =>
-                                            const SizedBox(height: 12),
-                                        itemBuilder: (context, index) {
-                                          final entry = continueItems[index];
-                                          return _ContinueWatchingCard(
-                                            entry: entry,
-                                            completionSummary:
-                                                _completionSummaryForItem(
-                                                  entry.item,
-                                                  completed,
-                                                ),
-                                          );
-                                        },
-                                      ),
+                                      sliver: phoneLandscape
+                                          ? SliverGrid.builder(
+                                              gridDelegate:
+                                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                                                    crossAxisCount: 2,
+                                                    crossAxisSpacing: 10,
+                                                    mainAxisSpacing: 10,
+                                                    childAspectRatio: 2.65,
+                                                  ),
+                                              itemCount: continueItems.length,
+                                              itemBuilder: (context, index) {
+                                                final entry =
+                                                    continueItems[index];
+                                                return _ContinueWatchingCard(
+                                                  entry: entry,
+                                                  completionSummary:
+                                                      _completionSummaryForItem(
+                                                        entry.item,
+                                                        completed,
+                                                      ),
+                                                );
+                                              },
+                                            )
+                                          : SliverList.separated(
+                                              itemCount: continueItems.length,
+                                              separatorBuilder: (_, __) =>
+                                                  const SizedBox(height: 12),
+                                              itemBuilder: (context, index) {
+                                                final entry =
+                                                    continueItems[index];
+                                                return _ContinueWatchingCard(
+                                                  entry: entry,
+                                                  completionSummary:
+                                                      _completionSummaryForItem(
+                                                        entry.item,
+                                                        completed,
+                                                      ),
+                                                );
+                                              },
+                                            ),
                                     )
                                   else if (showContinue)
                                     const SliverFillRemaining(
@@ -746,16 +771,32 @@ class _LibraryPageState extends State<LibraryPage>
                                         compactLandscape ? 14 : 18,
                                         compactLandscape ? 14 : 22,
                                       ),
-                                      sliver: SliverList.separated(
-                                        itemCount: completedItems.length,
-                                        separatorBuilder: (_, __) =>
-                                            const SizedBox(height: 12),
-                                        itemBuilder: (context, index) {
-                                          return _CompletedWatchingCard(
-                                            entry: completedItems[index],
-                                          );
-                                        },
-                                      ),
+                                      sliver: phoneLandscape
+                                          ? SliverGrid.builder(
+                                              gridDelegate:
+                                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                                                    crossAxisCount: 2,
+                                                    crossAxisSpacing: 10,
+                                                    mainAxisSpacing: 10,
+                                                    childAspectRatio: 3.35,
+                                                  ),
+                                              itemCount: completedItems.length,
+                                              itemBuilder: (context, index) {
+                                                return _CompletedWatchingCard(
+                                                  entry: completedItems[index],
+                                                );
+                                              },
+                                            )
+                                          : SliverList.separated(
+                                              itemCount: completedItems.length,
+                                              separatorBuilder: (_, __) =>
+                                                  const SizedBox(height: 12),
+                                              itemBuilder: (context, index) {
+                                                return _CompletedWatchingCard(
+                                                  entry: completedItems[index],
+                                                );
+                                              },
+                                            ),
                                     )
                                   else if (showCompleted)
                                     const SliverFillRemaining(
@@ -817,6 +858,8 @@ class _LibraryPageState extends State<LibraryPage>
                                                   selectedType ==
                                                       MediaType.liveTv
                                                   ? 1.45
+                                                  : compactLandscape
+                                                  ? 16 / 9
                                                   : 2 / 3,
                                             ),
                                         itemCount: items.length,
@@ -898,8 +941,18 @@ class _ContinueWatchingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final phoneLandscape = JuicrVisual.phoneLandscape(context);
     final backgroundCacheWidth = _libraryImageCacheWidth(context, 360);
     final posterCacheWidth = _libraryImageCacheWidth(context, 96);
+    final cardHeight = phoneLandscape ? 168.0 : 154.0;
+    final padding = phoneLandscape ? 10.0 : 12.0;
+    final posterWidth = phoneLandscape ? 74.0 : 82.0;
+    final posterHeight = phoneLandscape ? 112.0 : 124.0;
+    final titleHeight = phoneLandscape ? 20.0 : 22.0;
+    final subtitleHeight = phoneLandscape ? 16.0 : 17.0;
+    final textGap = phoneLandscape ? 3.0 : 4.0;
+    final completionGap = phoneLandscape ? 5.0 : 8.0;
+    final actionGap = phoneLandscape ? 7.0 : 10.0;
     return Card(
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
@@ -919,7 +972,7 @@ class _ContinueWatchingCard extends StatelessWidget {
           );
         },
         child: SizedBox(
-          height: 154,
+          height: cardHeight,
           child: Stack(
             children: [
               Positioned.fill(
@@ -957,14 +1010,14 @@ class _ContinueWatchingCard extends StatelessWidget {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.all(12),
+                padding: EdgeInsets.all(padding),
                 child: Row(
                   children: [
                     ClipRRect(
                       borderRadius: BorderRadius.circular(10),
                       child: SizedBox(
-                        width: 82,
-                        height: 124,
+                        width: posterWidth,
+                        height: posterHeight,
                         child: entry.item.poster == null
                             ? ColoredBox(
                                 color: colorScheme.surfaceContainerHighest,
@@ -998,24 +1051,24 @@ class _ContinueWatchingCard extends StatelessWidget {
                               ),
                       ),
                     ),
-                    const SizedBox(width: 14),
+                    SizedBox(width: phoneLandscape ? 10 : 14),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           JuicrAutoScrollText(
                             text: entry.title,
-                            height: 22,
+                            height: titleHeight,
                             style: Theme.of(context).textTheme.titleMedium
                                 ?.copyWith(
                                   color: Colors.white,
                                   fontWeight: FontWeight.w900,
                                 ),
                           ),
-                          const SizedBox(height: 4),
+                          SizedBox(height: textGap),
                           JuicrAutoScrollText(
                             text: entry.subtitle ?? entry.item.subtitle,
-                            height: 17,
+                            height: subtitleHeight,
                             style: Theme.of(context).textTheme.bodySmall
                                 ?.copyWith(
                                   color: Colors.white70,
@@ -1023,7 +1076,7 @@ class _ContinueWatchingCard extends StatelessWidget {
                                 ),
                           ),
                           if (completionSummary != null) ...[
-                            const SizedBox(height: 8),
+                            SizedBox(height: completionGap),
                             _CompletionPill(label: completionSummary!.label),
                           ],
                           const Spacer(),
@@ -1068,7 +1121,7 @@ class _ContinueWatchingCard extends StatelessWidget {
                               ),
                             ],
                           ),
-                          const SizedBox(height: 10),
+                          SizedBox(height: actionGap),
                           ClipRRect(
                             borderRadius: BorderRadius.circular(999),
                             child: LinearProgressIndicator(
@@ -2909,6 +2962,11 @@ class _LibraryPoster extends StatelessWidget {
             },
             child: item.type.isLive
                 ? _LibraryLiveChannel(item: item)
+                : JuicrVisual.compactLandscape(context)
+                ? _LibraryLandscapePoster(
+                    item: item,
+                    completionSummary: completionSummary,
+                  )
                 : Stack(
                     fit: StackFit.expand,
                     children: [
@@ -2967,6 +3025,136 @@ class _LibraryPoster extends StatelessWidget {
       ),
     );
   }
+}
+
+class _LibraryLandscapePoster extends StatelessWidget {
+  const _LibraryLandscapePoster({required this.item, this.completionSummary});
+
+  final CatalogItem item;
+  final _CompletionSummary? completionSummary;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final imageUrl = item.background ?? item.poster;
+    final cacheWidth = _libraryImageCacheWidth(context, 190);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ColoredBox(
+            color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.72),
+            child: imageUrl == null || imageUrl.trim().isEmpty
+                ? item.isLocalCatalogItem
+                      ? _LibraryLocalPosterFallback(item: item)
+                      : Icon(
+                          Icons.movie,
+                          color: colorScheme.onSurface.withValues(alpha: 0.38),
+                        )
+                : Image.network(
+                    imageUrl,
+                    fit: BoxFit.cover,
+                    cacheWidth: cacheWidth,
+                    errorBuilder: (_, __, ___) {
+                      return Icon(
+                        Icons.broken_image,
+                        color: colorScheme.onSurface.withValues(alpha: 0.38),
+                      );
+                    },
+                  ),
+          ),
+          const Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                  colors: [
+                    Color(0xD607080D),
+                    Color(0x7807080D),
+                    Color(0x0807080D),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (item.isLocalCatalogItem)
+            const Positioned(left: 7, top: 7, child: _LibraryLocalBadge()),
+          Positioned(
+            left: 10,
+            right: 10,
+            bottom: completionSummary == null ? 10 : 34,
+            child: _LibraryLandscapeTitleLogo(item: item),
+          ),
+          if (completionSummary != null)
+            Positioned(
+              left: 8,
+              right: 8,
+              bottom: 8,
+              child: _CompletionPill(label: completionSummary!.label),
+            ),
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LibraryLandscapeTitleLogo extends StatelessWidget {
+  const _LibraryLandscapeTitleLogo({required this.item});
+
+  final CatalogItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final logo = item.logo?.trim();
+    final fallback = Text(
+      item.name,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 12,
+        fontWeight: FontWeight.w900,
+        height: 1,
+      ),
+    );
+    if (logo == null || logo.isEmpty || _libraryIsSvgLikeImage(logo)) {
+      return fallback;
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 30),
+        child: Image.network(
+          logo,
+          fit: BoxFit.contain,
+          alignment: Alignment.centerLeft,
+          cacheWidth: _libraryImageCacheWidth(context, 132),
+          gaplessPlayback: true,
+          filterQuality: FilterQuality.medium,
+          errorBuilder: (_, __, ___) => fallback,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return fallback;
+          },
+        ),
+      ),
+    );
+  }
+}
+
+bool _libraryIsSvgLikeImage(String value) {
+  final normalized = value.toLowerCase().split('?').first;
+  return normalized.endsWith('.svg');
 }
 
 class _LibraryLocalPosterFallback extends StatelessWidget {

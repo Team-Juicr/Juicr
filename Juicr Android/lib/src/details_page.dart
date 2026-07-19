@@ -5640,29 +5640,8 @@ String _nativeProviderDiagnosticLabel(String providerId) {
   final normalized = providerId.trim().toLowerCase();
   if (normalized.startsWith('addon-')) return 'stream add-on';
   return switch (normalized) {
-    'vidlink' => 'Alpha',
-    'vidsrc' => 'Beta',
-    'icefy' => 'Delta',
-    'vidnest' => 'Epsilon',
-    'primesrc' || 'xpass' => 'Zeta',
-    'cineby' || 'moviesapi' => 'Eta',
-    'vidking' => 'Nu',
-    'popr' => 'Theta',
-    'cinesu' => 'Rho',
-    'vidapi' => 'Sigma',
-    'xyra' => 'Chi',
-    'videasy' => 'Tau',
-    'vidfun' => 'Upsilon',
-    'flixhq' => 'Phi',
-    'rgshows' => 'Iota',
-    'vixsrc' => 'Kappa',
-    'vidrock' => 'Lambda',
-    'vidzee' => 'Mu',
-    'flixer' => 'Xi',
-    '7xstream' => 'Omicron',
-    'meowtv' => 'Pi',
     'public-iptv' => 'Live TV',
-    '' => 'provider',
-    _ => 'provider',
+    '' => 'playback option',
+    _ => 'playback option',
   };
 }

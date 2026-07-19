@@ -223,7 +223,19 @@ class CatalogItem {
       ),
       poster: json['poster']?.toString(),
       background: json['background']?.toString(),
-      logo: json['logo']?.toString(),
+      logo: _logoImageFromJson(
+        json['logo'] ??
+            json['logoUrl'] ??
+            json['clearLogo'] ??
+            json['clear_logo'] ??
+            json['titleLogo'] ??
+            json['title_logo'] ??
+            json['titleArt'] ??
+            json['title_art'] ??
+            json['logos'] ??
+            json['images'] ??
+            json['artwork'],
+      ),
       year: _yearFromJson(json),
       releaseDate: _releaseDateFromJson(json),
       tmdbId: int.tryParse(
@@ -426,6 +438,45 @@ String _cleanTitle(String value) {
       .replaceAll(RegExp(r'#\s*dupe\s*#', caseSensitive: false), '')
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
+}
+
+String? _logoImageFromJson(dynamic value) {
+  if (value is Map) {
+    for (final key in const [
+      'logo',
+      'logos',
+      'logoUrl',
+      'clearLogo',
+      'clear_logo',
+      'titleLogo',
+      'title_logo',
+      'titleArt',
+      'title_art',
+      'url',
+      'src',
+      'href',
+      'file_path',
+      'filePath',
+      'path',
+    ]) {
+      final image = _logoImageFromJson(value[key]);
+      if (image != null) return image;
+    }
+    return null;
+  }
+  if (value is Iterable) {
+    for (final item in value) {
+      final image = _logoImageFromJson(item);
+      if (image != null) return image;
+    }
+    return null;
+  }
+  final text = value?.toString().trim();
+  if (text == null || text.isEmpty) return null;
+  if (text.startsWith('https://') || text.startsWith('http://')) return text;
+  if (text.startsWith('//')) return 'https:$text';
+  if (text.startsWith('/')) return 'https://image.tmdb.org/t/p/original$text';
+  return null;
 }
 
 class MetaDetails {

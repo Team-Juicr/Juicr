@@ -1509,6 +1509,7 @@ class StreamApi {
           'Config response did not include providers.',
         );
       }
+      AppState.applyNativeProvidersFromConfig(config.providers);
       _configCache = config;
       _configCacheScope = scope;
       _configCacheStoredAt = DateTime.now();

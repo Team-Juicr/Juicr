@@ -7989,7 +7989,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       }
       return;
     }
-    if (!controller.isPlaying || controller.isBuffering) {
+    final trustedControllerClock =
+        controller.isPlaying && !controller.isBuffering;
+    final staleStateButVisibleProgress =
+        !trustedControllerClock &&
+            _shouldTrustVisibleProgressClock(controller, position);
+    if (!trustedControllerClock && !staleStateButVisibleProgress) {
       if (position.inSeconds != _untrustedClockProgressSkipLogSecond) {
         _untrustedClockProgressSkipLogSecond = position.inSeconds;
         DiagnosticLog.add(
@@ -8001,9 +8006,51 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (_isSuspiciousProgressClockJump(position, reason: 'track_last_known')) {
       return;
     }
+    if (staleStateButVisibleProgress &&
+        position.inSeconds != _untrustedClockProgressSkipLogSecond) {
+      _untrustedClockProgressSkipLogSecond = position.inSeconds;
+      DiagnosticLog.add(
+        'native progress anchor accepted reason=visible_decoder_progress position=${position.inSeconds}s stable=${_lastKnownPlaybackPosition.inSeconds}s playing=${controller.isPlaying} buffering=${controller.isBuffering}',
+      );
+    }
     if (position > _lastKnownPlaybackPosition) {
       _lastKnownPlaybackPosition = position;
     }
+  }
+
+  bool _shouldTrustVisibleProgressClock(
+    _NativePlaybackController controller,
+    Duration position,
+  ) {
+    if (!controller.isInitialized || controller.hasError) return false;
+    if (_isLiveTvMode) return false;
+    if (position.inSeconds < 3) return false;
+    final movingForward = position > _lastKnownPlaybackPosition;
+    if (!movingForward) return false;
+    final boundedForwardStep =
+        _lastKnownPlaybackPosition <= Duration.zero ||
+            position - _lastKnownPlaybackPosition <= const Duration(seconds: 12);
+    if (!boundedForwardStep) return false;
+    if (_resumeProgressAnchorPosition > Duration.zero &&
+        position <
+            _resumeProgressAnchorPosition - const Duration(seconds: 10)) {
+      return false;
+    }
+    final duration = _bestKnownProgressDuration(controller);
+    if (duration > const Duration(seconds: 20) &&
+        position >= duration - const Duration(seconds: 1)) {
+      return false;
+    }
+    if (controller.size == Size.zero) return false;
+    if (_activeSourceHasZeroClockMetadata) return false;
+    if (_playbackCadenceClockUnstable) return false;
+    if (_isSuspiciousProgressClockJump(
+      position,
+      reason: 'visible_progress_clock',
+    )) {
+      return false;
+    }
+    return true;
   }
 
   void _maybeReloadSkipSegmentsWithDuration(Duration duration) {
@@ -8059,7 +8106,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _resumeProgressAnchorPosition > Duration.zero &&
         rawControllerPosition <
             _resumeProgressAnchorPosition - const Duration(seconds: 10);
-    var position = controllerClockTrusted && controllerPosition > Duration.zero
+    final visibleProgressClockTrusted = controller != null &&
+        _shouldTrustVisibleProgressClock(controller, controllerPosition);
+    var position =
+        (controllerClockTrusted || visibleProgressClockTrusted) &&
+                controllerPosition > Duration.zero
         ? controllerPosition
         : waitingForResumeSeek
             ? Duration.zero
@@ -8414,6 +8465,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     _lastIntegritySampleAt = DateTime.now();
     _lastIntegrityPosition = to;
+    _lastKnownPlaybackPosition = to;
+    _untrustedClockProgressSkipLogSecond = -1;
+    DiagnosticLog.add(
+      'native progress anchor updated reason=manual_seek_anchor source=$reason position=${to.inSeconds}s',
+    );
   }
 
   Duration _newerRecoveryAnchor(Duration current, Duration candidate) {
@@ -10847,6 +10903,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _resetTransientPlaybackDebounce();
     await controller.seekTo(clamped);
     _markManualSeekForIntegrity(current, clamped, reason: 'skip_button');
+    if (mounted && identical(_controller, controller)) {
+      setState(() {});
+    }
     await _resumePlaybackAfterSeek(controller, shouldPlay: shouldPlay);
     _scheduleControlsHide();
   }
@@ -10856,13 +10915,16 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final controller = _controller;
     if (controller == null || !controller.isInitialized) return;
     final shouldPlay = controller.isPlaying;
-    final duration = controller.duration;
-    final current = controller.position;
+    final duration = _bestKnownProgressDuration(controller);
+    final current = _bestKnownProgressPosition(controller, duration);
     final target = duration * fraction.clamp(0, 1);
     _lastWatchdogPosition = target;
     _resetTransientPlaybackDebounce();
     await controller.seekTo(target);
     _markManualSeekForIntegrity(current, target, reason: 'seekbar');
+    if (mounted && identical(_controller, controller)) {
+      setState(() {});
+    }
     await _resumePlaybackAfterSeek(controller, shouldPlay: shouldPlay);
     _scheduleControlsHide();
   }
@@ -12448,6 +12510,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _lastWatchdogPosition = segment.target;
       _resetTransientPlaybackDebounce();
       await controller.seekTo(segment.target);
+      _markManualSeekForIntegrity(
+        controller.position,
+        segment.target,
+        reason: automatic ? 'auto_skip_segment' : 'skip_segment',
+      );
       await _resumePlaybackAfterSeek(controller, shouldPlay: shouldPlay);
     } catch (error) {
       DiagnosticLog.add(
@@ -12456,7 +12523,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
     if (!mounted || _playerClosing || _controller != controller) return;
-    _lastKnownPlaybackPosition = segment.target;
     setState(() => _controlsVisible = automatic ? controlsWereVisible : true);
     _scheduleControlsHide();
   }
@@ -13923,31 +13989,8 @@ String _providerLabel(String? providerId) {
   if (normalized.startsWith('addon-')) return 'stream add-on';
   return switch (normalized) {
     'public-iptv' => 'Live TV',
-    'vidlink' => 'Alpha',
-    'vidsrc' => 'Beta',
-    'icefy' => 'Delta',
-    'vidnest' => 'Epsilon',
-    'primesrc' => 'Zeta',
-    'xpass' => 'Zeta',
-    'cineby' => 'Eta',
-    'moviesapi' => 'Eta',
-    'vidking' => 'Nu',
-    'popr' => 'Theta',
-    'cinesu' => 'Rho',
-    'vidapi' => 'Sigma',
-    'xyra' => 'Chi',
-    'videasy' => 'Tau',
-    'vidfun' => 'Upsilon',
-    'flixhq' => 'Phi',
-    'rgshows' => 'Iota',
-    'vixsrc' => 'Kappa',
-    'vidrock' => 'Lambda',
-    'vidzee' => 'Mu',
-    'flixer' => 'Xi',
-    '7xstream' => 'Omicron',
-    'meowtv' => 'Pi',
-    '' => 'provider',
-    _ => 'provider',
+    '' => 'playback option',
+    _ => 'playback option',
   };
 }
 

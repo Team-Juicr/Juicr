@@ -1194,35 +1194,10 @@ class AppState {
     Map<String, dynamic> snapshot,
     String baseRevision,
   )? _accountLibraryPush;
-  static const List<String> nativeProviderOrder = <String>[
-    'vidlink',
-    'vidsrc',
-    'icefy',
-    'vidnest',
-    'xpass',
-    'moviesapi',
-    'vidking',
-    'popr',
-    'cinesu',
-    'rgshows',
-    'vixsrc',
-    'vidrock',
-    'vidzee',
-    'vidapi',
-    'xyra',
-    'videasy',
-    'vidfun',
-    'flixhq',
-    'flixer',
-    '7xstream',
-    'meowtv',
-  ];
-  static const Set<String> _experimentalNativeProviders = <String>{
-    'vidrock',
-    'vidzee',
-    'flixer',
-    '7xstream',
-  };
+  static final ValueNotifier<List<ApiProvider>> nativeProviders =
+      ValueNotifier<List<ApiProvider>>(const <ApiProvider>[]);
+  static List<String> get nativeProviderOrder =>
+      nativeProviders.value.map((provider) => provider.id).toList();
   static final Map<String, String> _nativeProviderSuccessByMedia =
       <String, String>{};
   static final Map<String, Map<String, int>> _nativeProviderFailuresByMedia =
@@ -1237,6 +1212,48 @@ class AppState {
       return;
     }
     runtimeAppPolicy.value = policy;
+  }
+
+  static void applyNativeProvidersFromConfig(List<ApiProvider> providers) {
+    final next = <ApiProvider>[];
+    final seen = <String>{};
+    for (final provider in providers) {
+      if (!provider.enabled) continue;
+      final id = _normalizeNativeProviderId(provider.id);
+      if (id.isEmpty || id == autoNativeProviderId || !seen.add(id)) continue;
+      final name = provider.name.trim().isEmpty ? id : provider.name.trim();
+      next.add(ApiProvider(id: id, name: name));
+    }
+    if (next.isEmpty) {
+      if (nativeProviders.value.isNotEmpty) {
+        nativeProviders.value = const <ApiProvider>[];
+      }
+      if (selectedNativeProviderId != autoNativeProviderId) {
+        nativeProviderId.value = autoNativeProviderId;
+      }
+      DiagnosticLog.add('native playback catalog unavailable');
+      return;
+    }
+    final currentProviders = nativeProviders.value;
+    final currentIds = currentProviders.map((provider) => provider.id).toList();
+    final nextIds = next.map((provider) => provider.id).toList();
+    if (currentIds.length == nextIds.length) {
+      var unchanged = true;
+      for (var index = 0; index < currentIds.length; index++) {
+        if (currentIds[index] != nextIds[index] ||
+            currentProviders[index].name != next[index].name) {
+          unchanged = false;
+          break;
+        }
+      }
+      if (unchanged) return;
+    }
+    nativeProviders.value = List<ApiProvider>.unmodifiable(next);
+    final selected = selectedNativeProviderId;
+    if (selected != autoNativeProviderId && !nextIds.contains(selected)) {
+      nativeProviderId.value = autoNativeProviderId;
+    }
+    DiagnosticLog.add('native playback catalog synced count=${next.length}');
   }
 
   static String get selectedNativeProviderId =>
@@ -1257,10 +1274,6 @@ class AppState {
           ? <String>[normalized]
           : <String>[];
     }
-    final allowedProviders = nativeProviderOrder.where((providerId) {
-      return !_experimentalNativeProviders.contains(providerId);
-    }).toList();
-
     final memory = behavior.experimentalControlsEnabled
         ? behavior.autoProviderMemory
         : const PlayerBehaviorSettings().autoProviderMemory;
@@ -1269,7 +1282,7 @@ class AppState {
         : null;
     final failures =
         _nativeProviderFailuresByMedia[mediaKey] ?? const <String, int>{};
-    final ordered = _autoProviderOrder(allowedProviders, failures);
+    final ordered = _autoProviderOrder(nativeProviderOrder, failures);
     final filtered = memory == 'sticky'
         ? ordered.toList()
         : ordered.where((providerId) {
@@ -6859,28 +6872,7 @@ Color _colorFromStoredInt(int? value, {required Color fallback}) {
 String _normalizeNativeProviderId(String value) {
   return switch (value.trim().toLowerCase()) {
     'auto' => AppState.autoNativeProviderId,
-    'alpha' || 'vidlink' => 'vidlink',
-    'beta' || 'vidsrc' => 'vidsrc',
     'fmovies4u' || 'hydrahd' => AppState.autoNativeProviderId,
-    'delta' || 'icefy' => 'icefy',
-    'epsilon' || 'vidnest' => 'vidnest',
-    'zeta' || 'primesrc' || 'xpass' => 'xpass',
-    'eta' || 'cineby' || 'moviesapi' => 'moviesapi',
-    'nu' || 'vidking' => 'vidking',
-    'theta' || 'popr' => 'popr',
-    'rho' || 'cinesu' => 'cinesu',
-    'sigma' || 'vidapi' => 'vidapi',
-    'chi' || 'xyra' => 'xyra',
-    'tau' || 'videasy' => 'videasy',
-    'upsilon' || 'vidfun' => 'vidfun',
-    'phi' || 'flixhq' => 'flixhq',
-    'iota' || 'rgshows' => 'rgshows',
-    'kappa' || 'vixsrc' => 'vixsrc',
-    'lambda' || 'vidrock' => 'vidrock',
-    'mu' || 'vidzee' => 'vidzee',
-    'xi' || 'flixer' => 'flixer',
-    'omicron' || '7xstream' => '7xstream',
-    'pi' || 'meowtv' => 'meowtv',
     _ => value.trim().toLowerCase(),
   };
 }
