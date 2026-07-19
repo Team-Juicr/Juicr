@@ -1380,6 +1380,8 @@ class DiagnosticLog {
       'rho': 'Rho',
       'vidapi': 'Sigma',
       'sigma': 'Sigma',
+      'xyra': 'Chi',
+      'chi': 'Chi',
       'videasy': 'Tau',
       'tau': 'Tau',
       'vidfun': 'Upsilon',
@@ -1422,6 +1424,8 @@ class DiagnosticLog {
         .replaceAll(RegExp(r'\brho\b', caseSensitive: false), 'Rho')
         .replaceAll(RegExp(r'\bvidapi\b', caseSensitive: false), 'Sigma')
         .replaceAll(RegExp(r'\bsigma\b', caseSensitive: false), 'Sigma')
+        .replaceAll(RegExp(r'\bxyra\b', caseSensitive: false), 'Chi')
+        .replaceAll(RegExp(r'\bchi\b', caseSensitive: false), 'Chi')
         .replaceAll(RegExp(r'\bvideasy\b', caseSensitive: false), 'Tau')
         .replaceAll(RegExp(r'\btau\b', caseSensitive: false), 'Tau')
         .replaceAll(RegExp(r'\bvidfun\b', caseSensitive: false), 'Upsilon')

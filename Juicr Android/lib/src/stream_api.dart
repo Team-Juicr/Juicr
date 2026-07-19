@@ -999,7 +999,7 @@ class StreamApi {
   static const int _metadataCacheLimit = 160;
   static const int _recommendationsCacheLimit = 80;
   static const int _remotePlaybackBusyBackoffSeconds = 8;
-  static const Duration _remoteBootstrapTimeout = Duration(seconds: 20);
+  static const Duration _remoteBootstrapTimeout = Duration(seconds: 75);
   static const Duration _remotePlaybackBusyBackoff = Duration(
     seconds: _remotePlaybackBusyBackoffSeconds,
   );
@@ -1007,6 +1007,8 @@ class StreamApi {
     'user-agent': 'JuicrApp/1 Flutter',
     'x-juicr-client': 'flutter-native',
     'x-juicr-client-version': '1',
+    'x-juicr-capabilities':
+        'playback_v2,source_pool,mirrors,playback_feedback,subtitle_v2',
   };
 
   final http.Client _client;
@@ -5562,7 +5564,15 @@ PlaybackSource _sourceWithProviderId(PlaybackSource source, String providerId) {
     url: source.url,
     type: source.type,
     quality: source.quality,
+    language: source.language,
     sourceClass: source.sourceClass,
+    sourceId: source.sourceId,
+    mirrorGroupId: source.mirrorGroupId,
+    mirrorRank: source.mirrorRank,
+    displayLabel: source.displayLabel,
+    healthBucket: source.healthBucket,
+    sourcePoolVersion: source.sourcePoolVersion,
+    compatibility: source.compatibility,
     headers: source.headers,
     subtitles: source.subtitles,
     drm: source.drm,

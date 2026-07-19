@@ -115,30 +115,28 @@ class _DetailsPageState extends State<DetailsPage>
       _detailsFuture = _loadDetailsMetadata(widget.item);
       _recommendationsFuture = widget.item.type.isLive
           ? Future<List<CatalogItem>>.value(const <CatalogItem>[])
-          : _detailsFuture
-                .then((details) {
-                  final merged = _mergeDetailsMetadataArtwork(
-                    details.item,
-                    widget.item,
-                  );
-                  return _loadRecommendations(
-                    _recommendationSourceForDetails(merged, details),
-                  );
-                })
-                .catchError((Object error) {
-                  DiagnosticLog.add(
-                    'details recommendations skipped reason=metadata_unavailable id=${widget.item.id} error=$error',
-                  );
-                  return const <CatalogItem>[];
-                });
+          : _detailsFuture.then((details) {
+              final merged = _mergeDetailsMetadataArtwork(
+                details.item,
+                widget.item,
+              );
+              return _loadRecommendations(
+                _recommendationSourceForDetails(merged, details),
+              );
+            }).catchError((Object error) {
+              DiagnosticLog.add(
+                'details recommendations skipped reason=metadata_unavailable id=${widget.item.id} error=$error',
+              );
+              return const <CatalogItem>[];
+            });
       _configFuture = widget.item.type.isLive
           ? Future<StreamConfig?>.value(null)
           : StreamApi.cachedConfig == null
-          ? _api
-                .config()
-                .then<StreamConfig?>((config) => config)
-                .catchError((_) => null)
-          : Future<StreamConfig?>.value(StreamApi.cachedConfig);
+              ? _api
+                  .config()
+                  .then<StreamConfig?>((config) => config)
+                  .catchError((_) => null)
+              : Future<StreamConfig?>.value(StreamApi.cachedConfig);
       _trailersFuture = widget.item.type.isLive
           ? Future.value(const <TrailerItem>[])
           : _detailsFuture.then(
@@ -149,13 +147,11 @@ class _DetailsPageState extends State<DetailsPage>
     }
     _scrollController.addListener(_handleScroll);
     if (widget.autoOpenTrailer) {
-      _trailersFuture
-          .then((trailers) {
-            if (mounted && trailers.isNotEmpty) {
-              unawaited(_openTrailer(widget.item.name, trailers));
-            }
-          })
-          .catchError((_) => const <TrailerItem>[]);
+      _trailersFuture.then((trailers) {
+        if (mounted && trailers.isNotEmpty) {
+          unawaited(_openTrailer(widget.item.name, trailers));
+        }
+      }).catchError((_) => const <TrailerItem>[]);
     }
   }
 
@@ -224,9 +220,8 @@ class _DetailsPageState extends State<DetailsPage>
     if (details.item.description?.trim().isNotEmpty == true) score += 2;
     if (details.item.genres.isNotEmpty) score += 1;
     if (details.runtime?.trim().isNotEmpty == true) score += 1;
-    score += details.videos.isEmpty
-        ? 0
-        : 10 + details.videos.length.clamp(0, 40);
+    score +=
+        details.videos.isEmpty ? 0 : 10 + details.videos.length.clamp(0, 40);
     return score;
   }
 
@@ -428,7 +423,7 @@ class _DetailsPageState extends State<DetailsPage>
     String title,
     List<NativePlaybackRequest> sources, {
     required Future<List<PlaybackSource>> Function(String providerId)
-    resolveNativeProvider,
+        resolveNativeProvider,
     Future<List<PlaybackSubtitle>> Function()? resolveSubtitles,
     String? logoUrl,
     CatalogItem? progressItem,
@@ -529,9 +524,8 @@ class _DetailsPageState extends State<DetailsPage>
 
   void _rememberTemporaryResolverBlock(String launchKey, Object error) {
     if (!_isTemporaryResolverBlock(error)) return;
-    final retryAfterSeconds = error is StreamApiTemporaryBlockException
-        ? error.retryAfterSeconds
-        : 0;
+    final retryAfterSeconds =
+        error is StreamApiTemporaryBlockException ? error.retryAfterSeconds : 0;
     _playbackRetryAfterByKey[launchKey] = DateTime.now().add(
       Duration(
         seconds: retryAfterSeconds > 0
@@ -655,7 +649,7 @@ class _DetailsPageState extends State<DetailsPage>
     PlaybackResult result, {
     required AdBlockConfig adBlock,
     required Future<List<PlaybackSource>> Function(String providerId)
-    resolveNativeProvider,
+        resolveNativeProvider,
     Future<List<PlaybackSubtitle>> Function()? resolveSubtitles,
     String? logoUrl,
     String? artworkUrl,
@@ -718,7 +712,7 @@ class _DetailsPageState extends State<DetailsPage>
       onNextEpisode: nextEpisode == null || progressItem == null
           ? null
           : () =>
-                _buildNativeNextEpisode(progressItem, nextEpisode, episodeList),
+              _buildNativeNextEpisode(progressItem, nextEpisode, episodeList),
       liveMode: liveMode,
       rewardedAdReason: rewardedAdReason,
     );
@@ -739,7 +733,7 @@ class _DetailsPageState extends State<DetailsPage>
     String title,
     List<PlaybackSource> sources, {
     required Future<List<PlaybackSource>> Function(String providerId)
-    resolveNativeProvider,
+        resolveNativeProvider,
   }) async {
     final settings = AppState.playerBehaviorSettings.value;
     final directSources = <PlaybackSource>[
@@ -754,7 +748,8 @@ class _DetailsPageState extends State<DetailsPage>
           directSources.addAll(
             (await resolveNativeProvider(
               source.providerId,
-            )).where(_externalPlayerSourceUsable),
+            ))
+                .where(_externalPlayerSourceUsable),
           );
         } catch (error) {
           DiagnosticLog.add(
@@ -788,8 +783,7 @@ class _DetailsPageState extends State<DetailsPage>
       DiagnosticLog.add(
         'external player open package=$packageLabel provider=${source.providerId} quality=${source.quality ?? 'unknown'}',
       );
-      final opened =
-          await _externalPlayerChannel.invokeMethod<bool>('open', {
+      final opened = await _externalPlayerChannel.invokeMethod<bool>('open', {
             'url': handoffUrl,
             'packageName': settings.externalPlayerPackage,
             'activityName': settings.externalPlayerActivity,
@@ -870,7 +864,7 @@ class _DetailsPageState extends State<DetailsPage>
     String title,
     List<PlaybackSource> sources, {
     required Future<List<PlaybackSource>> Function(String providerId)
-    resolveNativeProvider,
+        resolveNativeProvider,
     Future<List<PlaybackSubtitle>> Function()? resolveSubtitles,
     String? logoUrl,
     CatalogItem? progressItem,
@@ -901,14 +895,13 @@ class _DetailsPageState extends State<DetailsPage>
         .toList();
     final useAddonOnly =
         AppState.userAddons.value.any((addon) => addon.active) &&
-        addonProviderIds.isNotEmpty;
+            addonProviderIds.isNotEmpty;
     final defaultProviderSelection = _defaultNativeProviderSelectionForPlayback(
       playbackKey: playbackKey,
       mediaKey: progressItem?.id,
       initialProviderIds: initialByProvider.keys.toSet(),
       hasAddonSources: addonProviderIds.isNotEmpty,
-      useAddonOnly:
-          useAddonOnly ||
+      useAddonOnly: useAddonOnly ||
           publicIptvProviderIds.isNotEmpty ||
           personalProviderIds.isNotEmpty,
     );
@@ -916,9 +909,8 @@ class _DetailsPageState extends State<DetailsPage>
       playbackKey,
       resolvedSourcesByProvider: initialByProvider,
     );
-    final verifiedCacheProviderIds = verifiedCacheRequests
-        .map((request) => request.providerId)
-        .toSet();
+    final verifiedCacheProviderIds =
+        verifiedCacheRequests.map((request) => request.providerId).toSet();
     final prioritizedResolvedProviderIds = <String>{
       ...verifiedCacheProviderIds,
       ...personalProviderIds,
@@ -1057,7 +1049,7 @@ class _DetailsPageState extends State<DetailsPage>
     }
     if (providerIds.isEmpty) return const <NativePlaybackRequest>[];
     DiagnosticLog.add(
-      'native verified request seed key=$playbackKey providers=${providerIds.map(_nativeProviderDiagnosticLabel).join('>')}',
+      'native verified request seed key=[redacted] providers=${providerIds.map(_nativeProviderDiagnosticLabel).join('>')}',
     );
     return <NativePlaybackRequest>[
       for (final providerId in providerIds)
@@ -1074,7 +1066,7 @@ class _DetailsPageState extends State<DetailsPage>
   }) {
     if (!hasVerifiedSource) return false;
     _activateSingleUserAddonIfItIsTheOnlySource();
-    return AppState.userAddons.value.any((addon) => addon.active);
+    return true;
   }
 
   _DefaultNativeProviderSelection _defaultNativeProviderSelectionForPlayback({
@@ -1105,7 +1097,7 @@ class _DetailsPageState extends State<DetailsPage>
     }
     if (preview.isEmpty) {
       DiagnosticLog.add(
-        'native provider scan skipped key=${playbackKey ?? mediaKey ?? 'none'} reason=no_resolved_sources total=${providerIds.length}',
+        'native provider scan skipped key=[redacted] reason=no_resolved_sources total=${providerIds.length}',
       );
       return const _DefaultNativeProviderSelection(
         providerIds: <String>[],
@@ -1113,7 +1105,7 @@ class _DetailsPageState extends State<DetailsPage>
       );
     }
     DiagnosticLog.add(
-      'native provider scan resolved-only key=${playbackKey ?? mediaKey ?? 'none'} initial=${initialProviderIds.length} first=${preview.map(_nativeProviderDiagnosticLabel).join('>')} total=${providerIds.length}',
+      'native provider scan resolved-only key=[redacted] initial=${initialProviderIds.length} first=${preview.map(_nativeProviderDiagnosticLabel).join('>')} total=${providerIds.length}',
     );
     return _DefaultNativeProviderSelection(
       providerIds: preview,
@@ -1132,9 +1124,8 @@ class _DetailsPageState extends State<DetailsPage>
     final launchStopwatch = Stopwatch()..start();
     final basePlaybackKey = item.id;
     try {
-      final cacheBasePlaybackKey = item.type.isLive
-          ? 'liveTv:$basePlaybackKey'
-          : basePlaybackKey;
+      final cacheBasePlaybackKey =
+          item.type.isLive ? 'liveTv:$basePlaybackKey' : basePlaybackKey;
       var playbackKey = _verifiedPlaybackKeyFor(cacheBasePlaybackKey);
       final hasVerifiedSource = playbackKey != null;
       final diagnosticType = item.type.isLive ? 'liveTv' : 'movie';
@@ -1143,21 +1134,22 @@ class _DetailsPageState extends State<DetailsPage>
       );
       if (hasVerifiedSource) {
         DiagnosticLog.add(
-          'details playback using verified source cache key=$playbackKey',
+          'details playback has verified source cache key=[redacted]',
         );
       }
       final shouldResolveFreshSources =
           _shouldResolveFreshSourcesWithVerifiedCache(
-            hasVerifiedSource: hasVerifiedSource,
-          );
-      final result = hasVerifiedSource && !shouldResolveFreshSources
-          ? _emptyPlaybackResult
-          : await _resolveMovieForActiveSources(item);
+        hasVerifiedSource: hasVerifiedSource,
+      );
+      if (hasVerifiedSource && !shouldResolveFreshSources) {
+        DiagnosticLog.add(
+          'details playback using verified source cache without fresh resolve key=[redacted]',
+        );
+      }
+      final result = await _resolveMovieForActiveSources(item);
       playbackKey ??= _playbackCacheKeyForResult(cacheBasePlaybackKey, result);
       if (!mounted) return;
-      final config = hasVerifiedSource && !shouldResolveFreshSources
-          ? null
-          : await _configFuture;
+      final config = await _configFuture;
       if (!mounted) return;
       final playbackMetadataItem = await _playbackMetadataItem(item);
       if (!mounted) return;
@@ -1177,9 +1169,8 @@ class _DetailsPageState extends State<DetailsPage>
         playbackKey: playbackKey,
         progressSubtitle: item.type.isLive ? null : item.subtitle,
         liveMode: item.type.isLive,
-        rewardedAdReason: item.type.isLive
-            ? 'live_tv_playback'
-            : 'movie_watch_now',
+        rewardedAdReason:
+            item.type.isLive ? 'live_tv_playback' : 'movie_watch_now',
       );
       DiagnosticLog.add(
         'details playback launch ok type=$diagnosticType id=${item.id} elapsed=${launchStopwatch.elapsedMilliseconds}ms',
@@ -1216,26 +1207,27 @@ class _DetailsPageState extends State<DetailsPage>
       );
       if (hasVerifiedSource) {
         DiagnosticLog.add(
-          'details playback using verified source cache key=$playbackKey',
+          'details playback has verified source cache key=[redacted]',
         );
       }
       final shouldResolveFreshSources =
           _shouldResolveFreshSourcesWithVerifiedCache(
-            hasVerifiedSource: hasVerifiedSource,
-          );
-      final result = hasVerifiedSource && !shouldResolveFreshSources
-          ? _emptyPlaybackResult
-          : await _resolveEpisodeForActiveSources(
-              item,
-              season: season,
-              episode: episode,
-              episodeItem: effectiveStartEpisode,
-            );
+        hasVerifiedSource: hasVerifiedSource,
+      );
+      if (hasVerifiedSource && !shouldResolveFreshSources) {
+        DiagnosticLog.add(
+          'details playback using verified source cache without fresh resolve key=[redacted]',
+        );
+      }
+      final result = await _resolveEpisodeForActiveSources(
+        item,
+        season: season,
+        episode: episode,
+        episodeItem: effectiveStartEpisode,
+      );
       playbackKey ??= _playbackCacheKeyForResult(basePlaybackKey, result);
       if (!mounted) return;
-      final config = hasVerifiedSource && !shouldResolveFreshSources
-          ? null
-          : await _configFuture;
+      final config = await _configFuture;
       if (!mounted) return;
       final playbackMetadataItem = await _playbackMetadataItem(item);
       if (!mounted) return;
@@ -1297,26 +1289,27 @@ class _DetailsPageState extends State<DetailsPage>
       );
       if (hasVerifiedSource) {
         DiagnosticLog.add(
-          'details playback using verified source cache key=$playbackKey',
+          'details playback has verified source cache key=[redacted]',
         );
       }
       final shouldResolveFreshSources =
           _shouldResolveFreshSourcesWithVerifiedCache(
-            hasVerifiedSource: hasVerifiedSource,
-          );
-      final result = hasVerifiedSource && !shouldResolveFreshSources
-          ? _emptyPlaybackResult
-          : await _resolveEpisodeForActiveSources(
-              item,
-              season: season,
-              episode: episode,
-              episodeItem: _episodeFor(episodes, season, episode),
-            );
+        hasVerifiedSource: hasVerifiedSource,
+      );
+      if (hasVerifiedSource && !shouldResolveFreshSources) {
+        DiagnosticLog.add(
+          'details playback using verified source cache without fresh resolve key=[redacted]',
+        );
+      }
+      final result = await _resolveEpisodeForActiveSources(
+        item,
+        season: season,
+        episode: episode,
+        episodeItem: _episodeFor(episodes, season, episode),
+      );
       playbackKey ??= _playbackCacheKeyForResult(basePlaybackKey, result);
       if (!mounted) return;
-      final config = hasVerifiedSource && !shouldResolveFreshSources
-          ? null
-          : await _configFuture;
+      final config = await _configFuture;
       if (!mounted) return;
       final playbackMetadataItem = await _playbackMetadataItem(item);
       if (!mounted) return;
@@ -1409,11 +1402,9 @@ class _DetailsPageState extends State<DetailsPage>
     required Stopwatch stopwatch,
   }) async {
     Object? lastError;
-    for (
-      var attempt = 0;
-      attempt <= _liveTvResolveRetryDelays.length;
-      attempt++
-    ) {
+    for (var attempt = 0;
+        attempt <= _liveTvResolveRetryDelays.length;
+        attempt++) {
       if (attempt > 0) {
         final delay = _liveTvResolveRetryDelays[attempt - 1];
         DiagnosticLog.add(
@@ -1584,8 +1575,6 @@ class _DetailsPageState extends State<DetailsPage>
       ))
         'addon:${addon.id}:$base',
       'builtin:$base',
-      // Compatibility for verified sources cached before namespacing existed.
-      base,
     ];
   }
 
@@ -1618,8 +1607,7 @@ class _DetailsPageState extends State<DetailsPage>
     int episode,
   ) {
     if (episodes.isEmpty) return null;
-    final sorted = [...episodes]
-      ..sort((a, b) {
+    final sorted = [...episodes]..sort((a, b) {
         final seasonCompare = a.season.compareTo(b.season);
         if (seasonCompare != 0) return seasonCompare;
         return a.episode.compareTo(b.episode);
@@ -1665,17 +1653,15 @@ class _DetailsPageState extends State<DetailsPage>
     final hasVerifiedSource = playbackKey != null;
     if (hasVerifiedSource) {
       DiagnosticLog.add(
-        'details next episode using verified source cache key=$playbackKey',
+        'details next episode has verified source cache key=[redacted]',
       );
     }
-    final result = hasVerifiedSource
-        ? _emptyPlaybackResult
-        : await _resolveEpisodeForActiveSources(
-            item,
-            season: episode.season,
-            episode: episode.episode,
-            episodeItem: episode,
-          );
+    final result = await _resolveEpisodeForActiveSources(
+      item,
+      season: episode.season,
+      episode: episode.episode,
+      episodeItem: episode,
+    );
     playbackKey ??= _playbackCacheKeyForResult(basePlaybackKey, result);
     final sources = _orderSources(_nativeEligibleSources(result.sources));
     if (sources.length != result.sources.length) {
@@ -1697,7 +1683,7 @@ class _DetailsPageState extends State<DetailsPage>
         .toList();
     final useAddonOnly =
         AppState.userAddons.value.any((addon) => addon.active) &&
-        addonProviderIds.isNotEmpty;
+            addonProviderIds.isNotEmpty;
     final defaultProviderSelection = _defaultNativeProviderSelectionForPlayback(
       playbackKey: playbackKey,
       mediaKey: basePlaybackKey,
@@ -1707,10 +1693,10 @@ class _DetailsPageState extends State<DetailsPage>
     );
     final verifiedCacheRequests = _verifiedCacheProviderRequestsFor(
       playbackKey,
+      resolvedSourcesByProvider: initialByProvider,
     );
-    final verifiedCacheProviderIds = verifiedCacheRequests
-        .map((request) => request.providerId)
-        .toSet();
+    final verifiedCacheProviderIds =
+        verifiedCacheRequests.map((request) => request.providerId).toSet();
     final prioritizedResolvedProviderIds = <String>{
       ...verifiedCacheProviderIds,
       ...personalProviderIds,
@@ -1805,15 +1791,14 @@ class _DetailsPageState extends State<DetailsPage>
     final episodeKeys = {
       for (final episode in episodes) _episodeProgressKey(item, episode),
     };
-    final entries =
-        progress.values
-            .where(
-              (entry) => episodeKeys.contains(
-                AppState.contentPlaybackKeyFor(item, entry.key),
-              ),
-            )
-            .toList()
-          ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final entries = progress.values
+        .where(
+          (entry) => episodeKeys.contains(
+            AppState.contentPlaybackKeyFor(item, entry.key),
+          ),
+        )
+        .toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
 
     return entries.isNotEmpty ? entries.first : null;
   }
@@ -2034,9 +2019,8 @@ class _DetailsPageState extends State<DetailsPage>
                 stretch: true,
                 titleSpacing: 0,
                 backgroundColor: colorScheme.surface,
-                foregroundColor: _showCollapsedTitle
-                    ? colorScheme.onSurface
-                    : Colors.white,
+                foregroundColor:
+                    _showCollapsedTitle ? colorScheme.onSurface : Colors.white,
                 iconTheme: IconThemeData(
                   color: _showCollapsedTitle
                       ? colorScheme.onSurface
@@ -2135,7 +2119,9 @@ class _DetailsPageState extends State<DetailsPage>
                         JuicrAutoScrollText(
                           text: item.name,
                           height: 34,
-                          style: Theme.of(context).textTheme.headlineSmall
+                          style: Theme.of(context)
+                              .textTheme
+                              .headlineSmall
                               ?.copyWith(fontWeight: FontWeight.w900),
                         ),
                       ],
@@ -2151,13 +2137,11 @@ class _DetailsPageState extends State<DetailsPage>
                           child: _MetadataStrip(item: item, details: details),
                         ),
                         ValueListenableBuilder<
-                          Map<String, CompletedWatchingEntry>
-                        >(
+                            Map<String, CompletedWatchingEntry>>(
                           valueListenable: AppState.completedWatching,
                           builder: (context, completed, _) {
                             return ValueListenableBuilder<
-                              Map<String, ContinueWatchingEntry>
-                            >(
+                                Map<String, ContinueWatchingEntry>>(
                               valueListenable: AppState.continueWatching,
                               builder: (context, progress, _) {
                                 if (!item.type.isPlayableSeries &&
@@ -2172,8 +2156,8 @@ class _DetailsPageState extends State<DetailsPage>
                                             const <EpisodeItem>[],
                                       )
                                     : item.type.isLive
-                                    ? null
-                                    : progress[item.id];
+                                        ? null
+                                        : progress[item.id];
                                 if (entry == null) {
                                   return const SizedBox.shrink();
                                 }
@@ -2187,8 +2171,7 @@ class _DetailsPageState extends State<DetailsPage>
                         ),
                         if (!item.type.isLive)
                           ValueListenableBuilder<
-                            Map<String, CompletedWatchingEntry>
-                          >(
+                              Map<String, CompletedWatchingEntry>>(
                             valueListenable: AppState.completedWatching,
                             builder: (context, completed, _) {
                               final label = _completedSummaryLabel(
@@ -2217,29 +2200,29 @@ class _DetailsPageState extends State<DetailsPage>
                                   Expanded(
                                     child: !item.type.isPlayableSeries
                                         ? ValueListenableBuilder<
-                                            Map<String, CompletedWatchingEntry>
-                                          >(
+                                            Map<String,
+                                                CompletedWatchingEntry>>(
                                             valueListenable:
                                                 AppState.completedWatching,
                                             builder: (context, completed, _) {
                                               final hasCompleted =
                                                   !item.type.isLive &&
-                                                  _completedEntryForItem(
-                                                        completed,
-                                                        item,
-                                                      ) !=
-                                                      null;
+                                                      _completedEntryForItem(
+                                                            completed,
+                                                            item,
+                                                          ) !=
+                                                          null;
                                               final openPrimary =
                                                   _openingPlayback ||
-                                                      !canStartPlayback
-                                                  ? null
-                                                  : () => unawaited(
-                                                      _openMovieFromDetailsPrimary(
-                                                        item,
-                                                        hasCompleted:
-                                                            hasCompleted,
-                                                      ),
-                                                    );
+                                                          !canStartPlayback
+                                                      ? null
+                                                      : () => unawaited(
+                                                            _openMovieFromDetailsPrimary(
+                                                              item,
+                                                              hasCompleted:
+                                                                  hasCompleted,
+                                                            ),
+                                                          );
                                               return GestureDetector(
                                                 behavior:
                                                     HitTestBehavior.opaque,
@@ -2253,8 +2236,8 @@ class _DetailsPageState extends State<DetailsPage>
                                                     ),
                                                     fixedSize:
                                                         const Size.fromHeight(
-                                                          _detailsPrimaryActionHeight,
-                                                        ),
+                                                      _detailsPrimaryActionHeight,
+                                                    ),
                                                     textStyle:
                                                         _detailsPrimaryActionTextStyle,
                                                   ),
@@ -2268,75 +2251,68 @@ class _DetailsPageState extends State<DetailsPage>
                                                       : Icon(
                                                           !canStartPlayback
                                                               ? Icons
-                                                                    .event_available_rounded
+                                                                  .event_available_rounded
                                                               : hasCompleted
-                                                              ? Icons
-                                                                    .replay_rounded
-                                                              : Icons
-                                                                    .play_arrow,
+                                                                  ? Icons
+                                                                      .replay_rounded
+                                                                  : Icons
+                                                                      .play_arrow,
                                                           size:
                                                               _detailsPrimaryActionIconSize,
                                                         ),
-                                                  label:
-                                                      ValueListenableBuilder<
-                                                        Map<
-                                                          String,
-                                                          ContinueWatchingEntry
-                                                        >
-                                                      >(
-                                                        valueListenable: AppState
-                                                            .continueWatching,
-                                                        builder: (context, progress, _) {
-                                                          if (_openingPlayback) {
-                                                            return const Text(
-                                                              'Please wait...',
-                                                            );
-                                                          }
-                                                          if (!canStartPlayback) {
-                                                            return const Text(
-                                                              'Coming soon',
-                                                            );
-                                                          }
-                                                          final hasProgress =
-                                                              !item
-                                                                  .type
-                                                                  .isLive &&
-                                                              progress[item
-                                                                      .id] !=
-                                                                  null;
-                                                          return Text(
-                                                            hasCompleted
-                                                                ? 'Rewatch'
-                                                                : hasProgress
+                                                  label: ValueListenableBuilder<
+                                                      Map<String,
+                                                          ContinueWatchingEntry>>(
+                                                    valueListenable: AppState
+                                                        .continueWatching,
+                                                    builder:
+                                                        (context, progress, _) {
+                                                      if (_openingPlayback) {
+                                                        return const Text(
+                                                          'Please wait...',
+                                                        );
+                                                      }
+                                                      if (!canStartPlayback) {
+                                                        return const Text(
+                                                          'Coming soon',
+                                                        );
+                                                      }
+                                                      final hasProgress = !item
+                                                              .type.isLive &&
+                                                          progress[item.id] !=
+                                                              null;
+                                                      return Text(
+                                                        hasCompleted
+                                                            ? 'Rewatch'
+                                                            : hasProgress
                                                                 ? 'Continue watching'
                                                                 : 'Watch now',
-                                                          );
-                                                        },
-                                                      ),
+                                                      );
+                                                    },
+                                                  ),
                                                 ),
                                               );
                                             },
                                           )
                                         : ValueListenableBuilder<
-                                            Map<String, ContinueWatchingEntry>
-                                          >(
+                                            Map<String, ContinueWatchingEntry>>(
                                             valueListenable:
                                                 AppState.continueWatching,
                                             builder: (context, _, __) {
                                               final episodes =
                                                   details?.videos ??
-                                                  const <EpisodeItem>[];
+                                                      const <EpisodeItem>[];
                                               final entry =
                                                   _latestEpisodeProgress(
-                                                    item,
-                                                    episodes,
-                                                  );
+                                                item,
+                                                episodes,
+                                              );
                                               final resumeEpisode =
                                                   _episodeForProgress(
-                                                    item,
-                                                    episodes,
-                                                    entry,
-                                                  );
+                                                item,
+                                                episodes,
+                                                entry,
+                                              );
                                               final label = entry == null
                                                   ? 'Watch now'
                                                   : _seriesResumeLabel(
@@ -2344,20 +2320,19 @@ class _DetailsPageState extends State<DetailsPage>
                                                       entry,
                                                     );
                                               return FilledButton.tonalIcon(
-                                                onPressed:
-                                                    _openingPlayback ||
+                                                onPressed: _openingPlayback ||
                                                         !canStartPlayback
                                                     ? null
                                                     : () async {
                                                         final launchKey =
                                                             resumeEpisode ==
-                                                                null
-                                                            ? entry?.key ??
-                                                                  '${item.id}:1:1'
-                                                            : _episodeProgressKey(
-                                                                item,
-                                                                resumeEpisode,
-                                                              );
+                                                                    null
+                                                                ? entry?.key ??
+                                                                    '${item.id}:1:1'
+                                                                : _episodeProgressKey(
+                                                                    item,
+                                                                    resumeEpisode,
+                                                                  );
                                                         if (mounted) {
                                                           setState(() {
                                                             _openingEpisodeKey =
@@ -2367,7 +2342,8 @@ class _DetailsPageState extends State<DetailsPage>
                                                         try {
                                                           await _runPlaybackLaunch(
                                                             () async {
-                                                              DiagnosticLog.screen(
+                                                              DiagnosticLog
+                                                                  .screen(
                                                                 context,
                                                                 'Details open series press',
                                                               );
@@ -2402,7 +2378,8 @@ class _DetailsPageState extends State<DetailsPage>
                                                     0,
                                                     _detailsPrimaryActionHeight,
                                                   ),
-                                                  fixedSize: const Size.fromHeight(
+                                                  fixedSize:
+                                                      const Size.fromHeight(
                                                     _detailsPrimaryActionHeight,
                                                   ),
                                                   textStyle:
@@ -2418,11 +2395,12 @@ class _DetailsPageState extends State<DetailsPage>
                                                     : Icon(
                                                         !canStartPlayback
                                                             ? Icons
-                                                                  .event_available_rounded
+                                                                .event_available_rounded
                                                             : entry == null
-                                                            ? Icons.play_arrow
-                                                            : Icons
-                                                                  .history_rounded,
+                                                                ? Icons
+                                                                    .play_arrow
+                                                                : Icons
+                                                                    .history_rounded,
                                                         size:
                                                             _detailsPrimaryActionIconSize,
                                                       ),
@@ -2430,8 +2408,8 @@ class _DetailsPageState extends State<DetailsPage>
                                                   _openingPlayback
                                                       ? 'Please wait...'
                                                       : !canStartPlayback
-                                                      ? 'Coming soon'
-                                                      : label,
+                                                          ? 'Coming soon'
+                                                          : label,
                                                 ),
                                               );
                                             },
@@ -2450,8 +2428,8 @@ class _DetailsPageState extends State<DetailsPage>
                                       elevation: 3,
                                       shadowColor:
                                           JuicrVisual.floatingActionShadow(
-                                            colorScheme,
-                                          ),
+                                        colorScheme,
+                                      ),
                                       shape: const CircleBorder(),
                                       child: IconButton(
                                         tooltip: 'Save and lists',
@@ -2542,7 +2520,9 @@ class _DetailsPageState extends State<DetailsPage>
                             children: [
                               Text(
                                 'Episodes',
-                                style: Theme.of(context).textTheme.titleLarge
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleLarge
                                     ?.copyWith(fontWeight: FontWeight.w900),
                               ),
                               const SizedBox(height: 12),
@@ -2686,9 +2666,8 @@ class _DetailsPageState extends State<DetailsPage>
             stretch: true,
             titleSpacing: 0,
             backgroundColor: colorScheme.surface,
-            foregroundColor: _showCollapsedTitle
-                ? colorScheme.onSurface
-                : Colors.white,
+            foregroundColor:
+                _showCollapsedTitle ? colorScheme.onSurface : Colors.white,
             iconTheme: IconThemeData(
               color: _showCollapsedTitle ? colorScheme.onSurface : Colors.white,
             ),
@@ -2730,7 +2709,9 @@ class _DetailsPageState extends State<DetailsPage>
                   if (item.name.trim().isNotEmpty)
                     Text(
                       item.name,
-                      style: Theme.of(context).textTheme.headlineSmall
+                      style: Theme.of(context)
+                          .textTheme
+                          .headlineSmall
                           ?.copyWith(fontWeight: FontWeight.w900),
                     ),
                   const SizedBox(height: 12),
@@ -2760,7 +2741,9 @@ class _DetailsPageState extends State<DetailsPage>
                             ),
                             child: Text(
                               value,
-                              style: Theme.of(context).textTheme.labelMedium
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelMedium
                                   ?.copyWith(
                                     color: colorScheme.onSurface.withValues(
                                       alpha: 0.76,
@@ -2785,21 +2768,23 @@ class _DetailsPageState extends State<DetailsPage>
                       children: [
                         Text(
                           catalogName,
-                          style: Theme.of(context).textTheme.titleMedium
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleMedium
                               ?.copyWith(fontWeight: FontWeight.w900),
                         ),
                         const SizedBox(height: 6),
                         Text(
                           relinkNeededCount > 0
                               ? relinkNeededCount == 1
-                                    ? '1 local video still needs to be re-picked on this device.'
-                                    : '$relinkNeededCount local video references still need to be re-picked on this device.'
+                                  ? '1 local video still needs to be re-picked on this device.'
+                                  : '$relinkNeededCount local video references still need to be re-picked on this device.'
                               : 'Metadata is visible across Catalog Builder surfaces, but playback remains locked until scoped local playback proof is completed.',
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(
-                                color: colorScheme.onSurfaceVariant,
-                                fontWeight: FontWeight.w700,
-                              ),
+                          style:
+                              Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    color: colorScheme.onSurfaceVariant,
+                                    fontWeight: FontWeight.w700,
+                                  ),
                         ),
                       ],
                     ),
@@ -2827,9 +2812,10 @@ class _DetailsPageState extends State<DetailsPage>
                     Text(
                       item.description!.trim(),
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        height: 1.45,
-                        color: colorScheme.onSurface.withValues(alpha: 0.84),
-                      ),
+                            height: 1.45,
+                            color:
+                                colorScheme.onSurface.withValues(alpha: 0.84),
+                          ),
                     ),
                   ],
                   if (item.genres.isNotEmpty) ...[
@@ -3177,9 +3163,9 @@ class _MetadataStrip extends StatelessWidget {
               child: Text(
                 value,
                 style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.76),
-                  fontWeight: FontWeight.w800,
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.76),
+                      fontWeight: FontWeight.w800,
+                    ),
               ),
             ),
           )
@@ -3245,9 +3231,9 @@ class _ContinueProgressPill extends StatelessWidget {
                     height: 1.1,
                   ),
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: colorScheme.primary,
-                    fontWeight: FontWeight.w900,
-                  ),
+                        color: colorScheme.primary,
+                        fontWeight: FontWeight.w900,
+                      ),
                 ),
               ),
               const SizedBox(width: 10),
@@ -3258,9 +3244,9 @@ class _ContinueProgressPill extends StatelessWidget {
                   height: 1.1,
                 ),
                 style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.72),
-                  fontWeight: FontWeight.w800,
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.72),
+                      fontWeight: FontWeight.w800,
+                    ),
               ),
             ],
           ),
@@ -3525,9 +3511,9 @@ class _HeroMedia extends StatelessWidget {
                                 cacheWidth: posterCacheWidth,
                                 loadingBuilder:
                                     (context, child, loadingProgress) {
-                                      if (loadingProgress == null) return child;
-                                      return const AppSkeletonCard(radius: 10);
-                                    },
+                                  if (loadingProgress == null) return child;
+                                  return const AppSkeletonCard(radius: 10);
+                                },
                                 errorBuilder: (_, __, ___) {
                                   return const ColoredBox(
                                     color: Color(0xFF171A1F),
@@ -3577,42 +3563,38 @@ class _LiveHeroBackdrop extends StatelessWidget {
     return ColoredBox(
       color: const Color(0xFF101116),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(28, 50, 28, 20),
+        padding: const EdgeInsets.fromLTRB(20, 54, 20, 70),
         child: Center(
-          child: FractionallySizedBox(
-            widthFactor: 0.82,
-            heightFactor: 0.74,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: ValueListenableBuilder<String>(
-                valueListenable: AppState.posterImageIntensity,
-                builder: (context, intensity, _) {
-                  return JuicrVisual.posterTone(
-                    intensity,
-                    child: Image.network(
-                      background!,
-                      fit: BoxFit.contain,
-                      cacheWidth: cacheWidth,
-                      loadingBuilder: (context, child, loadingProgress) {
-                        if (loadingProgress == null) return child;
-                        return const AppSkeletonCard(radius: 18);
-                      },
-                      errorBuilder: (_, __, ___) {
-                        return ColoredBox(
-                          color: const Color(0xFF171A1F),
-                          child: Icon(
-                            Icons.live_tv_rounded,
-                            color: colorScheme.onSurface.withValues(
-                              alpha: 0.42,
-                            ),
-                            size: 72,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: ValueListenableBuilder<String>(
+              valueListenable: AppState.posterImageIntensity,
+              builder: (context, intensity, _) {
+                return JuicrVisual.posterTone(
+                  intensity,
+                  child: Image.network(
+                    background!,
+                    fit: BoxFit.contain,
+                    cacheWidth: cacheWidth,
+                    loadingBuilder: (context, child, loadingProgress) {
+                      if (loadingProgress == null) return child;
+                      return const AppSkeletonCard(radius: 18);
+                    },
+                    errorBuilder: (_, __, ___) {
+                      return ColoredBox(
+                        color: const Color(0xFF171A1F),
+                        child: Icon(
+                          Icons.live_tv_rounded,
+                          color: colorScheme.onSurface.withValues(
+                            alpha: 0.42,
                           ),
-                        );
-                      },
-                    ),
-                  );
-                },
-              ),
+                          size: 72,
+                        ),
+                      );
+                    },
+                  ),
+                );
+              },
             ),
           ),
         ),
@@ -3721,8 +3703,7 @@ class _HeroTrailerPlayerState extends State<_HeroTrailerPlayer> {
     return InAppWebViewInitialData(
       baseUrl: WebUri('https://www.youtube-nocookie.com/'),
       historyUrl: WebUri(widget.url),
-      data:
-          '''
+      data: '''
 <!doctype html>
 <html>
   <head>
@@ -4134,8 +4115,7 @@ class _TrailerDialogState extends State<_TrailerDialog> {
     return InAppWebViewInitialData(
       baseUrl: WebUri('https://www.youtube-nocookie.com/'),
       historyUrl: WebUri(_currentUrl),
-      data:
-          '''
+      data: '''
 <!doctype html>
 <html>
   <head>
@@ -4319,9 +4299,9 @@ class _TrailerDialogState extends State<_TrailerDialog> {
                       text: widget.title,
                       height: 22,
                       style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w900,
-                      ),
+                            color: Colors.white,
+                            fontWeight: FontWeight.w900,
+                          ),
                     ),
                   ),
                   IconButton(
@@ -4514,9 +4494,9 @@ class _TrailerFallback extends StatelessWidget {
                 'This trailer cannot be embedded.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w900,
-                ),
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                    ),
               ),
               const SizedBox(height: 6),
               JuicrAutoScrollText(
@@ -4591,9 +4571,10 @@ class _ChipWrap extends StatelessWidget {
                       child: Text(
                         value,
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: colorScheme.onSurface.withValues(alpha: 0.78),
-                          fontWeight: FontWeight.w700,
-                        ),
+                              color:
+                                  colorScheme.onSurface.withValues(alpha: 0.78),
+                              fontWeight: FontWeight.w700,
+                            ),
                       ),
                     ),
                   ),
@@ -4621,9 +4602,9 @@ class _DescriptionBlock extends StatelessWidget {
       child: Text(
         text,
         style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-          color: colorScheme.onSurface.withValues(alpha: 0.76),
-          height: 1.5,
-        ),
+              color: colorScheme.onSurface.withValues(alpha: 0.76),
+              height: 1.5,
+            ),
       ),
     );
   }
@@ -4645,8 +4626,7 @@ class _RecommendationsSection extends StatelessWidget {
     return FutureBuilder<List<CatalogItem>>(
       future: future,
       builder: (context, snapshot) {
-        final loading =
-            snapshot.connectionState == ConnectionState.waiting ||
+        final loading = snapshot.connectionState == ConnectionState.waiting ||
             snapshot.connectionState == ConnectionState.active;
         final recommendations = snapshot.data ?? const <CatalogItem>[];
         if (!loading && recommendations.isEmpty) {
@@ -4786,9 +4766,9 @@ class _RecommendationCard extends StatelessWidget {
                   text: item.name,
                   height: 16,
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.88),
-                    fontWeight: FontWeight.w900,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.88),
+                        fontWeight: FontWeight.w900,
+                      ),
                 ),
               ],
             ),
@@ -4911,11 +4891,11 @@ class _PersonCard extends StatelessWidget {
                   ? Center(
                       child: Text(
                         _initialsFor(name),
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(
-                              fontWeight: FontWeight.w900,
-                              color: colorScheme.primary,
-                            ),
+                        style:
+                            Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w900,
+                                  color: colorScheme.primary,
+                                ),
                       ),
                     )
                   : Image.network(
@@ -4926,11 +4906,11 @@ class _PersonCard extends StatelessWidget {
                       errorBuilder: (_, __, ___) => Center(
                         child: Text(
                           _initialsFor(name),
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(
-                                fontWeight: FontWeight.w900,
-                                color: colorScheme.primary,
-                              ),
+                          style:
+                              Theme.of(context).textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.w900,
+                                    color: colorScheme.primary,
+                                  ),
                         ),
                       ),
                     ),
@@ -4943,10 +4923,10 @@ class _PersonCard extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              fontWeight: FontWeight.w700,
-              color: colorScheme.onSurface,
-              height: 1.2,
-            ),
+                  fontWeight: FontWeight.w700,
+                  color: colorScheme.onSurface,
+                  height: 1.2,
+                ),
           ),
         ],
       ),
@@ -5026,9 +5006,11 @@ class _EpisodeListState extends State<_EpisodeList> {
   }
 
   List<int> get _seasonNumbers {
-    final values =
-        _normalizedEpisodes.map((episode) => episode.season).toSet().toList()
-          ..sort();
+    final values = _normalizedEpisodes
+        .map((episode) => episode.season)
+        .toSet()
+        .toList()
+      ..sort();
     return values;
   }
 
@@ -5057,10 +5039,10 @@ class _EpisodeListState extends State<_EpisodeList> {
       return Text(
         'Episodes are not available for this title yet.',
         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-          color: Theme.of(
-            context,
-          ).colorScheme.onSurface.withValues(alpha: 0.68),
-        ),
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurface.withValues(alpha: 0.68),
+            ),
       );
     }
 
@@ -5132,8 +5114,8 @@ class _EpisodeListState extends State<_EpisodeList> {
                               setState(() {
                                 _expandedEpisodeKey =
                                     _expandedEpisodeKey == episodeKey
-                                    ? null
-                                    : episodeKey;
+                                        ? null
+                                        : episodeKey;
                               });
                             },
                             progress: episodeProgress,
@@ -5215,8 +5197,7 @@ class _EpisodeCardState extends State<_EpisodeCard> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final description =
-        (widget.episode.description != null &&
+    final description = (widget.episode.description != null &&
             widget.episode.description!.trim().isNotEmpty)
         ? widget.episode.description!.trim()
         : 'Episode ${widget.episode.episode}';
@@ -5290,12 +5271,12 @@ class _EpisodeCardState extends State<_EpisodeCard> {
                                 builder: (context, constraints) {
                                   final canExpand =
                                       constraints.maxWidth.isFinite &&
-                                      _episodeDescriptionOverflows(
-                                        context: context,
-                                        description: description,
-                                        style: descriptionStyle,
-                                        maxWidth: constraints.maxWidth,
-                                      );
+                                          _episodeDescriptionOverflows(
+                                            context: context,
+                                            description: description,
+                                            style: descriptionStyle,
+                                            maxWidth: constraints.maxWidth,
+                                          );
                                   _setCanExpandDescription(canExpand);
                                   return AnimatedCrossFade(
                                     duration: const Duration(milliseconds: 180),
@@ -5378,9 +5359,9 @@ TextStyle? _episodeDescriptionStyle(
   ColorScheme colorScheme,
 ) {
   return Theme.of(context).textTheme.bodySmall?.copyWith(
-    color: colorScheme.onSurface.withValues(alpha: 0.74),
-    height: 1.22,
-  );
+        color: colorScheme.onSurface.withValues(alpha: 0.74),
+        height: 1.22,
+      );
 }
 
 bool _episodeDescriptionOverflows({
@@ -5427,10 +5408,10 @@ class _EpisodeCompletedPill extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: colorScheme.primary,
-                  fontWeight: FontWeight.w900,
-                  height: 1,
-                ),
+                      color: colorScheme.primary,
+                      fontWeight: FontWeight.w900,
+                      height: 1,
+                    ),
               ),
             ],
           ),
@@ -5471,18 +5452,18 @@ class _EpisodeProgressStatus extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: colorScheme.primary,
-                  fontWeight: FontWeight.w900,
-                ),
+                      color: colorScheme.primary,
+                      fontWeight: FontWeight.w900,
+                    ),
               ),
             ),
             const SizedBox(width: 8),
             Text(
               progressValue >= 0.92 ? 'Almost done' : entry.remainingLabel,
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: colorScheme.onSurface.withValues(alpha: 0.72),
-                fontWeight: FontWeight.w800,
-              ),
+                    color: colorScheme.onSurface.withValues(alpha: 0.72),
+                    fontWeight: FontWeight.w800,
+                  ),
             ),
           ],
         ),
@@ -5533,8 +5514,8 @@ class _EpisodePlayButton extends StatelessWidget {
         tooltip: locked
             ? 'Coming soon'
             : busy
-            ? 'Please wait'
-            : 'Play episode',
+                ? 'Please wait'
+                : 'Play episode',
         onPressed: onPressed,
         color: iconColor,
         visualDensity: VisualDensity.compact,
@@ -5595,11 +5576,11 @@ class _SeasonChip extends StatelessWidget {
               child: Text(
                 label,
                 style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  color: selected
-                      ? colorScheme.primary
-                      : colorScheme.onSurface.withValues(alpha: 0.74),
-                  fontWeight: FontWeight.w800,
-                ),
+                      color: selected
+                          ? colorScheme.primary
+                          : colorScheme.onSurface.withValues(alpha: 0.74),
+                      fontWeight: FontWeight.w800,
+                    ),
               ),
             );
           },
@@ -5617,12 +5598,11 @@ class _InlineError extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final serviceDisabled = message.toLowerCase().contains(
-      'service is currently unavailable',
-    );
+          'service is currently unavailable',
+        );
     final colorScheme = Theme.of(context).colorScheme;
-    final accentColor = serviceDisabled
-        ? colorScheme.primary
-        : const Color(0xFFFF8A80);
+    final accentColor =
+        serviceDisabled ? colorScheme.primary : const Color(0xFFFF8A80);
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: JuicrVisual.elevatedCardDecoration(
@@ -5670,6 +5650,7 @@ String _nativeProviderDiagnosticLabel(String providerId) {
     'popr' => 'Theta',
     'cinesu' => 'Rho',
     'vidapi' => 'Sigma',
+    'xyra' => 'Chi',
     'videasy' => 'Tau',
     'vidfun' => 'Upsilon',
     'flixhq' => 'Phi',

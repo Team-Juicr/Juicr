@@ -594,7 +594,9 @@ class _LibraryPageState extends State<LibraryPage>
                           const localItems = <CatalogItem>[];
                           final completedItems = _dedupeCompletedItems(
                             completed.values.where(
-                              (entry) => !entry.item.type.isLive,
+                              (entry) =>
+                                  !entry.item.type.isLive &&
+                                  _completedEntryLooksCredibleForLibrary(entry),
                             ),
                           );
                           final sections = _LibrarySectionInfo.visibleSections(
@@ -633,9 +635,7 @@ class _LibraryPageState extends State<LibraryPage>
                             if (item.type.isLive) {
                               return (AppState.tvSourcesEnabled.value &&
                                       AppState.publicIptvEnabled.value) ||
-                                  availability.activeLiveTvIds.contains(
-                                    item.id,
-                                  );
+                                  availability.activeLiveTvIds.contains(item.id);
                             }
                             if (item.type == MediaType.music ||
                                 item.type == MediaType.nsfw) {
@@ -2691,13 +2691,20 @@ bool _continueEntryHasCompletedRecord(
   if (completed.isEmpty) return false;
   if (!entry.item.type.isPlayableSeries) {
     return completed.values.any(
-      (completedEntry) => completedEntry.item.id == entry.item.id,
+      (completedEntry) =>
+          _completedEntryLooksCredibleForLibrary(completedEntry) &&
+          completedEntry.item.id == entry.item.id,
     );
   }
   final contentKey = AppState.contentPlaybackKeyFor(entry.item, entry.key);
-  return completed.containsKey(entry.key) ||
-      completed.containsKey(contentKey) ||
+  return (completed.containsKey(entry.key) &&
+          _completedEntryLooksCredibleForLibrary(completed[entry.key]!)) ||
+      (completed.containsKey(contentKey) &&
+          _completedEntryLooksCredibleForLibrary(completed[contentKey]!)) ||
       completed.values.any((completedEntry) {
+        if (!_completedEntryLooksCredibleForLibrary(completedEntry)) {
+          return false;
+        }
         final completedKey = AppState.contentPlaybackKeyFor(
           entry.item,
           completedEntry.key,
@@ -2711,6 +2718,7 @@ _CompletionSummary? _completionSummaryForItem(
   Map<String, CompletedWatchingEntry> completed,
 ) {
   final itemEntries = completed.values.where((entry) {
+    if (!_completedEntryLooksCredibleForLibrary(entry)) return false;
     final contentKey = AppState.contentPlaybackKeyFor(item, entry.key);
     return entry.item.id == item.id ||
         contentKey == item.id ||
@@ -2744,6 +2752,27 @@ _CompletionSummary? _completionSummaryForItem(
     return _CompletionSummary('S${slot.season} E${slot.episode} watched');
   }
   return _CompletionSummary('${sorted.length} episodes watched');
+}
+
+bool _completedEntryLooksCredibleForLibrary(CompletedWatchingEntry entry) {
+  if (entry.item.type.isLive) return false;
+  final duration = entry.durationSeconds;
+  if (duration <= 0) {
+    return true;
+  }
+  final watched = entry.watchedSeconds.clamp(0, duration).toInt();
+  final remainingSeconds = (duration - watched).clamp(0, duration).toInt();
+  final progress = (watched / duration).clamp(0.0, 1.0).toDouble();
+  final nearEndCompletion =
+      progress >= 0.98 || remainingSeconds <= const Duration(minutes: 1).inSeconds;
+  if (nearEndCompletion) return true;
+  final hasCredibleWatch = AppState.hasCredibleCompletionEvidence(
+    durationSeconds: duration,
+    credibleWatchedSeconds: entry.credibleWatchedSeconds > 0
+        ? entry.credibleWatchedSeconds
+        : watched,
+  );
+  return hasCredibleWatch && (progress >= 0.92 || remainingSeconds <= 3 * 60);
 }
 
 List<CompletedWatchingEntry> _dedupeCompletedItems(

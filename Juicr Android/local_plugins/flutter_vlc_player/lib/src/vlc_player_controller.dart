@@ -88,7 +88,13 @@ class VlcPlayerController extends ValueNotifier<VlcPlayerValue> {
   /// This is just exposed for testing. It shouldn't be used by anyone depending
   /// on the plugin.
   @visibleForTesting
-  int? get viewId => _viewId;
+  int? get viewId {
+    try {
+      return _viewId;
+    } catch (_) {
+      return null;
+    }
+  }
 
   ///
   /// The name of the asset is given by the [dataSource] argument and must not be
@@ -357,13 +363,35 @@ class VlcPlayerController extends ValueNotifier<VlcPlayerValue> {
     _onRendererEventListeners.clear();
     _lifeCycleObserver?.dispose();
     _isDisposed = true;
-    await _mediaEventSubscription?.cancel();
+    await _cancelPlatformEventSubscription(_mediaEventSubscription);
     _mediaEventSubscription = null;
-    await _rendererEventSubscription?.cancel();
+    await _cancelPlatformEventSubscription(_rendererEventSubscription);
     _rendererEventSubscription = null;
-    //
-    await vlcPlayerPlatform.dispose(_viewId);
+    final platformViewId = viewId;
+    if (platformViewId != null) {
+      try {
+        await vlcPlayerPlatform.dispose(platformViewId);
+      } on MissingPluginException {
+        // The native VLC view can already be gone when Flutter tears down
+        // after a failed attach or engine fallback.
+      }
+    }
     super.dispose();
+  }
+
+  Future<void> _cancelPlatformEventSubscription(
+    StreamSubscription<dynamic>? subscription,
+  ) async {
+    if (subscription == null) {
+      return;
+    }
+    try {
+      await subscription.cancel();
+    } on MissingPluginException {
+      // Android TV can dispose the platform view before Flutter cancels the
+      // stream during engine fallback or route teardown. The native resources
+      // are already gone, so this is a harmless late cancel.
+    }
   }
 
   /// Notify onInit callback & all registered listeners

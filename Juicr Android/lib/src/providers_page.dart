@@ -84,6 +84,7 @@ class _SettingsPageState extends State<SettingsPage> {
     ApiProvider(id: 'vidrock', name: 'Lambda'),
     ApiProvider(id: 'vidzee', name: 'Mu'),
     ApiProvider(id: 'vidapi', name: 'Sigma'),
+    ApiProvider(id: 'xyra', name: 'Chi'),
     ApiProvider(id: 'videasy', name: 'Tau'),
     ApiProvider(id: 'vidfun', name: 'Upsilon'),
     ApiProvider(id: 'flixhq', name: 'Phi'),

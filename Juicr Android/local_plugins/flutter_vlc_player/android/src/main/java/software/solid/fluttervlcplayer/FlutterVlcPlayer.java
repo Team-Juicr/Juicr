@@ -90,8 +90,8 @@ final class FlutterVlcPlayer implements PlatformView {
         if (isDisposed)
             return;
         //
-        mediaEventChannel.setStreamHandler(null);
-        rendererEventChannel.setStreamHandler(null);
+        mediaEventSink.setDelegate(null);
+        rendererEventSink.setDelegate(null);
         if (mediaPlayer != null) {
             mediaPlayer.stop();
             mediaPlayer.setMedia(null);

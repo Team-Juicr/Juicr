@@ -113,6 +113,13 @@ class PlaybackSource {
     this.quality,
     this.language,
     this.sourceClass = PlaybackSourceClass.direct,
+    this.sourceId,
+    this.mirrorGroupId,
+    this.mirrorRank,
+    this.displayLabel,
+    this.healthBucket,
+    this.sourcePoolVersion,
+    this.compatibility,
     this.headers = const <String, String>{},
     this.subtitles = const <PlaybackSubtitle>[],
     this.drm,
@@ -137,6 +144,17 @@ class PlaybackSource {
       sourceClass: PlaybackSourceClassInfo.fromWireName(
         (json['sourceClass'] ?? json['source_class'])?.toString(),
       ),
+      sourceId: (json['sourceId'] ?? json['source_id'])?.toString(),
+      mirrorGroupId: (json['mirrorGroupId'] ?? json['mirror_group_id'])
+          ?.toString(),
+      mirrorRank: _intValue(json['mirrorRank'] ?? json['mirror_rank']),
+      displayLabel: (json['displayLabel'] ?? json['display_label'])?.toString(),
+      healthBucket: (json['healthBucket'] ?? json['health_bucket'])?.toString(),
+      sourcePoolVersion:
+          (json['sourcePoolVersion'] ?? json['source_pool_version'])
+              ?.toString(),
+      compatibility: (json['compatibility'] ?? json['compatibility_bucket'])
+          ?.toString(),
       headers: _stringMap(json['headers']),
       subtitles: _mapList(
         json['subtitles'],
@@ -155,6 +173,18 @@ class PlaybackSource {
       if (quality != null && quality!.isNotEmpty) 'quality': quality,
       if (language != null && language!.isNotEmpty) 'language': language,
       'sourceClass': sourceClass.wireName,
+      if (sourceId != null && sourceId!.isNotEmpty) 'sourceId': sourceId,
+      if (mirrorGroupId != null && mirrorGroupId!.isNotEmpty)
+        'mirrorGroupId': mirrorGroupId,
+      if (mirrorRank != null) 'mirrorRank': mirrorRank,
+      if (displayLabel != null && displayLabel!.isNotEmpty)
+        'displayLabel': displayLabel,
+      if (healthBucket != null && healthBucket!.isNotEmpty)
+        'healthBucket': healthBucket,
+      if (sourcePoolVersion != null && sourcePoolVersion!.isNotEmpty)
+        'sourcePoolVersion': sourcePoolVersion,
+      if (compatibility != null && compatibility!.isNotEmpty)
+        'compatibility': compatibility,
       if (headers.isNotEmpty) 'headers': headers,
       if (subtitles.isNotEmpty)
         'subtitles': subtitles.map((subtitle) => subtitle.toJson()).toList(),
@@ -169,6 +199,13 @@ class PlaybackSource {
   final String? quality;
   final String? language;
   final PlaybackSourceClass sourceClass;
+  final String? sourceId;
+  final String? mirrorGroupId;
+  final int? mirrorRank;
+  final String? displayLabel;
+  final String? healthBucket;
+  final String? sourcePoolVersion;
+  final String? compatibility;
   final Map<String, String> headers;
   final List<PlaybackSubtitle> subtitles;
   final PlaybackDrm? drm;
@@ -183,6 +220,13 @@ class PlaybackSource {
     String? quality,
     String? language,
     PlaybackSourceClass? sourceClass,
+    String? sourceId,
+    String? mirrorGroupId,
+    int? mirrorRank,
+    String? displayLabel,
+    String? healthBucket,
+    String? sourcePoolVersion,
+    String? compatibility,
     Map<String, String>? headers,
     List<PlaybackSubtitle>? subtitles,
     PlaybackDrm? drm,
@@ -195,6 +239,13 @@ class PlaybackSource {
       quality: quality ?? this.quality,
       language: language ?? this.language,
       sourceClass: sourceClass ?? this.sourceClass,
+      sourceId: sourceId ?? this.sourceId,
+      mirrorGroupId: mirrorGroupId ?? this.mirrorGroupId,
+      mirrorRank: mirrorRank ?? this.mirrorRank,
+      displayLabel: displayLabel ?? this.displayLabel,
+      healthBucket: healthBucket ?? this.healthBucket,
+      sourcePoolVersion: sourcePoolVersion ?? this.sourcePoolVersion,
+      compatibility: compatibility ?? this.compatibility,
       headers: headers ?? this.headers,
       subtitles: subtitles ?? this.subtitles,
       drm: drm ?? this.drm,
@@ -249,6 +300,7 @@ class PlaybackSubtitle {
     required this.label,
     required this.language,
     required this.url,
+    this.provider = '',
     this.format = 'vtt',
     this.isDefault = false,
     this.isForced = false,
@@ -263,6 +315,8 @@ class PlaybackSubtitle {
       label: label.isEmpty ? 'Subtitle' : label,
       language: language,
       url: (json['url'] ?? json['src'] ?? '').toString(),
+      provider: (json['provider'] ?? json['source'] ?? json['sourceKey'] ?? '')
+          .toString(),
       format: (json['format'] ?? 'vtt').toString(),
       isDefault: json['isDefault'] == true || json['default'] == true,
       isForced: json['isForced'] == true || json['forced'] == true,
@@ -275,6 +329,7 @@ class PlaybackSubtitle {
       'label': label,
       'language': language,
       'url': url,
+      'provider': provider,
       'format': format,
       'isDefault': isDefault,
       'isForced': isForced,
@@ -285,6 +340,7 @@ class PlaybackSubtitle {
   final String label;
   final String language;
   final String url;
+  final String provider;
   final String format;
   final bool isDefault;
   final bool isForced;
@@ -498,8 +554,11 @@ List<VisiblePlaybackSourceGroup> groupVisiblePlaybackSources(
   for (final source in rankedSources) {
     if (hasExplicitQuality && playbackQualityLabel(source) == 'Auto') continue;
     if (!seenUrls.add(source.url)) continue;
-    final key =
-        '${playbackQualityLabel(source)}|${playbackSourceLanguageLabel(source) ?? 'unknown'}|${source.sourceClass.wireName}';
+    final mirrorGroupId = source.mirrorGroupId?.trim();
+    final sourcePoolVersion = source.sourcePoolVersion?.trim();
+    final key = mirrorGroupId != null && mirrorGroupId.isNotEmpty
+        ? 'pool:${sourcePoolVersion ?? 'v1'}|$mirrorGroupId'
+        : '${playbackQualityLabel(source)}|${playbackSourceLanguageLabel(source) ?? 'unknown'}|${source.sourceClass.wireName}';
     grouped.putIfAbsent(key, () => <PlaybackSource>[]).add(source);
   }
   for (final variants in grouped.values) {
@@ -556,4 +615,11 @@ Map<String, String> _stringMap(dynamic value) {
       if (entry.key != null && entry.value != null)
         entry.key.toString(): entry.value.toString(),
   };
+}
+
+int? _intValue(dynamic value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value);
+  return null;
 }
