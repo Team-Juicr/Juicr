@@ -3648,6 +3648,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     String? statusMessage,
     _NativePlaybackEngine? engineOverride,
     bool quietRecovery = false,
+    bool saveProgressBeforeOpen = true,
+    bool libVlcManualSeekReopen = false,
   }) async {
     if (_playerClosing) return false;
     if (!_nativePlaybackSupportsSourceClass(source)) {
@@ -3661,9 +3663,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     var p2pLocalStreamReady = false;
     _stopStallWatchdog();
     _openingGuardTimer?.cancel();
-    _trackLastKnownPlaybackPosition();
-    _saveNativeProgress(force: true);
-    await _disposeCurrentController(awaitLibVlcRelease: true);
+    if (saveProgressBeforeOpen) {
+      _trackLastKnownPlaybackPosition();
+      _saveNativeProgress(force: true);
+    }
+    await _disposeCurrentController(
+      awaitLibVlcRelease: true,
+      saveProgress: saveProgressBeforeOpen,
+    );
     _nativeWallClockStartedAt = null;
     _lastSavedSecond = -1;
     _resetPlaybackIntegritySample();
@@ -3679,9 +3686,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final strictManualLibVlc =
         attemptedEngine == _NativePlaybackEngine.libvlc &&
             _manualLibVlcStrictForSource(source);
+    final spendManualLibVlcProofBudget =
+        strictManualLibVlc && !libVlcManualSeekReopen;
     final manualLibVlcNoProofOpensForSource =
         _manualLibVlcNoProofOpensByUrl[source.url] ?? 0;
-    if (strictManualLibVlc &&
+    if (spendManualLibVlcProofBudget &&
         manualLibVlcNoProofOpensForSource >=
             _manualLibVlcSameSourceOpenWithoutProofLimit) {
       _lastOpenFailureMessage = 'libVLC could not open the available source.';
@@ -3690,7 +3699,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return false;
     }
-    if (strictManualLibVlc &&
+    if (spendManualLibVlcProofBudget &&
         _manualLibVlcOpensWithoutProof >=
             _manualLibVlcRouteOpenWithoutProofLimit) {
       _lastOpenFailureMessage = 'libVLC could not open the available sources.';
@@ -3700,12 +3709,16 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return false;
     }
-    if (strictManualLibVlc) {
+    if (spendManualLibVlcProofBudget) {
       _manualLibVlcOpensWithoutProof += 1;
       _manualLibVlcNoProofOpensByUrl[source.url] =
           manualLibVlcNoProofOpensForSource + 1;
       DiagnosticLog.add(
         'native libvlc route open attempt provider=${source.providerId} proof=missing sourceAttempt=${manualLibVlcNoProofOpensForSource + 1} sourceLimit=$_manualLibVlcSameSourceOpenWithoutProofLimit routeAttempt=$_manualLibVlcOpensWithoutProof routeLimit=$_manualLibVlcRouteOpenWithoutProofLimit',
+      );
+    } else if (strictManualLibVlc && libVlcManualSeekReopen) {
+      DiagnosticLog.add(
+        'native libvlc manual seek reopen proof budget skipped provider=${source.providerId} sourceAttempts=$manualLibVlcNoProofOpensForSource routeAttempts=$_manualLibVlcOpensWithoutProof',
       );
     }
     try {
@@ -9067,6 +9080,16 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _lastIntegritySampleAt = DateTime.now();
     _lastIntegrityPosition = to;
     _lastKnownPlaybackPosition = to;
+    _lastCrediblePlaybackPosition = to;
+    _lastCrediblePlaybackPositionAt = _lastIntegritySampleAt;
+    _lastCadencePosition = to;
+    _lastCadenceSampleAt = _lastIntegritySampleAt;
+    _lastWatchdogPosition = to;
+    _resumeProgressAnchorPosition = Duration.zero;
+    _resumeProgressAnchorLogSecond = -1;
+    _rendererRecoveryAnchorPosition = Duration.zero;
+    _rendererRecoveryAnchorUntil = null;
+    _clearPlaybackCadenceUnstableState();
     _untrustedClockProgressSkipLogSecond = -1;
     DiagnosticLog.add(
       'native progress anchor updated reason=manual_seek_anchor source=$reason position=${to.inSeconds}s',
@@ -11796,7 +11819,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             : next;
     _lastWatchdogPosition = clamped;
     _resetTransientPlaybackDebounce();
-    await controller.seekTo(clamped);
+    final sameController = await _seekControllerToPlaybackPosition(
+      controller,
+      clamped,
+      fromPosition: current,
+      reason: 'skip_button',
+      markManualSeek: true,
+    );
+    if (!sameController) {
+      _scheduleControlsHide();
+      return;
+    }
     _markManualSeekForIntegrity(current, clamped, reason: 'skip_button');
     if (mounted && identical(_controller, controller)) {
       setState(() {});
@@ -11815,7 +11848,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final target = duration * fraction.clamp(0, 1);
     _lastWatchdogPosition = target;
     _resetTransientPlaybackDebounce();
-    await controller.seekTo(target);
+    final sameController = await _seekControllerToPlaybackPosition(
+      controller,
+      target,
+      fromPosition: current,
+      reason: 'seekbar',
+      markManualSeek: true,
+    );
+    if (!sameController) {
+      _scheduleControlsHide();
+      return;
+    }
     _markManualSeekForIntegrity(current, target, reason: 'seekbar');
     if (mounted && identical(_controller, controller)) {
       setState(() {});
@@ -11857,6 +11900,90 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         }
       }
     }());
+  }
+
+  Future<bool> _seekControllerToPlaybackPosition(
+    _NativePlaybackController controller,
+    Duration target, {
+    required String reason,
+    Duration? fromPosition,
+    bool markManualSeek = false,
+    bool allowContinuousTsReopen = true,
+  }) async {
+    final localTarget = _libVlcContinuousTsLocalSeekPosition(
+      controller,
+      target,
+    );
+    if (localTarget != null) {
+      if (localTarget != target) {
+        DiagnosticLog.add(
+          'native libvlc continuous-ts seek translated target=${target.inSeconds}s local=${localTarget.inSeconds}s offset=${_libVlcContinuousTsTimelineOffset.inSeconds}s reason=$reason',
+        );
+      }
+      await controller.seekTo(localTarget);
+      return true;
+    }
+
+    final source = _activeSource;
+    if (allowContinuousTsReopen &&
+        source != null &&
+        mounted &&
+        !_playerClosing &&
+        identical(_controller, controller)) {
+      final current = fromPosition ??
+          _bestKnownProgressPosition(
+            controller,
+            _bestKnownProgressDuration(controller),
+          );
+      if (markManualSeek) {
+        _markManualSeekForIntegrity(current, target, reason: reason);
+      }
+      _lastWatchdogPosition = target;
+      _resetTransientPlaybackDebounce();
+      DiagnosticLog.add(
+        'native libvlc continuous-ts seek reopen provider=${source.providerId} target=${target.inSeconds}s offset=${_libVlcContinuousTsTimelineOffset.inSeconds}s reason=libvlc_continuous_ts_seek_reopen source=$reason',
+      );
+      final wasPlaying = controller.isPlaying;
+      final opened = await _openSource(
+        source,
+        resumePosition: target,
+        statusMessage: 'Seeking...',
+        engineOverride: _NativePlaybackEngine.libvlc,
+        saveProgressBeforeOpen: false,
+        libVlcManualSeekReopen: true,
+      );
+      if (opened && !wasPlaying) {
+        await _controller?.pause();
+      }
+      if (mounted && !_playerClosing) {
+        setState(() {
+          _controlsVisible = true;
+          _loading = false;
+          _statusMessage = null;
+        });
+      }
+      return false;
+    }
+
+    await controller.seekTo(target);
+    return true;
+  }
+
+  Duration? _libVlcContinuousTsLocalSeekPosition(
+    _NativePlaybackController controller,
+    Duration target,
+  ) {
+    if (controller.engine != _NativePlaybackEngine.libvlc ||
+        !_libVlcContinuousTsActive ||
+        _libVlcContinuousTsTimelineOffset <= Duration.zero) {
+      return target;
+    }
+    final offset = _libVlcContinuousTsTimelineOffset;
+    if (target < offset - const Duration(seconds: 2)) {
+      return null;
+    }
+    final localTarget = target - offset;
+    return localTarget <= Duration.zero ? Duration.zero : localTarget;
   }
 
   void _toggleLock() {
@@ -13469,9 +13596,18 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     try {
       _lastWatchdogPosition = segment.target;
       _resetTransientPlaybackDebounce();
-      await controller.seekTo(segment.target);
+      final duration = _bestKnownProgressDuration(controller);
+      final current = _bestKnownProgressPosition(controller, duration);
+      final sameController = await _seekControllerToPlaybackPosition(
+        controller,
+        segment.target,
+        fromPosition: current,
+        reason: automatic ? 'auto_skip_segment' : 'skip_segment',
+        markManualSeek: true,
+      );
+      if (!sameController) return;
       _markManualSeekForIntegrity(
-        controller.position,
+        current,
         segment.target,
         reason: automatic ? 'auto_skip_segment' : 'skip_segment',
       );
@@ -13940,7 +14076,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       'native seeking start provider=$providerId position=${target.inSeconds}s',
     );
     try {
-      await controller.seekTo(target).timeout(const Duration(seconds: 4));
+      await _seekControllerToPlaybackPosition(
+        controller,
+        target,
+        reason: 'resume_start',
+        allowContinuousTsReopen: false,
+      ).timeout(const Duration(seconds: 4));
       if (controller.engine == _NativePlaybackEngine.libvlc &&
           controller.duration <= Duration.zero) {
         _resumeProgressAnchorPosition = target;
