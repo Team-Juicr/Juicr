@@ -3966,18 +3966,21 @@ class AppState {
     required double progress,
     required DateTime updatedAt,
     NativePlayerPreferences? nativePreferences,
+    bool absoluteResumePosition = false,
   }) {
     final existing = _continueWatchingSnapshot[contentKey];
-    final watched = math
-        .max(existing?.watchedSeconds ?? 0, watchedSeconds)
+    final watched = (absoluteResumePosition
+            ? watchedSeconds
+            : math.max(existing?.watchedSeconds ?? 0, watchedSeconds))
         .clamp(0, durationSeconds)
         .toInt();
     final credibleWatched = math
         .max(existing?.credibleWatchedSeconds ?? 0, credibleWatchedSeconds)
         .clamp(0, durationSeconds)
         .toInt();
-    final safeProgress = math
-        .max(existing?.progress ?? 0, progress)
+    final safeProgress = (absoluteResumePosition
+            ? progress
+            : math.max(existing?.progress ?? 0, progress))
         .clamp(0.02, 0.98)
         .toDouble();
     return ContinueWatchingEntry(
@@ -4206,6 +4209,7 @@ class AppState {
         progress: progress,
         updatedAt: DateTime.now(),
         nativePreferences: nativePreferences,
+        absoluteResumePosition: true,
       );
     }
     _setContinueWatching(next);
