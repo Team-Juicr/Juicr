@@ -5,6 +5,7 @@ class _TvMainSurface extends StatelessWidget {
     required this.title,
     required this.selectedTab,
     required this.loading,
+    required this.homeCatalogRefreshing,
     required this.error,
     required this.expandedRail,
     required this.rails,
@@ -71,6 +72,7 @@ class _TvMainSurface extends StatelessWidget {
   final String title;
   final int selectedTab;
   final bool loading;
+  final bool homeCatalogRefreshing;
   final String? error;
   final _TvRail? expandedRail;
   final List<_TvRail> rails;
@@ -365,6 +367,9 @@ class _TvMainSurface extends StatelessWidget {
     final heroItem = heroItems.isEmpty ? null : heroItems.first;
     final heroOffset = heroItems.isEmpty ? 0 : 1;
     if (heroItem == null && rails.isEmpty) {
+      if (homeCatalogRefreshing) {
+        return viewportStateSliver(_TvLoadingState(selectedTab: selectedTab));
+      }
       return SliverFillRemaining(
         hasScrollBody: false,
         child: _TvErrorState(
@@ -373,6 +378,8 @@ class _TvMainSurface extends StatelessWidget {
         ),
       );
     }
+    final showPendingHomeRails = rails.isEmpty ||
+        (homeCatalogRefreshing && tvSettings.hasCatalogSource && rails.length < 4);
     return SliverList(
       delegate: SliverChildBuilderDelegate(
         (context, index) {
@@ -423,10 +430,11 @@ class _TvMainSurface extends StatelessWidget {
               ],
             );
           }
-          if (rails.isEmpty) {
+          if (rails.isEmpty ||
+              (showPendingHomeRails && index == rails.length + heroOffset)) {
             return const Padding(
               padding: EdgeInsets.fromLTRB(30, 0, 48, 90),
-              child: _TvPendingHomeRailsSkeleton(),
+              child: _TvPendingHomeRailsSkeleton(railCount: 3),
             );
           }
           final railIndex = index - heroOffset;
@@ -474,9 +482,7 @@ class _TvMainSurface extends StatelessWidget {
             ),
           );
         },
-        childCount: rails.isEmpty && heroItem != null
-            ? 2
-            : rails.length + heroOffset,
+        childCount: rails.length + heroOffset + (showPendingHomeRails ? 1 : 0),
       ),
     );
   }

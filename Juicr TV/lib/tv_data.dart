@@ -569,6 +569,16 @@ class _TvApi {
       });
     }
 
+    final defaultFuture = guarded(
+      _nativePlaybackSessionsForProvider(
+        item,
+        id: id,
+        requestKind: requestKind,
+        season: season,
+        episode: episode,
+        timeout: const Duration(seconds: 20),
+      ),
+    );
     final futures = <Future<List<_PlaybackSession>>>[
       for (final providerId in providerIds)
         guarded(
@@ -579,20 +589,15 @@ class _TvApi {
             requestKind: requestKind,
             season: season,
             episode: episode,
+            quietFailures: true,
           ),
         ),
-      guarded(
-        _nativePlaybackSessionsForProvider(
-          item,
-          id: id,
-          requestKind: requestKind,
-          season: season,
-          episode: episode,
-          timeout: const Duration(seconds: 20),
-        ),
-      ),
     ];
     final results = <List<_PlaybackSession>>[];
+    final defaultSessions = await defaultFuture;
+    if (defaultSessions.isNotEmpty) {
+      results.add(defaultSessions);
+    }
     final stream = Stream<List<_PlaybackSession>>.fromFutures(futures);
     try {
       await for (final providerSessions in stream.timeout(
@@ -624,6 +629,7 @@ class _TvApi {
     required int season,
     required int episode,
     Duration timeout = const Duration(seconds: 16),
+    bool quietFailures = false,
   }) async {
     final query = <String, String>{
       'id': id,
@@ -653,10 +659,12 @@ class _TvApi {
       }
       return sessions.take(8).toList(growable: false);
     } catch (error) {
-      debugPrint(
-        'Juicr TV native playback unavailable '
-        'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
-      );
+      if (!quietFailures) {
+        debugPrint(
+          'Juicr TV native playback unavailable '
+          'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+        );
+      }
       return const <_PlaybackSession>[];
     }
   }
@@ -1455,6 +1463,7 @@ class _TvSubtitle {
     required this.label,
     required this.language,
     required this.url,
+    this.provider = '',
     this.format = 'vtt',
     this.isDefault = false,
     this.isForced = false,
@@ -1470,6 +1479,9 @@ class _TvSubtitle {
       label: label.isEmpty ? 'Subtitle' : label,
       language: language,
       url: url,
+      provider: (json['provider'] ?? json['source'] ?? json['sourceKey'] ?? '')
+          .toString()
+          .trim(),
       format: _tvSubtitleFormatFromJson(json, label: label, url: url),
       isDefault: json['isDefault'] == true || json['default'] == true,
       isForced: json['isForced'] == true || json['forced'] == true,
@@ -1480,6 +1492,7 @@ class _TvSubtitle {
   final String label;
   final String language;
   final String url;
+  final String provider;
   final String format;
   final bool isDefault;
   final bool isForced;
@@ -1490,6 +1503,7 @@ class _TvSubtitle {
       'label': label,
       'language': language,
       'url': url,
+      'provider': provider,
       'format': format,
       'isDefault': isDefault,
       'isForced': isForced,
@@ -2436,6 +2450,8 @@ class _TvSettingsState {
     this.subtitleTextColor = 'White',
     this.subtitleBackground = 'Dim',
     this.subtitleDelayMillis = 0,
+    this.subtitleId,
+    this.subtitleLanguage = 'auto',
     this.nextEpisode = true,
     this.defaultSourceConsentAccepted = false,
     this.showDefaultSourceSettings = false,
@@ -2474,6 +2490,8 @@ class _TvSettingsState {
   final String subtitleTextColor;
   final String subtitleBackground;
   final int subtitleDelayMillis;
+  final String? subtitleId;
+  final String subtitleLanguage;
   final bool nextEpisode;
   final bool defaultSourceConsentAccepted;
   final bool showDefaultSourceSettings;
@@ -2555,6 +2573,11 @@ class _TvSettingsState {
       subtitleDelayMillis: _normalizeTvSubtitleDelayMillis(
         json['subtitleDelayMillis'],
       ),
+      subtitleId: (json['subtitleId'] ?? '').toString().trim().isEmpty
+          ? null
+          : json['subtitleId'].toString().trim(),
+      subtitleLanguage:
+          (json['subtitleLanguage'] ?? 'auto').toString().trim().toLowerCase(),
       nextEpisode: json['nextEpisode'] != false,
       defaultSourceConsentAccepted:
           json['defaultSourceConsentAccepted'] == true,
@@ -2607,6 +2630,8 @@ class _TvSettingsState {
       'subtitleTextColor': subtitleTextColor,
       'subtitleBackground': subtitleBackground,
       'subtitleDelayMillis': subtitleDelayMillis,
+      'subtitleId': subtitleId,
+      'subtitleLanguage': subtitleLanguage,
       'nextEpisode': nextEpisode,
       'defaultSourceConsentAccepted': defaultSourceConsentAccepted,
       'showDefaultSourceSettings': showDefaultSourceSettings,
@@ -2648,6 +2673,9 @@ class _TvSettingsState {
     String? subtitleTextColor,
     String? subtitleBackground,
     int? subtitleDelayMillis,
+    String? subtitleId,
+    bool clearSubtitleId = false,
+    String? subtitleLanguage,
     bool? nextEpisode,
     bool? defaultSourceConsentAccepted,
     bool? showDefaultSourceSettings,
@@ -2708,6 +2736,9 @@ class _TvSettingsState {
       subtitleDelayMillis: _normalizeTvSubtitleDelayMillis(
         subtitleDelayMillis ?? this.subtitleDelayMillis,
       ),
+      subtitleId: clearSubtitleId ? null : subtitleId ?? this.subtitleId,
+      subtitleLanguage:
+          (subtitleLanguage ?? this.subtitleLanguage).trim().toLowerCase(),
       nextEpisode: nextEpisode ?? this.nextEpisode,
       defaultSourceConsentAccepted:
           defaultSourceConsentAccepted ?? this.defaultSourceConsentAccepted,

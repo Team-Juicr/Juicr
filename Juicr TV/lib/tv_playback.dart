@@ -386,7 +386,9 @@ class _TvMedia3PlaybackController {
         'url': session.tvMediaUrl,
         'headers': session.httpHeaders,
         'type': session.sourceType,
-        'sourceClass': 'direct',
+        'sourceClass': session.sourceClass.isEmpty
+            ? 'direct'
+            : session.sourceClass,
         'liveMode': liveMode,
         'subtitleAutoSelect': subtitles.isEmpty ? 'off' : 'selected',
         'subtitleLanguage': subtitles.isEmpty ? '' : subtitles.first.language,
@@ -854,6 +856,10 @@ class _TvPlaybackPage extends StatefulWidget {
     required this.settings,
     required this.subtitles,
     required this.initialSubtitleIndex,
+    this.subtitleId,
+    this.subtitleLanguage = 'auto',
+    this.onSubtitlePreferenceChanged,
+    this.onSubtitleDelayChanged,
     this.resolveSubtitles,
     this.resolveFreshSessions,
     this.onProgress,
@@ -871,6 +877,11 @@ class _TvPlaybackPage extends StatefulWidget {
   final _TvSettingsState settings;
   final List<_TvSubtitle> subtitles;
   final int initialSubtitleIndex;
+  final String? subtitleId;
+  final String subtitleLanguage;
+  final Future<void> Function(String? subtitleId, String subtitleLanguage)?
+      onSubtitlePreferenceChanged;
+  final Future<void> Function(int subtitleDelayMillis)? onSubtitleDelayChanged;
   final Future<List<_TvSubtitle>> Function()? resolveSubtitles;
   final Future<List<_PlaybackSession>> Function()? resolveFreshSessions;
   final void Function(int season, int episode, _TvPlaybackProgress progress)?
@@ -935,6 +946,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   DateTime _lastPlaybackDialogClosedAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _loadingStatus = 'Preparing playback sources...';
   int _playbackGeneration = 0;
+  int _startupAttemptGeneration = 0;
   late final bool _autoplayNextEpisode = widget.settings.nextEpisode;
   late bool _captionsEnabled;
   bool _autoNextQueued = false;
@@ -995,6 +1007,12 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _episode = widget.initialEpisode;
     _subtitles = widget.subtitles.toList(growable: false);
     _subtitleIndex = widget.initialSubtitleIndex;
+    final preferredSubtitleId = widget.subtitleId?.trim();
+    if (preferredSubtitleId != null && preferredSubtitleId.isNotEmpty) {
+      _subtitleIndex = _subtitles.indexWhere(
+        (subtitle) => subtitle.id == preferredSubtitleId,
+      );
+    }
     final canUseSubtitles = widget.settings.hasSubtitleSource;
     if (_subtitleIndex < 0 &&
         _subtitles.isNotEmpty &&
@@ -1209,6 +1227,11 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
 
   bool _isPlaybackGenerationActive(int generation) {
     return mounted && generation == _playbackGeneration;
+  }
+
+  bool _isPlaybackStartupAttemptActive(int generation, int startupAttempt) {
+    return _isPlaybackGenerationActive(generation) &&
+        startupAttempt == _startupAttemptGeneration;
   }
 
   void _updatePlaybackLoadingStatus(String status) {
@@ -2151,6 +2174,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _PlaybackSession session,
     _TvPlaybackEngine engine,
     int generation,
+    int startupAttempt,
     Duration resumePosition,
   ) async {
     final startedAt = DateTime.now();
@@ -2207,7 +2231,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
           relayProof: relayProof,
         ),
     };
-    if (!_isPlaybackGenerationActive(generation)) {
+    if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
       await relay?.stop();
       await controller.dispose();
       throw const _TvPlaybackCanceledException();
@@ -2216,15 +2240,15 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     setState(() => _replaceController(controller));
     try {
       await WidgetsBinding.instance.endOfFrame;
-      if (!_isPlaybackGenerationActive(generation)) {
+      if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
         throw const _TvPlaybackCanceledException();
       }
       await Future<void>.delayed(const Duration(milliseconds: 16));
-      if (!_isPlaybackGenerationActive(generation)) {
+      if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
         throw const _TvPlaybackCanceledException();
       }
       await controller.initialize().timeout(const Duration(seconds: 24));
-      if (!_isPlaybackGenerationActive(generation)) {
+      if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
         throw const _TvPlaybackCanceledException();
       }
       await controller.setVideoSizeMode(_videoSize);
@@ -2255,14 +2279,14 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
           _lastKnownPlaybackDuration = controller.value.duration;
         }
       }
-      if (!_isPlaybackGenerationActive(generation)) {
+      if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
         throw const _TvPlaybackCanceledException();
       }
       await controller.play();
       _updatePlaybackLoadingStatus('Confirming playback...');
-      await _verifyStartupProof(controller, engine, generation);
-      await _ensureAutoplayAfterStartup(controller, generation);
-      if (!_isPlaybackGenerationActive(generation)) {
+      await _verifyStartupProof(controller, engine, generation, startupAttempt);
+      await _ensureAutoplayAfterStartup(controller, generation, startupAttempt);
+      if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
         throw const _TvPlaybackCanceledException();
       }
       debugPrint('Juicr TV native playback ready engine=${engine.name}');
@@ -2277,15 +2301,16 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       );
       return controller;
     } catch (error) {
-      if (error is! _TvPlaybackCanceledException) {
+      final startupAttemptStillActive =
+          _isPlaybackStartupAttemptActive(generation, startupAttempt);
+      if (error is! _TvPlaybackCanceledException && startupAttemptStillActive) {
         debugPrint(
           'Juicr TV native playback candidate failed '
           'engine=${engine.name} bucket=${_playbackInitBucket(error)} '
           'errorType=${error.runtimeType} detail=${_safeTvPlaybackError(error)}',
         );
       }
-      if (_isPlaybackGenerationActive(generation) &&
-          identical(_controller, controller)) {
+      if (startupAttemptStillActive && identical(_controller, controller)) {
         setState(() => _replaceController(null));
       }
       if (relay != null && _controller != controller) {
@@ -2366,6 +2391,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   Future<_TvNativePlaybackController> _prepareWithLadder(
     _PlaybackSession session,
     int generation,
+    int startupAttempt,
     int sessionIndex,
     Duration resumePosition,
   ) async {
@@ -2375,7 +2401,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     for (var index = 0; index < engineLadder.length; index += 1) {
       final engine = engineLadder[index];
       try {
-        if (!_isPlaybackGenerationActive(generation)) {
+        if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
           throw const _TvPlaybackCanceledException();
         }
         _updatePlaybackLoadingStatus(
@@ -2385,6 +2411,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
           currentSession,
           engine,
           generation,
+          startupAttempt,
           resumePosition,
         );
       } catch (error) {
@@ -2412,6 +2439,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _TvNativePlaybackController controller,
     _TvPlaybackEngine engine,
     int generation,
+    int startupAttempt,
   ) async {
     final timeout = engine == _TvPlaybackEngine.libvlc
         ? (_isLiveTvPlayback
@@ -2444,9 +2472,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   Future<void> _ensureAutoplayAfterStartup(
     _TvNativePlaybackController controller,
     int generation,
+    int startupAttempt,
   ) async {
     for (var attempt = 0; attempt < 3; attempt += 1) {
-      if (!_isPlaybackGenerationActive(generation)) {
+      if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
         throw const _TvPlaybackCanceledException();
       }
       final value = controller.value;
@@ -2480,6 +2509,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     }
     if (index < 0 || index >= _sessions.length || _switchingSource) return;
     final generation = ++_playbackGeneration;
+    _startupAttemptGeneration += 1;
     setState(() {
       _switchingSource = true;
       _controlsVisible = false;
@@ -2501,12 +2531,22 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         }
         _updatePlaybackLoadingStatus(_sourceLoadingStatus(candidateIndex));
         try {
+          final startupAttempt = ++_startupAttemptGeneration;
           preparedController = await _prepareWithLadder(
             _sessions[candidateIndex],
             generation,
+            startupAttempt,
             candidateIndex,
             resumePosition,
-          ).timeout(const Duration(seconds: 34));
+          ).timeout(
+            const Duration(seconds: 34),
+            onTimeout: () {
+              // Timed-out startup futures may still finish later; invalidate
+              // them so stale startup attempts cannot replace live playback.
+              _startupAttemptGeneration += 1;
+              throw TimeoutException('playback_startup_attempt_timed_out');
+            },
+          );
           if (!_isPlaybackGenerationActive(generation)) {
             await preparedController?.dispose();
             return;
@@ -2596,7 +2636,23 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         _switchingSource) {
       return;
     }
-    await _openSession(index, feedbackLabel: 'Source ${index + 1}');
+    final progress = _currentProgress();
+    final previousValue = _controller?.value ?? _TvPlaybackValue.empty;
+    final wasPaused =
+        previousValue.isInitialized && previousValue.isPlaying != true;
+    await _openSession(
+      index,
+      feedbackLabel: 'Source ${index + 1}',
+      resumePosition: progress.position,
+    );
+    final nextController = _controller;
+    if (wasPaused &&
+        mounted &&
+        nextController != null &&
+        nextController.value.isInitialized &&
+        nextController.value.isPlaying) {
+      await nextController.pause();
+    }
   }
 
   Future<void> _openNextEpisode() async {
@@ -2605,6 +2661,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       return;
     }
     final generation = ++_playbackGeneration;
+    _startupAttemptGeneration += 1;
     final oldController = _controller;
     if (oldController != null && oldController.value.isInitialized) {
       await oldController.pause();
@@ -2633,11 +2690,21 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
               : 'Preparing next episode source ${candidateIndex + 1}/${sessions.length}...',
         );
         try {
+          final startupAttempt = ++_startupAttemptGeneration;
           controller = await _prepareWithLadder(
             sessions[candidateIndex],
             generation,
+            startupAttempt,
             candidateIndex,
             Duration.zero,
+          ).timeout(
+            const Duration(seconds: 34),
+            onTimeout: () {
+              // Timed-out startup futures may still finish later; invalidate
+              // them so stale startup attempts cannot replace live playback.
+              _startupAttemptGeneration += 1;
+              throw TimeoutException('playback_startup_attempt_timed_out');
+            },
           );
           selectedIndex = candidateIndex;
           break;
@@ -2843,7 +2910,19 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         setState(() {
           _subtitles = subtitles;
           _subtitlesLoaded = subtitles.isNotEmpty;
-          if (activateFirst && _subtitleIndex < 0 && subtitles.isNotEmpty) {
+          final preferredSubtitleId = widget.subtitleId?.trim();
+          final preferredIndex = preferredSubtitleId == null ||
+                  preferredSubtitleId.isEmpty
+              ? -1
+              : subtitles.indexWhere(
+                  (subtitle) => subtitle.id == preferredSubtitleId,
+                );
+          if (preferredIndex >= 0) {
+            _subtitleIndex = preferredIndex;
+            _captionsEnabled = true;
+          } else if (activateFirst &&
+              _subtitleIndex < 0 &&
+              subtitles.isNotEmpty) {
             _subtitleIndex = 0;
             _captionsEnabled = true;
           } else if (_subtitleIndex >= subtitles.length) {
@@ -3430,15 +3509,16 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _suppressPlaybackBackBriefly();
     final canUseSubtitles = widget.settings.hasSubtitleSource;
     final captionsAvailable = _subtitles.isNotEmpty && canUseSubtitles;
-    final selectedKey = _captionsEnabled &&
+    final groups = _groupTvSubtitles(_subtitles);
+    final selectedGroupKey = _captionsEnabled &&
             _subtitleIndex >= 0 &&
             _subtitleIndex < _subtitles.length
-        ? _subtitleChoiceKey(_subtitleIndex, _subtitles[_subtitleIndex])
+        ? _tvSubtitleProviderKey(_subtitles[_subtitleIndex])
         : 'off';
-    final selected = await _showPlaybackDialog<String>(
+    final selectedGroup = await _showPlaybackDialog<String>(
       builder: (context) => _TvPlaybackChoiceDialog(
         title: 'Subtitle',
-        selected: selectedKey,
+        selected: selectedGroupKey,
         choices: [
           const _TvPlaybackChoice(
             'Off',
@@ -3446,16 +3526,25 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
             value: 'off',
           ),
           if (captionsAvailable)
-            for (var index = 0; index < _subtitles.length; index++)
+            for (final group in groups)
               _TvPlaybackChoice(
-                _subtitles[index].label,
+                '${group.title} (${group.subtitles.length} available)',
                 Icons.closed_caption_rounded,
-                value: _subtitleChoiceKey(index, _subtitles[index]),
+                value: group.providerKey,
               ),
         ],
       ),
     );
-    if (selected == null || !mounted) return;
+    if (selectedGroup == null || !mounted) return;
+    var selected = selectedGroup;
+    if (selectedGroup != 'off') {
+      final group = groups.firstWhere(
+        (candidate) => candidate.providerKey == selectedGroup,
+      );
+      final childSelection = await _showSubtitleGroupPicker(group);
+      if (childSelection == null || !mounted) return;
+      selected = childSelection;
+    }
     var subtitleIndex = -1;
     if (selected != 'off') {
       for (var index = 0; index < _subtitles.length; index++) {
@@ -3470,6 +3559,13 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     final nextCaptionsEnabled = subtitleIndex >= 0;
     if (wasCaptionsEnabled == nextCaptionsEnabled &&
         previousSubtitleIndex == subtitleIndex) {
+      final activeSubtitle = _selectedSubtitle();
+      final activeLanguage =
+          activeSubtitle?.language.trim().toLowerCase() ?? '';
+      await widget.onSubtitlePreferenceChanged?.call(
+            activeSubtitle?.id,
+            activeLanguage.isEmpty ? widget.subtitleLanguage : activeLanguage,
+          );
       debugPrint(
         'Juicr TV subtitle picker unchanged '
         'available=${_subtitles.length} selected=$subtitleIndex',
@@ -3483,6 +3579,12 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       _controlsVisible = true;
     });
     await _loadSelectedSubtitleCues(allowFallback: false);
+    final activeSubtitle = _selectedSubtitle();
+    final activeLanguage = activeSubtitle?.language.trim().toLowerCase() ?? '';
+    await widget.onSubtitlePreferenceChanged?.call(
+          activeSubtitle?.id,
+          activeLanguage.isEmpty ? widget.subtitleLanguage : activeLanguage,
+        );
     debugPrint(
       'Juicr TV subtitle picker changed '
       'enabled=$_captionsEnabled selected=$_subtitleIndex '
@@ -3492,6 +3594,31 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _showFeedback(
       Icons.closed_caption_rounded,
       _captionsEnabled ? 'Subtitles on' : 'Subtitles off',
+    );
+  }
+
+  Future<String?> _showSubtitleGroupPicker(_TvSubtitleGroup group) {
+    final selectedKey = _captionsEnabled &&
+            _subtitleIndex >= 0 &&
+            _subtitleIndex < _subtitles.length
+        ? _subtitleChoiceKey(_subtitleIndex, _subtitles[_subtitleIndex])
+        : '';
+    return _showPlaybackDialog<String>(
+      builder: (context) => _TvPlaybackChoiceDialog(
+        title: group.title,
+        selected: selectedKey,
+        choices: [
+          for (final subtitle in group.subtitles)
+            _TvPlaybackChoice(
+              subtitle.label,
+              Icons.closed_caption_rounded,
+              value: _subtitleChoiceKey(
+                _subtitles.indexOf(subtitle),
+                subtitle,
+              ),
+            ),
+        ],
+      ),
     );
   }
 
@@ -3579,6 +3706,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       _subtitleDelayMillis = millis.clamp(-20000, 20000).toInt();
       _controlsVisible = true;
     });
+    await widget.onSubtitleDelayChanged?.call(_subtitleDelayMillis);
     refreshSettingsDialog();
     _showFeedback(
       Icons.more_time_rounded,
@@ -5126,6 +5254,67 @@ class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
         ),
     );
   }
+
+}
+
+class _TvSubtitleGroup {
+  const _TvSubtitleGroup({
+    required this.title,
+    required this.providerKey,
+    required this.subtitles,
+  });
+
+  final String title;
+  final String providerKey;
+  final List<_TvSubtitle> subtitles;
+}
+
+List<_TvSubtitleGroup> _groupTvSubtitles(List<_TvSubtitle> subtitles) {
+  final primary = <_TvSubtitle>[];
+  final fallback = <_TvSubtitle>[];
+  for (final subtitle in subtitles) {
+    if (_tvSubtitleProviderKey(subtitle) == 'juicr-subtitle-1') {
+      primary.add(subtitle);
+    } else {
+      fallback.add(subtitle);
+    }
+  }
+  return <_TvSubtitleGroup>[
+    if (primary.isNotEmpty)
+      _TvSubtitleGroup(
+        title: 'Subtitle 1',
+        providerKey: 'juicr-subtitle-1',
+        subtitles: primary,
+      ),
+    if (fallback.isNotEmpty)
+      _TvSubtitleGroup(
+        title: 'Subtitle 2',
+        providerKey: 'juicr-subtitle-2',
+        subtitles: fallback,
+      ),
+  ];
+}
+
+String _tvSubtitleProviderKey(_TvSubtitle subtitle) {
+  final provider = subtitle.provider.trim().toLowerCase();
+  if (provider == 'juicr-subtitle-1' ||
+      provider == 'subtitle-1' ||
+      provider == 'subsense' ||
+      provider == 'subsense.js') {
+    return 'juicr-subtitle-1';
+  }
+  if (provider == 'juicr-subtitle-2' ||
+      provider == 'subtitle-2' ||
+      provider == 'juicr-fallback' ||
+      provider == 'juicr-fallback.js' ||
+      provider == 'fallback') {
+    return 'juicr-subtitle-2';
+  }
+  final id = subtitle.id.trim().toLowerCase();
+  if (id.startsWith('juicr-subtitle-1-') || id.startsWith('subsense-')) {
+    return 'juicr-subtitle-1';
+  }
+  return 'juicr-subtitle-2';
 }
 
 class _TvSubtitleCue {

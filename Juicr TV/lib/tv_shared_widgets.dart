@@ -1116,16 +1116,21 @@ class _TvCatalogSkeletonCard extends StatelessWidget {
 }
 
 class _TvPendingHomeRailsSkeleton extends StatelessWidget {
-  const _TvPendingHomeRailsSkeleton();
+  const _TvPendingHomeRailsSkeleton({this.railCount = 1});
+
+  final int railCount;
 
   @override
   Widget build(BuildContext context) {
-    return const Column(
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _TvShimmerBox(width: 260, height: 28, radius: 8, alpha: 0.44),
-        SizedBox(height: _tvHomeRailGap),
-        _TvHomeRailSkeletonRow(count: 3),
+        for (var index = 0; index < railCount; index++) ...[
+          const _TvShimmerBox(width: 260, height: 28, radius: 8, alpha: 0.44),
+          const SizedBox(height: _tvHomeRailGap),
+          const _TvHomeRailSkeletonRow(count: 3),
+          if (index != railCount - 1) const SizedBox(height: 34),
+        ],
       ],
     );
   }

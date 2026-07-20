@@ -456,6 +456,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   _TvHomeEditorialEdition? _homeEditorial;
   int _selectedTab = 0;
   bool _loading = true;
+  bool _catalogRefreshing = false;
   String? _error;
   _TvItem? _selectedItem;
   _TvRail? _expandedRail;
@@ -874,6 +875,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
 
   Future<void> _loadCatalogInner({required bool force}) async {
     setState(() {
+      _catalogRefreshing = true;
       _loading = !_hasCatalogSnapshot;
       _error = null;
     });
@@ -1182,6 +1184,10 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         _loading = false;
         _error = 'Catalog is unavailable right now. Try again shortly.';
       });
+    } finally {
+      if (mounted && _catalogRefreshing) {
+        setState(() => _catalogRefreshing = false);
+      }
     }
   }
 
@@ -2485,6 +2491,28 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
             _hasUnfinishedPlaybackProgress(item))
           item,
     ];
+  }
+
+  Future<void> _persistSubtitlePreference(
+    String? subtitleId,
+    String subtitleLanguage,
+  ) async {
+    final next = _tvSettings.copyWith(
+      subtitleId: subtitleId,
+      clearSubtitleId: subtitleId == null,
+      subtitleLanguage: subtitleLanguage,
+      subtitles: subtitleId != null,
+    );
+    if (mounted) setState(() => _tvSettings = next);
+    await _persistTvSettings(next);
+  }
+
+  Future<void> _persistSubtitleDelay(int subtitleDelayMillis) async {
+    final next = _tvSettings.copyWith(
+      subtitleDelayMillis: subtitleDelayMillis,
+    );
+    if (mounted) setState(() => _tvSettings = next);
+    await _persistTvSettings(next);
   }
 
   bool _hasUnfinishedPlaybackProgress(_TvItem item) {
@@ -4539,6 +4567,10 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
             settings: _tvSettings,
             subtitles: seededSubtitles,
             initialSubtitleIndex: -1,
+            subtitleId: _tvSettings.subtitleId,
+            subtitleLanguage: _tvSettings.subtitleLanguage,
+            onSubtitlePreferenceChanged: _persistSubtitlePreference,
+            onSubtitleDelayChanged: _persistSubtitleDelay,
             resolveSubtitles: () => _subtitlesForPlayback(
               item,
               season: targetSeason,
@@ -4878,6 +4910,10 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
             settings: _tvSettings,
             subtitles: const <_TvSubtitle>[],
             initialSubtitleIndex: -1,
+            subtitleId: _tvSettings.subtitleId,
+            subtitleLanguage: _tvSettings.subtitleLanguage,
+            onSubtitlePreferenceChanged: _persistSubtitlePreference,
+            onSubtitleDelayChanged: _persistSubtitleDelay,
           ),
         ),
       );
@@ -5008,6 +5044,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
                                 title: _tabItems[_selectedTab].label,
                                 selectedTab: _selectedTab,
                                 loading: _loading,
+                                homeCatalogRefreshing: _catalogRefreshing,
                                 error: _error,
                                 expandedRail: _expandedRail,
                                 rails: _rails,
