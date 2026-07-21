@@ -27,6 +27,7 @@ class _TvPlaybackValue {
     this.size = Size.zero,
     this.aspectRatio = 16 / 9,
     this.errorDescription = '',
+    this.audioSinkErrorCount = 0,
   });
 
   final bool isInitialized;
@@ -38,6 +39,7 @@ class _TvPlaybackValue {
   final Size size;
   final double aspectRatio;
   final String errorDescription;
+  final int audioSinkErrorCount;
 
   static const empty = _TvPlaybackValue();
 }
@@ -479,6 +481,7 @@ class _TvMedia3PlaybackController {
         size: value.size,
         aspectRatio: value.aspectRatio,
         errorDescription: 'media3_view_detached',
+        audioSinkErrorCount: value.audioSinkErrorCount,
       );
       errorBucket = 'detached';
       debugPrint(
@@ -497,6 +500,8 @@ class _TvMedia3PlaybackController {
     final size = width > 0 && height > 0 ? Size(width, height) : Size.zero;
     firstFrameRendered = raw['firstFrameRendered'] == true;
     errorBucket = (raw['errorBucket'] as String?) ?? 'none';
+    final audioSinkErrorCount =
+        (raw['audioSinkErrorCount'] as num?)?.round() ?? 0;
     value = _TvPlaybackValue(
       isInitialized: raw['initialized'] == true,
       isPlaying: raw['playing'] == true,
@@ -514,6 +519,7 @@ class _TvMedia3PlaybackController {
       errorDescription: hasError
           ? ((raw['errorDescription'] as String?) ?? 'media3_error')
           : '',
+      audioSinkErrorCount: audioSinkErrorCount,
     );
     for (final listener in List<VoidCallback>.of(_listeners)) {
       listener();
@@ -649,21 +655,24 @@ class _TvNativePlaybackController extends ChangeNotifier {
         size: raw.size,
         aspectRatio: raw.aspectRatio <= 0 ? 16 / 9 : raw.aspectRatio,
         errorDescription: raw.hasError ? raw.errorDescription ?? '' : '',
+        audioSinkErrorCount: 0,
       );
     }
     final media3 = _media3;
     if (media3 != null) return media3.value;
     final raw = _vlc!.value;
+    final relayDuration = _relayProof?.duration ?? Duration.zero;
     return _TvPlaybackValue(
       isInitialized: raw.isInitialized,
       isPlaying: raw.isPlaying,
       isBuffering: raw.isBuffering,
       isEnded: raw.isEnded,
-      duration: raw.duration,
+      duration: raw.duration > Duration.zero ? raw.duration : relayDuration,
       position: raw.position,
       size: raw.size,
       aspectRatio: raw.aspectRatio <= 0 ? 16 / 9 : raw.aspectRatio,
       errorDescription: raw.hasError ? raw.errorDescription : '',
+      audioSinkErrorCount: 0,
     );
   }
 
@@ -894,6 +903,38 @@ class _TvPlaybackPage extends StatefulWidget {
   State<_TvPlaybackPage> createState() => _TvPlaybackPageState();
 }
 
+const String _tvVideoSizeFit = 'fit';
+const String _tvVideoSizeFill = 'fill';
+const String _tvVideoSizeWide = 'wide';
+const String _tvVideoSizeStretch = 'stretch';
+
+String _normalizeTvVideoSizeMode(String mode) {
+  return switch (mode.trim().toLowerCase()) {
+    'fill' => _tvVideoSizeFill,
+    '16:9' || 'wide' => _tvVideoSizeWide,
+    'stretch' => _tvVideoSizeStretch,
+    _ => _tvVideoSizeFit,
+  };
+}
+
+String _nativeTvVideoSizeModeFor(String mode) {
+  return switch (_normalizeTvVideoSizeMode(mode)) {
+    _tvVideoSizeWide => '16:9',
+    _tvVideoSizeFill => _tvVideoSizeFill,
+    _tvVideoSizeStretch => _tvVideoSizeStretch,
+    _ => _tvVideoSizeFit,
+  };
+}
+
+String _tvVideoSizeLabel(String mode) {
+  return switch (_normalizeTvVideoSizeMode(mode)) {
+    _tvVideoSizeFill => 'Fill',
+    _tvVideoSizeWide => '16:9',
+    _tvVideoSizeStretch => 'Stretch',
+    _ => 'Fit',
+  };
+}
+
 class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   static const Duration _seekStep = Duration(seconds: 15);
   static const Duration _fastSeekStep = Duration(seconds: 1);
@@ -941,7 +982,9 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   bool _closingPlayback = false;
   bool _recoveringRuntimePlayback = false;
   bool _handlingPlaybackFallbackKey = false;
+  bool _playbackDialogCloseInFlight = false;
   int _playbackDialogDepth = 0;
+  NavigatorState? _activePlaybackDialogNavigator;
   DateTime _suppressPlaybackBackUntil = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastPlaybackDialogClosedAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _loadingStatus = 'Preparing playback sources...';
@@ -952,7 +995,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   bool _autoNextQueued = false;
   int _holdSeekDirection = 0;
   double _playbackSpeed = 1.0;
-  String _videoSize = 'Fit';
+  String _videoSize = _tvVideoSizeFit;
   int _season = 1;
   int _episode = 1;
   late int _sessionIndex;
@@ -977,6 +1020,9 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   int _lastProgressCallbackDurationSecond = -1;
   Duration _lastKnownPlaybackPosition = Duration.zero;
   Duration _lastKnownPlaybackDuration = Duration.zero;
+  bool _libVlcContinuousTsActive = false;
+  Duration _libVlcContinuousTsTimelineOffset = Duration.zero;
+  Duration _playbackDisplayTimelineOffset = Duration.zero;
   String? _lastVerifiedSessionUrl;
   int _verifiedSessionMilestone = 0;
   Duration _verifiedSessionProofStartPosition = Duration.zero;
@@ -986,6 +1032,17 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   Duration _runtimeErrorFirstPosition = Duration.zero;
   Timer? _runtimeErrorRecoveryTimer;
   DateTime? _runtimeErrorRecoverySuppressedUntil;
+  Timer? _playbackCadenceTimer;
+  DateTime? _lastCadenceSampleAt;
+  Duration _lastCadencePosition = Duration.zero;
+  Duration _lastCrediblePlaybackPosition = Duration.zero;
+  int _playbackCadenceSamples = 0;
+  int _playbackCadenceJumpEvents = 0;
+  int _playbackCadenceConsecutiveJumpEvents = 0;
+  int _playbackCadenceHealthySamples = 0;
+  bool _playbackCadenceClockUnstable = false;
+  bool _recoveringFromPlaybackCadence = false;
+  DateTime? _lastPlaybackCadenceDriftLogAt;
   FocusNode? _lastPlaybackFocusNode;
   _TvPlaybackFeedback? _feedback;
   TvRemoteDebugSnapshot _remoteDebugSnapshot = const TvRemoteDebugSnapshot(
@@ -1056,6 +1113,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _hideControlsTimer?.cancel();
     _feedbackTimer?.cancel();
     _runtimeErrorRecoveryTimer?.cancel();
+    _stopPlaybackCadenceTimer();
     _stopHoldSeek();
     for (final node in _playbackControlFocusNodes) {
       node.removeListener(_syncLastPlaybackFocusNode);
@@ -1112,6 +1170,17 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     final bucket = tvRemoteInputMapper.bucketForEvent(event);
     if (bucket == null) return false;
     final command = tvPlaybackRemoteActionResolver.commandFor(bucket);
+    if (_hasPlaybackDialogOpen) {
+      if (command == TvPlaybackRemoteCommand.close) {
+        unawaited(_closeTopPlaybackDialog('fallback-key-close'));
+      } else {
+        debugPrint(
+          'Juicr TV playback fallback key ignored while dialog open '
+          'bucket=$bucket depth=$_playbackDialogDepth',
+        );
+      }
+      return true;
+    }
     if (command == TvPlaybackRemoteCommand.close) return false;
 
     final primaryFocus = FocusManager.instance.primaryFocus;
@@ -1182,7 +1251,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     final command = tvPlaybackRemoteActionResolver.commandFor(bucket);
     if (_hasPlaybackDialogOpen) {
       if (command == TvPlaybackRemoteCommand.close) {
-        _ignorePlaybackBackForDialog('native-close');
+        unawaited(_closeTopPlaybackDialog('native-close'));
       } else {
         debugPrint(
           'Juicr TV native remote ignored while playback dialog open '
@@ -1262,11 +1331,64 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     return true;
   }
 
+  bool _shouldSuppressPlaybackBackAfterDialog() {
+    final elapsed = DateTime.now().difference(_lastPlaybackDialogClosedAt);
+    if (elapsed >= Duration.zero && elapsed < const Duration(milliseconds: 900)) {
+      _suppressPlaybackBackBriefly();
+      _showControls();
+      debugPrint(
+        'Juicr TV playback route back suppressed after dialog close '
+        'elapsedMs=${elapsed.inMilliseconds}',
+      );
+      return true;
+    }
+    return false;
+  }
+
   void _ignorePlaybackBackForDialog(String source) {
     debugPrint(
       'Juicr TV playback route back ignored source=$source depth=$_playbackDialogDepth',
     );
     _suppressPlaybackBackBriefly();
+  }
+
+  bool _beginPlaybackDialogClose(String source) {
+    if (!_hasPlaybackDialogOpen || !mounted) return false;
+    if (_playbackDialogCloseInFlight) {
+      debugPrint(
+        'Juicr TV playback dialog close ignored source=$source '
+        'depth=$_playbackDialogDepth inFlight=1',
+      );
+      _suppressPlaybackBackBriefly();
+      return false;
+    }
+    _playbackDialogCloseInFlight = true;
+    _suppressPlaybackBackBriefly();
+    debugPrint(
+      'Juicr TV playback dialog close requested source=$source '
+      'depth=$_playbackDialogDepth',
+    );
+    return true;
+  }
+
+  void _popPlaybackDialog(NavigatorState navigator, String source) {
+    if (!_beginPlaybackDialogClose(source)) return;
+    navigator.pop();
+  }
+
+  NavigatorState _playbackDialogNavigator(BuildContext dialogContext) {
+    return _activePlaybackDialogNavigator ?? Navigator.of(dialogContext);
+  }
+
+  Future<void> _closeTopPlaybackDialog(String source) async {
+    if (!_beginPlaybackDialogClose(source)) return;
+    final navigator =
+        _activePlaybackDialogNavigator ?? Navigator.of(context);
+    if (navigator.canPop()) {
+      navigator.pop();
+    } else {
+      _playbackDialogCloseInFlight = false;
+    }
   }
 
   bool _shouldIgnoreNestedPlaybackDialogPop(String source) {
@@ -1291,12 +1413,40 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     try {
       return await _showTvDialog<T>(
         context: context,
-        builder: builder,
+        builder: (dialogContext) {
+          _activePlaybackDialogNavigator = Navigator.of(dialogContext);
+          return Shortcuts(
+            shortcuts: const <ShortcutActivator, Intent>{
+              SingleActivator(LogicalKeyboardKey.escape): DismissIntent(),
+              SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),
+              SingleActivator(LogicalKeyboardKey.browserBack): DismissIntent(),
+            },
+            child: Actions(
+              actions: {
+                DismissIntent: CallbackAction<DismissIntent>(
+                  onInvoke: (_) {
+                    _popPlaybackDialog(
+                      _playbackDialogNavigator(dialogContext),
+                      'dialog-dismiss',
+                    );
+                    return null;
+                  },
+                ),
+              },
+              child: builder(dialogContext),
+            ),
+          );
+        },
         requestFocus: requestFocus ?? true,
+        useRootNavigator: false,
       );
     } finally {
       _lastPlaybackDialogClosedAt = DateTime.now();
       _playbackDialogDepth = (_playbackDialogDepth - 1).clamp(0, 999).toInt();
+      _playbackDialogCloseInFlight = false;
+      if (_playbackDialogDepth == 0) {
+        _activePlaybackDialogNavigator = null;
+      }
       debugPrint('Juicr TV playback dialog close depth=$_playbackDialogDepth');
       _suppressPlaybackBackBriefly();
     }
@@ -1323,8 +1473,15 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       _closePlaybackUnavailable('Playback is unavailable right now.');
       return;
     }
+    debugPrint(
+      'Juicr TV initial playback session '
+      'index=${_sessionIndex + 1}/${_sessions.length} '
+      '${_safePlaybackSessionFingerprint(_sessions[_sessionIndex])}',
+    );
     _lastKnownPlaybackPosition = Duration.zero;
-    _lastKnownPlaybackDuration = Duration.zero;
+    _lastKnownPlaybackDuration =
+        widget.initialResumeProgress?.duration ?? Duration.zero;
+    _playbackDisplayTimelineOffset = Duration.zero;
     final progress = widget.initialResumeProgress;
     if (progress != null && progress.position > Duration.zero) {
       _initialResumePosition = Duration.zero;
@@ -1375,21 +1532,40 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       return;
     }
     if (continuePlayback &&
-        _canSeekToResumePosition(progress.position, controller.value.duration)) {
+        _canSeekToResumePosition(
+          progress.position,
+          progress.duration > Duration.zero
+              ? progress.duration
+              : controller.value.duration,
+        )) {
       debugPrint(
         'Juicr TV resume prompt accepted '
         'position=${progress.position.inSeconds}s '
-        'duration=${controller.value.duration.inSeconds}s',
+        'duration=${(progress.duration > Duration.zero ? progress.duration : controller.value.duration).inSeconds}s',
       );
-      await controller.seekTo(progress.position);
+      await _seekControllerToPlaybackPosition(
+        controller,
+        progress.position,
+        reason: 'resume_prompt',
+      );
       _lastKnownPlaybackPosition = progress.position;
-      if (controller.value.duration > Duration.zero) {
-        _lastKnownPlaybackDuration = controller.value.duration;
+      _resetPlaybackCadenceState(crediblePosition: progress.position);
+      final resumeDuration =
+          _absolutePlaybackDuration(controller, controller.value);
+      if (resumeDuration > Duration.zero) {
+        _lastKnownPlaybackDuration = resumeDuration;
       }
     } else if (!continuePlayback) {
       debugPrint('Juicr TV resume prompt declined action=start_over');
-      await controller.seekTo(Duration.zero);
+      await _seekControllerToPlaybackPosition(
+        controller,
+        Duration.zero,
+        reason: 'resume_prompt_start_over',
+      );
       _lastKnownPlaybackPosition = Duration.zero;
+      _playbackDisplayTimelineOffset = Duration.zero;
+      _libVlcContinuousTsTimelineOffset = Duration.zero;
+      _resetPlaybackCadenceState(crediblePosition: Duration.zero);
     }
     if (!mounted) return;
     await controller.play();
@@ -1437,6 +1613,20 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _lastProgressCallbackDurationSecond = -1;
     _verifiedSessionProofStartPosition = Duration.zero;
     _verifiedSessionProofStartedAt = null;
+    _resetPlaybackCadenceState(
+      crediblePosition: controller == null
+          ? Duration.zero
+          : _lastKnownPlaybackPosition,
+    );
+    if (controller == null) {
+      _stopPlaybackCadenceTimer();
+    } else {
+      _startPlaybackCadenceTimer();
+    }
+    if (controller?.engine != _TvPlaybackEngine.libvlc) {
+      _libVlcContinuousTsActive = false;
+      _libVlcContinuousTsTimelineOffset = Duration.zero;
+    }
     _resetRuntimePlaybackErrorDebounce();
     controller?.addListener(_handlePlaybackProgressTick);
   }
@@ -1467,7 +1657,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         !value.isInitialized ||
         !value.isPlaying ||
         value.errorDescription.isNotEmpty ||
-        value.size == Size.zero) {
+        value.size == Size.zero ||
+        value.audioSinkErrorCount > 0 ||
+        !_hasSanePlaybackGeometry(value) ||
+        _playbackCadenceClockUnstable) {
       return;
     }
     final session = _sessions[_sessionIndex];
@@ -1543,9 +1736,17 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       sourceType: session.sourceType,
       sourceClass: session.sourceClass,
       positionSeconds:
-          (feedbackValue?.position ?? progress.position).inSeconds,
+          (controller != null && feedbackValue != null
+                  ? _stablePlaybackPosition(
+                      _absolutePlaybackPosition(controller, feedbackValue),
+                    )
+                  : progress.position)
+              .inSeconds,
       durationSeconds:
-          (feedbackValue?.duration ?? progress.duration).inSeconds,
+          (controller != null && feedbackValue != null
+                  ? _absolutePlaybackDuration(controller, feedbackValue)
+                  : progress.duration)
+              .inSeconds,
       sourceCount: _sessions.length,
       startupMs: startupMs,
     );
@@ -1575,23 +1776,29 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _runtimeErrorRecoveryTimer?.cancel();
     _runtimeErrorRecoveryTimer = null;
     if (!value.isInitialized) return;
-    if (value.position > Duration.zero) {
-      _lastKnownPlaybackPosition = value.position;
+    final rawPosition = _absolutePlaybackPosition(controller, value);
+    final stablePosition = _stablePlaybackPosition(rawPosition);
+    if (stablePosition > Duration.zero) {
+      _lastKnownPlaybackPosition = stablePosition;
     }
-    if (value.duration > Duration.zero) {
-      _lastKnownPlaybackDuration = value.duration;
+    final absoluteDuration = _absolutePlaybackDuration(controller, value);
+    if (absoluteDuration > Duration.zero) {
+      _lastKnownPlaybackDuration = absoluteDuration;
     }
     _maybeReportVerifiedSession(controller, value);
+    if (_shouldRecoverFromNativeClockSignal(controller, value)) {
+      _handleNativeClockSignalObserved(controller, value);
+    }
     if (value.duration > Duration.zero) {
       _maybeLoadSkipSegments(value.duration);
     }
     final callback = widget.onProgress;
     if (callback == null) return;
     if (!value.isPlaying && !value.isEnded) return;
-    if (value.position <= Duration.zero) return;
+    if (stablePosition <= Duration.zero) return;
 
-    final positionSecond = value.position.inSeconds;
-    final durationSecond = value.duration.inSeconds;
+    final positionSecond = stablePosition.inSeconds;
+    final durationSecond = absoluteDuration.inSeconds;
     final progressChangedEnough = _lastProgressCallbackSecond < 0 ||
         positionSecond - _lastProgressCallbackSecond >= 5 ||
         value.isEnded;
@@ -1604,8 +1811,278 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     callback(
       _season,
       _episode,
-      _TvPlaybackProgress(position: value.position, duration: value.duration),
+      _TvPlaybackProgress(position: stablePosition, duration: absoluteDuration),
     );
+  }
+
+  void _startPlaybackCadenceTimer() {
+    _playbackCadenceTimer?.cancel();
+    _playbackCadenceTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _samplePlaybackCadence(),
+    );
+  }
+
+  void _stopPlaybackCadenceTimer() {
+    _playbackCadenceTimer?.cancel();
+    _playbackCadenceTimer = null;
+    _lastCadenceSampleAt = null;
+    _lastCadencePosition = Duration.zero;
+  }
+
+  void _resetPlaybackCadenceState({Duration? crediblePosition}) {
+    _lastCadenceSampleAt = null;
+    _lastCadencePosition = Duration.zero;
+    _lastCrediblePlaybackPosition = crediblePosition ?? Duration.zero;
+    _playbackCadenceSamples = 0;
+    _playbackCadenceJumpEvents = 0;
+    _playbackCadenceConsecutiveJumpEvents = 0;
+    _playbackCadenceHealthySamples = 0;
+    _playbackCadenceClockUnstable = false;
+    _lastPlaybackCadenceDriftLogAt = null;
+  }
+
+  Duration _stablePlaybackPosition(Duration observedPosition) {
+    if (_playbackCadenceClockUnstable &&
+        _lastCrediblePlaybackPosition > Duration.zero) {
+      return _lastCrediblePlaybackPosition;
+    }
+    return observedPosition;
+  }
+
+  bool _hasSanePlaybackGeometry(_TvPlaybackValue value) {
+    if (value.size == Size.zero) return false;
+    final aspect = value.aspectRatio;
+    if (!aspect.isFinite || aspect <= 0.4 || aspect >= 3.2) return false;
+    if (value.size.width <= 0 || value.size.height <= 0) return false;
+    return true;
+  }
+
+  Duration? _expectedRuntimeDuration() {
+    final runtime = widget.item.runtime?.trim();
+    if (runtime == null || runtime.isEmpty) return null;
+    final clock = _parseTvSubtitleTime(runtime);
+    if (clock != null) return clock;
+    final lower = runtime.toLowerCase();
+    final hours = RegExp(r'(\d+)\s*h').firstMatch(lower);
+    final minutes = RegExp(r'(\d+)\s*m').firstMatch(lower);
+    final hourValue = hours == null ? 0 : int.tryParse(hours.group(1)!) ?? 0;
+    final minuteValue =
+        minutes == null ? 0 : int.tryParse(minutes.group(1)!) ?? 0;
+    if (hourValue > 0 || minuteValue > 0) {
+      return Duration(hours: hourValue, minutes: minuteValue);
+    }
+    final bareMinutes = RegExp(r'\b(\d{2,3})\b').firstMatch(runtime);
+    final parsedMinutes =
+        bareMinutes == null ? null : int.tryParse(bareMinutes.group(1)!);
+    if (parsedMinutes != null && parsedMinutes > 0) {
+      return Duration(minutes: parsedMinutes);
+    }
+    return null;
+  }
+
+  bool _shouldRejectShortVodPlaceholder(_TvPlaybackValue value) {
+    if (_isLiveTvPlayback || value.duration <= Duration.zero) return false;
+    final type = widget.item.type.trim().toLowerCase();
+    final isLongForm = type == 'movie' ||
+        type == 'series' ||
+        type == 'animation' ||
+        type == 'anime';
+    if (!isLongForm) return false;
+    final expected = _expectedRuntimeDuration();
+    if (expected != null && expected >= const Duration(minutes: 20)) {
+      return value.duration < expected * 0.55;
+    }
+    return value.duration < const Duration(minutes: 12);
+  }
+
+  bool _shouldRecoverFromNativeClockSignal(
+    _TvNativePlaybackController controller,
+    _TvPlaybackValue value,
+  ) {
+    if (controller.engine != _TvPlaybackEngine.media3) return false;
+    if (value.audioSinkErrorCount <= 0) return false;
+    if (!value.isInitialized || !value.isPlaying || value.isBuffering) {
+      return false;
+    }
+    return true;
+  }
+
+  void _handleNativeClockSignalObserved(
+    _TvNativePlaybackController controller,
+    _TvPlaybackValue value,
+  ) {
+    if (_recoveringFromPlaybackCadence ||
+        _recoveringRuntimePlayback ||
+        _switchingSource ||
+        _closingPlayback) {
+      return;
+    }
+    final anchor = _stablePlaybackPosition(
+      _absolutePlaybackPosition(controller, value),
+    );
+    debugPrint(
+      'Juicr TV playback native clock drift observed '
+      'engine=${controller.engine.name} '
+      'audioSinkErrors=${value.audioSinkErrorCount} '
+      'position=${anchor.inSeconds}s '
+      'action=try_next_source',
+    );
+    _playbackCadenceClockUnstable = true;
+    if (_lastCrediblePlaybackPosition <= Duration.zero && anchor > Duration.zero) {
+      _lastCrediblePlaybackPosition = anchor;
+    }
+    unawaited(
+      _recoverFromPlaybackCadenceDrift(
+        controller,
+        _lastCrediblePlaybackPosition > Duration.zero
+            ? _lastCrediblePlaybackPosition
+            : anchor,
+        observedPosition: anchor,
+      ),
+    );
+  }
+
+  void _samplePlaybackCadence() {
+    final controller = _controller;
+    if (controller == null ||
+        _closingPlayback ||
+        _switchingSource ||
+        _hasPlaybackDialogOpen ||
+        _recoveringRuntimePlayback ||
+        _recoveringFromPlaybackCadence) {
+      return;
+    }
+    final value = controller.value;
+    if (!value.isInitialized ||
+        !value.isPlaying ||
+        value.isBuffering ||
+        value.isEnded ||
+        value.errorDescription.isNotEmpty) {
+      return;
+    }
+    final now = DateTime.now();
+    final position = _absolutePlaybackPosition(controller, value);
+    if (position <= Duration.zero) return;
+    final lastSampleAt = _lastCadenceSampleAt;
+    if (lastSampleAt == null || _lastCadencePosition <= Duration.zero) {
+      _lastCadenceSampleAt = now;
+      _lastCadencePosition = position;
+      _lastCrediblePlaybackPosition = position;
+      return;
+    }
+    final wallDeltaMs = now.difference(lastSampleAt).inMilliseconds;
+    if (wallDeltaMs <= 0) return;
+    final playbackDeltaMs =
+        position.inMilliseconds - _lastCadencePosition.inMilliseconds;
+    final maxForwardMs = wallDeltaMs * 4 + 2200;
+    final jumpedBackward = playbackDeltaMs < -2200;
+    final jumpedForward = playbackDeltaMs > maxForwardMs;
+    _playbackCadenceSamples += 1;
+    if (jumpedBackward || jumpedForward) {
+      _playbackCadenceJumpEvents += 1;
+      _playbackCadenceConsecutiveJumpEvents += 1;
+      _playbackCadenceHealthySamples = 0;
+      _playbackCadenceClockUnstable = true;
+      final heldPosition = _lastCrediblePlaybackPosition > Duration.zero
+          ? _lastCrediblePlaybackPosition
+          : _lastCadencePosition;
+      final shouldLog = _lastPlaybackCadenceDriftLogAt == null ||
+          now.difference(_lastPlaybackCadenceDriftLogAt!) >
+              const Duration(seconds: 4);
+      if (shouldLog) {
+        _lastPlaybackCadenceDriftLogAt = now;
+        debugPrint(
+          'Juicr TV playback cadence drift observed '
+          'engine=${controller.engine.name} '
+          'observed=${position.inSeconds}s '
+          'held=${heldPosition.inSeconds}s '
+          'wallDeltaMs=$wallDeltaMs playbackDeltaMs=$playbackDeltaMs '
+          'consecutive=$_playbackCadenceConsecutiveJumpEvents '
+          'action=hold_progress_clock',
+        );
+      }
+      if (_playbackCadenceConsecutiveJumpEvents >= 2) {
+        unawaited(
+          _recoverFromPlaybackCadenceDrift(
+            controller,
+            heldPosition,
+            observedPosition: position,
+          ),
+        );
+      }
+      _lastCadenceSampleAt = now;
+      _lastCadencePosition = heldPosition;
+      return;
+    }
+    _lastCadenceSampleAt = now;
+    _lastCadencePosition = position;
+    _lastCrediblePlaybackPosition = position;
+    _playbackCadenceConsecutiveJumpEvents = 0;
+    _playbackCadenceHealthySamples += 1;
+    if (_playbackCadenceClockUnstable && _playbackCadenceHealthySamples >= 8) {
+      debugPrint(
+        'Juicr TV playback cadence recovered '
+        'engine=${controller.engine.name} position=${position.inSeconds}s',
+      );
+      _playbackCadenceClockUnstable = false;
+      _playbackCadenceJumpEvents = 0;
+      _lastPlaybackCadenceDriftLogAt = null;
+    }
+  }
+
+  Future<void> _recoverFromPlaybackCadenceDrift(
+    _TvNativePlaybackController controller,
+    Duration anchorPosition, {
+    required Duration observedPosition,
+  }) async {
+    if (_recoveringFromPlaybackCadence ||
+        _recoveringRuntimePlayback ||
+        _switchingSource ||
+        _closingPlayback ||
+        !mounted ||
+        !identical(_controller, controller) ||
+        _sessions.isEmpty) {
+      return;
+    }
+    _recoveringFromPlaybackCadence = true;
+    final resumePosition = anchorPosition > const Duration(seconds: 3)
+        ? anchorPosition
+        : _runtimeRecoveryResumePosition(controller, controller.value);
+    final nextIndex = _sessions.length <= 1
+        ? _sessionIndex
+        : (_sessionIndex + 1) % _sessions.length;
+    debugPrint(
+      'Juicr TV playback cadence recovery queued '
+      'engine=${controller.engine.name} '
+      'observed=${observedPosition.inSeconds}s '
+      'anchor=${resumePosition.inSeconds}s '
+      'action=try_next_source',
+    );
+    if (_sessionIndex >= 0 && _sessionIndex < _sessions.length) {
+      unawaited(
+        _sendPlaybackFeedback(
+          event: 'cadence_drift',
+          session: _sessions[_sessionIndex],
+          controller: controller,
+          value: controller.value,
+        ),
+      );
+      _reportRejectedSession(_sessions[_sessionIndex]);
+    }
+    try {
+      await _openSession(
+        nextIndex,
+        feedbackLabel: 'Recovered',
+        maxCandidateCount: _sessions.length <= 1 ? 1 : _sessions.length - 1,
+        maxOpenDuration: const Duration(seconds: 60),
+        resumePosition: resumePosition,
+        restoreOldOnFailure: true,
+      );
+    } finally {
+      _recoveringFromPlaybackCadence = false;
+      _resetPlaybackCadenceState(crediblePosition: resumePosition);
+    }
   }
 
   Future<void> _seekBy(Duration offset) async {
@@ -1613,19 +2090,97 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     if (controller == null || !controller.value.isInitialized) return;
     final value = controller.value;
     final shouldPlay = value.isPlaying;
-    final target = value.position + offset;
-    final duration = value.duration;
+    final target = _absolutePlaybackPosition(controller, value) + offset;
+    final duration = _absolutePlaybackDuration(controller, value);
     final clamped = target < Duration.zero
         ? Duration.zero
         : duration > Duration.zero && target > duration
             ? duration
             : target;
-    await controller.seekTo(clamped);
+    final seekApplied = await _seekControllerToPlaybackPosition(
+      controller,
+      clamped,
+      reason: 'remote_seek',
+    );
     _lastKnownPlaybackPosition = clamped;
     if (duration > Duration.zero) _lastKnownPlaybackDuration = duration;
-    await _resumePlaybackAfterSeek(controller, shouldPlay: shouldPlay);
+    if (seekApplied) {
+      _resetPlaybackCadenceState(crediblePosition: clamped);
+      await _resumePlaybackAfterSeek(controller, shouldPlay: shouldPlay);
+    } else if (!shouldPlay) {
+      await _controller?.pause();
+    }
     _showControls();
     if (mounted) setState(() {});
+  }
+
+  Future<bool> _seekControllerToPlaybackPosition(
+    _TvNativePlaybackController controller,
+    Duration target, {
+    required String reason,
+  }) async {
+    final localTarget = _libVlcContinuousTsLocalSeekPosition(
+      controller,
+      target,
+    );
+    if (localTarget != null) {
+      if (localTarget != target) {
+        debugPrint(
+          'Juicr TV libVLC continuous-ts seek translated '
+          'target=${target.inSeconds}s local=${localTarget.inSeconds}s '
+          'offset=${_libVlcContinuousTsTimelineOffset.inSeconds}s '
+          'reason=$reason',
+        );
+      }
+      await controller.seekTo(localTarget);
+      return true;
+    }
+    if (controller.engine != _TvPlaybackEngine.libvlc ||
+        _sessionIndex < 0 ||
+        _sessionIndex >= _sessions.length ||
+        _switchingSource ||
+        _closingPlayback ||
+        !mounted ||
+        !identical(_controller, controller)) {
+      await controller.seekTo(target);
+      return true;
+    }
+    final wasPlaying = controller.value.isPlaying;
+    debugPrint(
+      'Juicr TV libVLC continuous-ts seek reopen '
+      'target=${target.inSeconds}s '
+      'offset=${_libVlcContinuousTsTimelineOffset.inSeconds}s '
+      'reason=$reason',
+    );
+    await _openSession(
+      _sessionIndex,
+      feedbackLabel: 'Seeking',
+      resumePosition: target,
+      restoreOldOnFailure: true,
+    );
+    if (!wasPlaying) await _controller?.pause();
+    if (mounted) {
+      setState(() {
+        _controlsVisible = true;
+        _loadingStatus = 'Playing';
+      });
+    }
+    return false;
+  }
+
+  Duration? _libVlcContinuousTsLocalSeekPosition(
+    _TvNativePlaybackController controller,
+    Duration target,
+  ) {
+    if (controller.engine != _TvPlaybackEngine.libvlc ||
+        !_libVlcContinuousTsActive) {
+      return target;
+    }
+    final offset = _libVlcContinuousTsTimelineOffset;
+    if (offset <= Duration.zero) return null;
+    if (target < offset - const Duration(seconds: 2)) return null;
+    final localTarget = target - offset;
+    return localTarget <= Duration.zero ? Duration.zero : localTarget;
   }
 
   Future<void> _recoverFromRuntimePlaybackError(
@@ -1640,7 +2195,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       return;
     }
     _recoveringRuntimePlayback = true;
-    final resumePosition = _runtimeRecoveryResumePosition(value);
+    final resumePosition = _runtimeRecoveryResumePosition(controller, value);
     final nextIndex = _sessions.length <= 1
         ? _sessionIndex
         : (_sessionIndex + 1) % _sessions.length;
@@ -1680,8 +2235,16 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     }
   }
 
-  Duration _runtimeRecoveryResumePosition(_TvPlaybackValue value) {
-    if (value.position > const Duration(seconds: 3)) return value.position;
+  Duration _runtimeRecoveryResumePosition(
+    _TvNativePlaybackController controller,
+    _TvPlaybackValue value,
+  ) {
+    final position = _absolutePlaybackPosition(controller, value);
+    if (_playbackCadenceClockUnstable &&
+        _lastCrediblePlaybackPosition > const Duration(seconds: 3)) {
+      return _lastCrediblePlaybackPosition;
+    }
+    if (position > const Duration(seconds: 3)) return position;
     if (_lastKnownPlaybackPosition > const Duration(seconds: 3)) {
       return _lastKnownPlaybackPosition;
     }
@@ -1987,6 +2550,16 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     _requestHudFocusAfterBuild(target, attempt);
   }
 
+  FocusNode _fallbackHudFocusNodeFor(FocusNode target) {
+    if (_locked) return _lockFocusNode;
+    if (target == _skipSegmentFocusNode ||
+        target == _skipForwardFocusNode ||
+        target == _skipBackFocusNode) {
+      return _sourcesFocusNode;
+    }
+    return _playFocusNode;
+  }
+
   void _requestHudFocusAfterBuild(FocusNode target, [int attempt = 0]) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
@@ -1999,7 +2572,16 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         target.requestFocus();
         return;
       }
-      if (attempt < 4) _requestHudFocusAfterBuild(target, attempt + 1);
+      if (attempt < 4) {
+        _requestHudFocusAfterBuild(target, attempt + 1);
+        return;
+      }
+      final fallback = _fallbackHudFocusNodeFor(target);
+      if (fallback.context != null && fallback.canRequestFocus) {
+        fallback.requestFocus();
+      } else if (_playbackFocusNode.canRequestFocus) {
+        _playbackFocusNode.requestFocus();
+      }
     });
   }
 
@@ -2067,7 +2649,8 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   }
 
   _TvPlaybackProgress _currentProgress() {
-    final value = _controller?.value ?? _TvPlaybackValue.empty;
+    final controller = _controller;
+    final value = controller?.value ?? _TvPlaybackValue.empty;
     if (!value.isInitialized) {
       return _TvPlaybackProgress(
         position: _lastKnownPlaybackPosition,
@@ -2075,13 +2658,49 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       );
     }
     return _TvPlaybackProgress(
-      position: value.position > Duration.zero
-          ? value.position
+      position: _stablePlaybackPosition(
+                _absolutePlaybackPosition(controller!, value),
+              ) >
+              Duration.zero
+          ? _stablePlaybackPosition(_absolutePlaybackPosition(controller, value))
           : _lastKnownPlaybackPosition,
-      duration: value.duration > Duration.zero
-          ? value.duration
+      duration: _absolutePlaybackDuration(controller, value) > Duration.zero
+          ? _absolutePlaybackDuration(controller, value)
           : _lastKnownPlaybackDuration,
     );
+  }
+
+  Duration _absolutePlaybackPosition(
+    _TvNativePlaybackController controller,
+    _TvPlaybackValue value,
+  ) {
+    final offset = _displayTimelineOffsetFor(controller);
+    if (offset <= Duration.zero || value.position <= Duration.zero) {
+      return value.position;
+    }
+    if (value.position >= offset - const Duration(seconds: 2)) {
+      return value.position;
+    }
+    return offset + value.position;
+  }
+
+  Duration _absolutePlaybackDuration(
+    _TvNativePlaybackController controller,
+    _TvPlaybackValue value,
+  ) {
+    if (value.duration > Duration.zero) return value.duration;
+    return _lastKnownPlaybackDuration;
+  }
+
+  Duration _displayTimelineOffsetFor(_TvNativePlaybackController controller) {
+    if (_playbackDisplayTimelineOffset > Duration.zero) {
+      return _playbackDisplayTimelineOffset;
+    }
+    if (controller.engine == _TvPlaybackEngine.libvlc &&
+        _libVlcContinuousTsTimelineOffset > Duration.zero) {
+      return _libVlcContinuousTsTimelineOffset;
+    }
+    return Duration.zero;
   }
 
   Future<void> _closePlayback() async {
@@ -2152,8 +2771,8 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         ];
       }
       return const <_TvPlaybackEngine>[
-        _TvPlaybackEngine.textureExoplayer,
         _TvPlaybackEngine.media3,
+        _TvPlaybackEngine.textureExoplayer,
         _TvPlaybackEngine.libvlc,
       ];
     }
@@ -2181,6 +2800,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     var controllerSession = session;
     LibVlcHlsRelay? relay;
     _TvRelayStartupProof? relayProof;
+    var continuousTsMode = false;
     final shouldRelay = _shouldRelaySession(session, engine);
     _updatePlaybackLoadingStatus('Preparing playback source...');
     if (shouldRelay) {
@@ -2192,9 +2812,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     }
     if (shouldRelay) {
       relayProof = _TvRelayStartupProof();
-      final continuousTsMode = session.tvMediaUrl.toLowerCase().contains(
-            '/web/playback/session/',
-          );
+      final canUseLibVlcContinuousTs = engine == _TvPlaybackEngine.libvlc &&
+          (session.tvMediaUrl.toLowerCase().contains('/web/playback/session/') ||
+              (_isNativeHlsSession(session) && session.httpHeaders.isNotEmpty));
+      continuousTsMode = canUseLibVlcContinuousTs;
       relay = await LibVlcHlsRelay.start(
         upstreamUri: Uri.parse(session.tvMediaUrl),
         headers: session.httpHeaders,
@@ -2211,7 +2832,11 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         sourceType: continuousTsMode ? 'ts' : 'hls',
         httpHeaders: const <String, String>{},
       );
-      debugPrint('Juicr TV native HLS relay started engine=${engine.name}');
+      debugPrint(
+        'Juicr TV native HLS relay started engine=${engine.name} '
+        'scope=${continuousTsMode ? 'continuous_ts' : 'playlist'} '
+        'resume=${resumePosition.inSeconds}s',
+      );
     }
     final controller = switch (engine) {
       _TvPlaybackEngine.media3 => _TvNativePlaybackController.media3(
@@ -2251,7 +2876,11 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
         throw const _TvPlaybackCanceledException();
       }
-      await controller.setVideoSizeMode(_videoSize);
+      await controller.setVideoSizeMode(_nativeTvVideoSizeModeFor(_videoSize));
+      _libVlcContinuousTsActive =
+          engine == _TvPlaybackEngine.libvlc && continuousTsMode;
+      _libVlcContinuousTsTimelineOffset =
+          _libVlcContinuousTsActive ? resumePosition : Duration.zero;
       _updatePlaybackLoadingStatus('Starting playback...');
       if (!_isLiveTvPlayback) {
         await controller.setPlaybackSpeed(_playbackSpeed);
@@ -2273,8 +2902,22 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
           'position=${targetResumePosition.inSeconds}s '
           'duration=${controller.value.duration.inSeconds}s',
         );
-        await controller.seekTo(targetResumePosition);
+        final relayAlreadyAtResume = engine == _TvPlaybackEngine.libvlc &&
+            continuousTsMode &&
+            resumePosition > Duration.zero &&
+            targetResumePosition == resumePosition;
+        if (!relayAlreadyAtResume) {
+          await controller.seekTo(targetResumePosition);
+        }
+        final rawAfterResumeSeek = controller.value;
+        _playbackDisplayTimelineOffset =
+            rawAfterResumeSeek.duration <= Duration.zero &&
+                    rawAfterResumeSeek.position <
+                        targetResumePosition - const Duration(seconds: 2)
+                ? targetResumePosition
+                : Duration.zero;
         _lastKnownPlaybackPosition = targetResumePosition;
+        _resetPlaybackCadenceState(crediblePosition: targetResumePosition);
         if (controller.value.duration > Duration.zero) {
           _lastKnownPlaybackDuration = controller.value.duration;
         }
@@ -2289,7 +2932,25 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       if (!_isPlaybackStartupAttemptActive(generation, startupAttempt)) {
         throw const _TvPlaybackCanceledException();
       }
-      debugPrint('Juicr TV native playback ready engine=${engine.name}');
+      final readyValue = controller.value;
+      if (_shouldRejectShortVodPlaceholder(readyValue)) {
+        debugPrint(
+          'Juicr TV short VOD placeholder rejected '
+          'engine=${engine.name} duration=${readyValue.duration.inSeconds}s '
+          'expected=${_expectedRuntimeDuration()?.inSeconds ?? 0}s '
+          '${_safePlaybackSessionFingerprint(session)}',
+        );
+        throw StateError('short_vod_placeholder');
+      }
+      debugPrint(
+        'Juicr TV native playback ready engine=${engine.name} '
+        'size=${readyValue.size.width.toStringAsFixed(0)}x'
+        '${readyValue.size.height.toStringAsFixed(0)} '
+        'aspect=${readyValue.aspectRatio.toStringAsFixed(3)} '
+        'duration=${readyValue.duration.inSeconds}s '
+        'position=${readyValue.position.inSeconds}s '
+        '${_safePlaybackSessionFingerprint(session)}',
+      );
       unawaited(
         _sendPlaybackFeedback(
           event: 'open_success',
@@ -2355,6 +3016,22 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     if (lowerUrl.contains('.mpd')) return 'dash-path';
     if (lowerUrl.contains('.mp4')) return 'file-path';
     return url.startsWith('https://') ? 'https' : 'other';
+  }
+
+  String _safePlaybackSessionFingerprint(_PlaybackSession session) {
+    final quality = _qualityLabelForSession(session);
+    final type = _safePlaybackTypeBucket(session.sourceType);
+    final url = _safePlaybackUrlBucket(session.tvMediaUrl);
+    final sourceClass = session.sourceClass.trim().isEmpty
+        ? 'none'
+        : _safePlaybackTypeBucket(session.sourceClass);
+    final headers = session.httpHeaders.length;
+    final captions = session.subtitles.length;
+    final providerBucket = session.providerId.trim().isEmpty ? 'none' : 'set';
+    final format = session.videoFormatHint?.name ?? 'auto';
+    return 'quality=$quality type=$type url=$url class=$sourceClass '
+        'headers=$headers captions=$captions provider=$providerBucket '
+        'format=$format';
   }
 
   String _safeTvPlaybackError(Object error) {
@@ -2444,7 +3121,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     final timeout = engine == _TvPlaybackEngine.libvlc
         ? (_isLiveTvPlayback
             ? const Duration(seconds: 12)
-            : const Duration(seconds: 7))
+            : const Duration(seconds: 14))
         : const Duration(seconds: 7);
     final deadline = DateTime.now().add(timeout);
     _TvPlaybackValue lastValue = _TvPlaybackValue.empty;
@@ -2517,6 +3194,9 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     });
     _backFocusNode.requestFocus();
     final oldController = _controller;
+    if (oldController != null) {
+      unawaited(oldController.pause());
+    }
     try {
       var selectedIndex = index;
       _TvNativePlaybackController? preparedController;
@@ -2530,6 +3210,11 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
           break;
         }
         _updatePlaybackLoadingStatus(_sourceLoadingStatus(candidateIndex));
+        debugPrint(
+          'Juicr TV source candidate opening '
+          'index=${candidateIndex + 1}/${_sessions.length} '
+          '${_safePlaybackSessionFingerprint(_sessions[candidateIndex])}',
+        );
         try {
           final startupAttempt = ++_startupAttemptGeneration;
           preparedController = await _prepareWithLadder(
@@ -2791,7 +3476,8 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
           .where((session) => session.mediaUrl.trim().isNotEmpty)
           .toList(growable: false);
       debugPrint(
-        'Juicr TV fresh playback fallback loaded count=${usable.length}',
+        'Juicr TV fresh playback fallback loaded count=${usable.length} '
+        'first=${usable.isEmpty ? 'none' : _safePlaybackSessionFingerprint(usable.first)}',
       );
       return usable;
     } catch (error) {
@@ -2819,10 +3505,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       merged.add(session);
     }
 
-    for (final session in cached) {
+    for (final session in fresh) {
       add(session);
     }
-    for (final session in fresh) {
+    for (final session in cached) {
       add(session);
     }
     return merged;
@@ -2848,6 +3534,12 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       orElse: () => freshSessions.first,
     );
     if (refreshed.mediaUrl.trim().isEmpty) return null;
+    debugPrint(
+      'Juicr TV refreshed current playback session '
+      'index=${sessionIndex + 1}/${_sessions.length} '
+      'before=${_safePlaybackSessionFingerprint(current)} '
+      'after=${_safePlaybackSessionFingerprint(refreshed)}',
+    );
     if (mounted && _isPlaybackGenerationActive(generation)) {
       setState(() {
         _sessions[sessionIndex] = refreshed;
@@ -3146,6 +3838,50 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       });
     }
 
+    bool _isTvBackKey(LogicalKeyboardKey key) {
+      return key == LogicalKeyboardKey.goBack ||
+          key == LogicalKeyboardKey.escape ||
+          key == LogicalKeyboardKey.browserBack;
+    }
+
+    KeyEventResult _handleSourceDialogKey(LogicalKeyboardKey key) {
+      if (_isTvBackKey(key)) {
+        final navigator =
+            _activePlaybackDialogNavigator ?? Navigator.of(context);
+        _popPlaybackDialog(navigator, 'sources-key');
+        return KeyEventResult.handled;
+      }
+      final focusedIndex = sourceFocusNodes.indexWhere((node) => node.hasFocus);
+      final currentIndex = focusedIndex >= 0
+          ? focusedIndex
+          : lastSourceFocusIndex.clamp(0, sourceFocusNodes.length - 1).toInt();
+      if (key == LogicalKeyboardKey.arrowUp) {
+        focusSource(currentIndex <= 0 ? 0 : currentIndex - 1);
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowDown) {
+        focusSource(
+          currentIndex >= sourceFocusNodes.length - 1
+              ? sourceFocusNodes.length - 1
+              : currentIndex + 1,
+        );
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowLeft ||
+          key == LogicalKeyboardKey.arrowRight) {
+        focusSource(currentIndex);
+        return KeyEventResult.handled;
+      }
+      if ((key == LogicalKeyboardKey.select ||
+              key == LogicalKeyboardKey.enter ||
+              key == LogicalKeyboardKey.space) &&
+          focusedIndex < 0) {
+        focusSource(currentIndex);
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+
     Future<T?> runSourceChild<T>(
       int index,
       Future<T?> Function() action,
@@ -3168,7 +3904,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       sourceParentDialogOpen = true;
       await _showPlaybackDialog<void>(
         builder: (dialogContext) {
-          final dialogNavigator = Navigator.of(dialogContext);
+          final dialogNavigator = _playbackDialogNavigator(dialogContext);
           return StatefulBuilder(
             builder: (context, setDialogState) {
               restoreSourceFocus();
@@ -3179,7 +3915,8 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                   if (_shouldIgnoreNestedPlaybackDialogPop('sources-parent')) {
                     return;
                   }
-                  dialogNavigator.pop();
+                  // Guarded replacement for dialogNavigator.pop();
+                  _popPlaybackDialog(dialogNavigator, 'sources-parent');
                 },
                 child: Focus(
                   focusNode: sourceDialogFocusNode,
@@ -3189,39 +3926,12 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
                       return KeyEventResult.ignored;
                     }
-                    final key = event.logicalKey;
-                    final focusedIndex = sourceFocusNodes.indexWhere(
-                      (node) => node.hasFocus,
-                    );
-                    if (focusedIndex >= 0) return KeyEventResult.ignored;
-                    if (key == LogicalKeyboardKey.arrowUp) {
-                      focusSource(
-                        lastSourceFocusIndex <= 0
-                            ? 0
-                            : lastSourceFocusIndex - 1,
-                      );
-                      return KeyEventResult.handled;
-                    }
-                    if (key == LogicalKeyboardKey.arrowDown) {
-                      focusSource(
-                        lastSourceFocusIndex >= sourceFocusNodes.length - 1
-                            ? sourceFocusNodes.length - 1
-                            : lastSourceFocusIndex + 1,
-                      );
-                      return KeyEventResult.handled;
-                    }
-                    if (key == LogicalKeyboardKey.select ||
-                        key == LogicalKeyboardKey.enter ||
-                        key == LogicalKeyboardKey.space) {
-                      focusSource(lastSourceFocusIndex);
-                      return KeyEventResult.handled;
-                    }
-                    return KeyEventResult.ignored;
+                    return _handleSourceDialogKey(event.logicalKey);
                   },
                   child: Dialog(
                     backgroundColor: Colors.transparent,
                     child: Container(
-                      width: 420,
+                      width: 284,
                       constraints: const BoxConstraints(maxHeight: 560),
                       padding: const EdgeInsets.all(_tvSpacing),
                       decoration: BoxDecoration(
@@ -3244,15 +3954,6 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                               ),
                             ),
                             const SizedBox(height: _tvSpacing),
-                            const Text(
-                              'Choose another TV-ready playback option.',
-                              style: TextStyle(
-                                color: Color(0xFFAAA6BD),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: _tvSpacing),
                             Flexible(
                               child: SingleChildScrollView(
                                 child: Column(
@@ -3264,13 +3965,19 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                       Padding(
                                         padding:
                                             const EdgeInsets.only(bottom: 10),
-                                        child: _TvTextButton(
+                                        child: _TvSourceGroupButton(
                                           focusNode: sourceFocusNodes[index],
                                           icon: groups[index]
                                                   .contains(_sessionIndex)
                                               ? Icons.check_circle_rounded
                                               : Icons.video_library_rounded,
-                                          label: groups[index].label,
+                                          title: groups[index].label,
+                                          subtitle:
+                                              groups[index].contains(_sessionIndex)
+                                                  ? 'Current quality'
+                                                  : 'Open mirrors',
+                                          selected: groups[index]
+                                              .contains(_sessionIndex),
                                           autofocus: index ==
                                               lastSourceFocusIndex,
                                           enabled: !_switchingSource,
@@ -3290,6 +3997,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                                   ? () => focusSource(index)
                                                   : () =>
                                                       focusSource(index + 1),
+                                          onArrowLeft: () =>
+                                              focusSource(index),
+                                          onArrowRight: () =>
+                                              focusSource(index),
                                           onPressed: () {
                                             if (groups[index]
                                                     .sessionIndexes
@@ -3313,7 +4024,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                                   }
                                                   if (dialogNavigator
                                                       .canPop()) {
-                                                    dialogNavigator.pop();
+                                                    _popPlaybackDialog(
+                                                      dialogNavigator,
+                                                      'sources-mirror-select',
+                                                    );
                                                   }
                                                 }),
                                               );
@@ -3322,7 +4036,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                             pendingSourceIndex = groups[index]
                                                 .sessionIndexes
                                                 .first;
-                                            dialogNavigator.pop();
+                                            _popPlaybackDialog(
+                                              dialogNavigator,
+                                              'sources-select',
+                                            );
                                           },
                                         ),
                                       ),
@@ -3365,12 +4082,17 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       builder: (context) => _TvPlaybackChoiceDialog(
         title: '${group.quality} mirrors',
         selected: _sessionIndex.toString(),
+        onBack: (dialogContext) => _popPlaybackDialog(
+          _playbackDialogNavigator(dialogContext),
+          'source-mirror-choice',
+        ),
         choices: [
           for (var mirror = 0; mirror < group.sessionIndexes.length; mirror++)
             _TvPlaybackChoice(
-              'Mirror ${mirror + 1}',
+              'Mirror ${mirror + 1}/${group.sessionIndexes.length}',
               Icons.video_library_rounded,
               value: group.sessionIndexes[mirror].toString(),
+              subtitle: _sourceMirrorSubtitle(group.sessionIndexes[mirror]),
             ),
         ],
       ),
@@ -3379,6 +4101,49 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     final index = int.tryParse(selected);
     if (index == null) return null;
     return index;
+  }
+
+  String _sourceMirrorSubtitle(int sessionIndex) {
+    if (sessionIndex < 0 || sessionIndex >= _sessions.length) {
+      return 'Audio: Not tagged';
+    }
+    final session = _sessions[sessionIndex];
+    final parts = <String>[
+      'Audio: Not tagged',
+      _qualityLabelForSession(session),
+    ];
+    final type = _sourceTypeDisplayLabel(session.sourceType, session.tvMediaUrl);
+    if (type.isNotEmpty) parts.add(type);
+    final sourceClass = _sourceClassDisplayLabel(session.sourceClass);
+    if (sourceClass.isNotEmpty) parts.add(sourceClass);
+    return parts.join(' - ');
+  }
+
+  String _sourceTypeDisplayLabel(String sourceType, String mediaUrl) {
+    final type = sourceType.trim().toLowerCase();
+    final url = mediaUrl.toLowerCase();
+    if (type.contains('mpegurl') ||
+        type.contains('m3u8') ||
+        type.contains('hls') ||
+        url.contains('.m3u8')) {
+      return 'HLS';
+    }
+    if (type.contains('dash') || type.contains('mpd') || url.contains('.mpd')) {
+      return 'DASH';
+    }
+    if (type.contains('mp4') || type.contains('video') || url.contains('.mp4')) {
+      return 'Direct video';
+    }
+    return type.isEmpty ? '' : type.toUpperCase();
+  }
+
+  String _sourceClassDisplayLabel(String sourceClass) {
+    final value = sourceClass.trim().toLowerCase();
+    if (value.isEmpty) return '';
+    if (value == 'direct') return 'Direct';
+    if (value == 'debrid') return 'Account';
+    if (value == 'p2p') return 'P2P';
+    return value.toUpperCase();
   }
 
   Future<void> _setPlaybackSpeed(double speed) async {
@@ -3393,11 +4158,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
   }
 
   Future<void> _refreshStream() async {
-    var resumePosition = Duration.zero;
-    final controller = _controller;
-    if (controller != null && controller.value.isInitialized) {
-      resumePosition = controller.value.position;
-    }
+    final resumePosition = _currentProgress().position;
     debugPrint(
       'Juicr TV refresh stream requested '
       'source=settings position=${resumePosition.inSeconds}s',
@@ -3426,6 +4187,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       builder: (context) => _TvPlaybackChoiceDialog(
         title: 'Quality',
         selected: currentQuality,
+        onBack: (dialogContext) => _popPlaybackDialog(
+          _playbackDialogNavigator(dialogContext),
+          'quality-choice',
+        ),
         choices: [
           const _TvPlaybackChoice('Auto', Icons.auto_awesome_rounded),
           for (final label in qualityLabels)
@@ -3453,6 +4218,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       builder: (context) => _TvPlaybackChoiceDialog(
         title: 'Speed',
         selected: _speedLabel(_playbackSpeed),
+        onBack: (dialogContext) => _popPlaybackDialog(
+          _playbackDialogNavigator(dialogContext),
+          'speed-choice',
+        ),
         choices: const [
           _TvPlaybackChoice('0.75x', Icons.speed_rounded),
           _TvPlaybackChoice('1x', Icons.speed_rounded),
@@ -3519,6 +4288,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       builder: (context) => _TvPlaybackChoiceDialog(
         title: 'Subtitle',
         selected: selectedGroupKey,
+        onBack: (dialogContext) => _popPlaybackDialog(
+          _playbackDialogNavigator(dialogContext),
+          'subtitle-choice',
+        ),
         choices: [
           const _TvPlaybackChoice(
             'Off',
@@ -3607,6 +4380,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       builder: (context) => _TvPlaybackChoiceDialog(
         title: group.title,
         selected: selectedKey,
+        onBack: (dialogContext) => _popPlaybackDialog(
+          _playbackDialogNavigator(dialogContext),
+          'subtitle-group-choice',
+        ),
         choices: [
           for (final subtitle in group.subtitles)
             _TvPlaybackChoice(
@@ -3696,6 +4473,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       builder: (context) => _TvPlaybackChoiceDialog(
         title: 'Subtitle delay',
         selected: _subtitleDelayMillis.toString(),
+        onBack: (dialogContext) => _popPlaybackDialog(
+          _playbackDialogNavigator(dialogContext),
+          'subtitle-delay-choice',
+        ),
         choices: _subtitleDelayChoices(),
       ),
     );
@@ -3770,7 +4551,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
               if (_shouldIgnoreNestedPlaybackDialogPop('subtitle-parent')) {
                 return;
               }
-              Navigator.of(dialogContext).pop();
+              _popPlaybackDialog(
+                _playbackDialogNavigator(dialogContext),
+                'subtitle-parent',
+              );
             },
             child: StatefulBuilder(
             builder: (context, setDialogState) {
@@ -3932,39 +4716,76 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       builder: (context) => _TvPlaybackChoiceDialog(
         title: 'Video size',
         selected: _videoSize,
+        onBack: (dialogContext) => _popPlaybackDialog(
+          _playbackDialogNavigator(dialogContext),
+          'video-size-choice',
+        ),
         choices: const [
-          _TvPlaybackChoice('Fit', Icons.fit_screen_rounded),
-          _TvPlaybackChoice('Fill', Icons.fullscreen_rounded),
-          _TvPlaybackChoice('16:9', Icons.aspect_ratio_rounded),
-          _TvPlaybackChoice('Stretch', Icons.open_in_full_rounded),
+          _TvPlaybackChoice(
+            'Fit',
+            Icons.fit_screen_rounded,
+            value: _tvVideoSizeFit,
+          ),
+          _TvPlaybackChoice(
+            'Fill',
+            Icons.fullscreen_rounded,
+            value: _tvVideoSizeFill,
+          ),
+          _TvPlaybackChoice(
+            '16:9',
+            Icons.aspect_ratio_rounded,
+            value: _tvVideoSizeWide,
+          ),
+          _TvPlaybackChoice(
+            'Stretch',
+            Icons.open_in_full_rounded,
+            value: _tvVideoSizeStretch,
+          ),
         ],
       ),
     );
     if (selected == null || !mounted) return;
     final previous = _videoSize;
+    final normalized = _normalizeTvVideoSizeMode(selected);
     setState(() {
-      _videoSize = selected;
+      _videoSize = normalized;
       _controlsVisible = true;
     });
+    await _controller?.setVideoSizeMode(_nativeTvVideoSizeModeFor(normalized));
     debugPrint(
       'Juicr TV video size changed '
-      'from=$previous to=$selected action=layout_only',
+      'from=${_tvVideoSizeLabel(previous)} '
+      'to=${_tvVideoSizeLabel(normalized)} action=layout_and_native',
     );
     refreshSettingsDialog();
   }
 
-  double _stableDecodedAspectRatio(_TvPlaybackValue value) {
+  double _stableDecodedAspectRatio(
+    _TvPlaybackValue value,
+    _TvPlaybackEngine engine,
+  ) {
     final width = value.size.width;
     final height = value.size.height;
+    if (width > 0 && height > 0) {
+      final sizeAspectRatio = width / height;
+      if (sizeAspectRatio.isFinite &&
+          sizeAspectRatio > _minimumTrustedAspectRatio(engine) &&
+          sizeAspectRatio <= 3.2) {
+        _lastDecodedAspectRatio = sizeAspectRatio;
+        return _lastDecodedAspectRatio;
+      }
+    }
     final candidate = value.aspectRatio;
-    if (width > 0 &&
-        height > 0 &&
-        candidate.isFinite &&
-        candidate >= 0.5 &&
+    if (candidate.isFinite &&
+        candidate > _minimumTrustedAspectRatio(engine) &&
         candidate <= 3.2) {
       _lastDecodedAspectRatio = candidate;
     }
     return _lastDecodedAspectRatio;
+  }
+
+  double _minimumTrustedAspectRatio(_TvPlaybackEngine engine) {
+    return engine == _TvPlaybackEngine.textureExoplayer ? 1.70 : 1.05;
   }
 
   Widget _videoSurface(_TvPlaybackValue value) {
@@ -3972,7 +4793,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     if (controller == null) {
       return const ColoredBox(color: Colors.black);
     }
-    final decodedAspectRatio = _stableDecodedAspectRatio(value);
+    final decodedAspectRatio = _stableDecodedAspectRatio(
+      value,
+      controller.engine,
+    );
     Widget surface(double aspectRatio) =>
         controller.surface(aspectRatio: aspectRatio);
 
@@ -3983,13 +4807,14 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         if (width <= 0 || height <= 0) {
           return const SizedBox.shrink();
         }
-        final mode = _videoSize.toLowerCase();
-        if (mode == 'stretch') {
+        final mode = _normalizeTvVideoSizeMode(_videoSize);
+        if (mode == _tvVideoSizeStretch) {
           return SizedBox.expand(child: surface(16 / 9));
         }
-        final aspectRatio = mode == '16:9' ? 16 / 9 : decodedAspectRatio;
+        final aspectRatio =
+            mode == _tvVideoSizeWide ? 16 / 9 : decodedAspectRatio;
         final viewportRatio = width / height;
-        if (mode == 'fill') {
+        if (mode == _tvVideoSizeFill) {
           final coverWidth =
               viewportRatio > aspectRatio ? width : height * aspectRatio;
           final coverHeight =
@@ -4004,10 +4829,14 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
             ),
           );
         }
+        var fitHeight = height;
+        if (mode == _tvVideoSizeFit && aspectRatio < 1.70) {
+          fitHeight = height * 0.86;
+        }
         final fittedWidth =
-            viewportRatio > aspectRatio ? height * aspectRatio : width;
+            viewportRatio > aspectRatio ? fitHeight * aspectRatio : width;
         final fittedHeight =
-            viewportRatio > aspectRatio ? height : width / aspectRatio;
+            viewportRatio > aspectRatio ? fitHeight : width / aspectRatio;
         return Center(
           child: SizedBox(
             width: fittedWidth,
@@ -4113,7 +4942,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                   if (_shouldIgnoreNestedPlaybackDialogPop('settings-parent')) {
                     return;
                   }
-                  Navigator.of(dialogContext).pop();
+                  _popPlaybackDialog(
+                    _playbackDialogNavigator(dialogContext),
+                    'settings-parent',
+                  );
                 },
                 child: Focus(
                   focusNode: settingsDialogFocusNode,
@@ -4262,7 +5094,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                 _TvPlaybackSettingsRow(
                                   icon: Icons.aspect_ratio_rounded,
                                   title: 'Video size',
-                                  value: _videoSize,
+                                  value: _tvVideoSizeLabel(_videoSize),
                                   focusNode:
                                       settingsFocusNodes[livePlayback ? 1 : 3],
                                   onArrowUp: () => focusSettingsRow(
@@ -4294,7 +5126,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                     livePlayback ? 2 : 4,
                                   ),
                                   onPressed: () {
-                                    Navigator.of(dialogContext).pop();
+                                    _popPlaybackDialog(
+                                      _playbackDialogNavigator(dialogContext),
+                                      'settings-refresh',
+                                    );
                                     unawaited(_refreshStream());
                                   },
                                 ),
@@ -4421,7 +5256,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       if (skipSegmentFocusable) {
         _skipSegmentFocusNode.requestFocus();
       } else {
-        _playFocusNode.requestFocus();
+        _lockFocusNode.requestFocus();
       }
     } else if (focused == _skipSegmentFocusNode) {
       _playFocusNode.requestFocus();
@@ -4523,7 +5358,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
     final command = tvPlaybackRemoteActionResolver.commandFor(bucket);
     if (_hasPlaybackDialogOpen) {
       if (command == TvPlaybackRemoteCommand.close) {
-        _ignorePlaybackBackForDialog('key-close');
+        unawaited(_closeTopPlaybackDialog('key-close'));
       }
       return KeyEventResult.handled;
     }
@@ -4545,11 +5380,12 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
       return KeyEventResult.handled;
     }
     if (_locked && command != TvPlaybackRemoteCommand.close) {
+      _showControls();
       if (bucket == TvRemoteActionBucket.select &&
           FocusManager.instance.primaryFocus == _lockFocusNode) {
         _toggleLock();
       } else {
-        _lockFocusNode.requestFocus();
+        _requestHudFocusAfterBuild(_lockFocusNode);
       }
       return KeyEventResult.handled;
     }
@@ -4565,7 +5401,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
         return KeyEventResult.handled;
       case TvPlaybackRemoteCommand.stop:
       case TvPlaybackRemoteCommand.close:
-        if (_shouldSuppressPlaybackBack()) return KeyEventResult.handled;
+        if (_shouldSuppressPlaybackBack() ||
+            _shouldSuppressPlaybackBackAfterDialog()) {
+          return KeyEventResult.handled;
+        }
         unawaited(_closePlayback());
         return KeyEventResult.handled;
       case TvPlaybackRemoteCommand.seekForward:
@@ -4636,9 +5475,23 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Shortcuts(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (_hasPlaybackDialogOpen) {
+          unawaited(_closeTopPlaybackDialog('route-pop'));
+          return;
+        }
+        if (_shouldSuppressPlaybackBack() ||
+            _shouldSuppressPlaybackBackAfterDialog()) {
+          return;
+        }
+        unawaited(_closePlayback());
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Shortcuts(
         shortcuts: const <ShortcutActivator, Intent>{
           SingleActivator(LogicalKeyboardKey.escape): DismissIntent(),
           SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),
@@ -4648,10 +5501,13 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
             DismissIntent: CallbackAction<DismissIntent>(
               onInvoke: (_) {
                 if (_hasPlaybackDialogOpen) {
-                  _ignorePlaybackBackForDialog('dismiss-intent');
+                  unawaited(_closeTopPlaybackDialog('dismiss-intent'));
                   return null;
                 }
-                if (_shouldSuppressPlaybackBack()) return null;
+                if (_shouldSuppressPlaybackBack() ||
+                    _shouldSuppressPlaybackBackAfterDialog()) {
+                  return null;
+                }
                 unawaited(_closePlayback());
                 return null;
               },
@@ -4666,8 +5522,10 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
               builder: (context, _) {
                 final value = _controller?.value ?? _TvPlaybackValue.empty;
                 final initialized = value.isInitialized;
-                final loadingOnly = !initialized || _switchingSource;
-                final showPlaybackLoading = loadingOnly;
+                final controllerMounted = _controller != null;
+                final loadingOnly = !controllerMounted;
+                final showPlaybackLoading = !initialized || _switchingSource;
+                final displayProgress = _currentProgress();
                 final fullHudVisible =
                     initialized && _controlsVisible && !_switchingSource;
                 final feedback = _feedback;
@@ -4710,18 +5568,22 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                 return Stack(
                   children: [
                     Positioned.fill(
-                      child: showPlaybackLoading
-                          ? ColoredBox(
-                              color: Colors.black,
-                              child: Center(
-                                child: _TvPlaybackLoadingState(
-                                  item: widget.item,
-                                  status: _loadingStatus,
-                                ),
-                              ),
-                            )
-                          : Center(child: _videoSurface(value)),
+                      child: Center(child: _videoSurface(value)),
                     ),
+                    if (showPlaybackLoading)
+                      Positioned.fill(
+                        child: ColoredBox(
+                          color: controllerMounted
+                              ? Colors.black.withValues(alpha: 0.70)
+                              : Colors.black,
+                          child: Center(
+                            child: _TvPlaybackLoadingState(
+                              item: widget.item,
+                              status: _loadingStatus,
+                            ),
+                          ),
+                        ),
+                      ),
                     if (!loadingOnly)
                       Positioned.fill(
                         child: IgnorePointer(
@@ -4805,7 +5667,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                     if (feedback != null &&
                         (!fullHudVisible || _locked || !feedback.seeking))
                       _TvPlaybackFeedbackOverlay(feedback: feedback),
-                    if (loadingOnly)
+                    if (showPlaybackLoading)
                       SafeArea(
                         child: Padding(
                           padding: const EdgeInsets.fromLTRB(28, 24, 28, 26),
@@ -4877,8 +5739,8 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
                                     const SizedBox(height: _tvSpacing),
                                     _TvPlaybackTransportHud(
                                       initialized: initialized,
-                                      position: value.position,
-                                      duration: value.duration,
+                                      position: displayProgress.position,
+                                      duration: displayProgress.duration,
                                       focusNode: _progressFocusNode,
                                       onSeekBack: () => _fastSeekBy(
                                         Duration(
@@ -4905,6 +5767,7 @@ class _TvPlaybackPageState extends State<_TvPlaybackPage> {
           ),
         ),
       ),
+      ),
     );
   }
 }
@@ -4927,6 +5790,8 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
     this.selected = false,
     this.autofocus = false,
     this.focusNode,
+    this.onArrowLeft,
+    this.onArrowRight,
     this.onArrowUp,
     this.onArrowDown,
   });
@@ -4938,6 +5803,8 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
   final bool selected;
   final bool autofocus;
   final FocusNode? focusNode;
+  final VoidCallback? onArrowLeft;
+  final VoidCallback? onArrowRight;
   final VoidCallback? onArrowUp;
   final VoidCallback? onArrowDown;
 
@@ -4950,6 +5817,8 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
         autofocus: autofocus,
         focusNode: focusNode,
         onPressed: onPressed,
+        onArrowLeft: onArrowLeft,
+        onArrowRight: onArrowRight,
         onArrowUp: onArrowUp,
         onArrowDown: onArrowDown,
         builder: (focused) {
@@ -5037,12 +5906,17 @@ class _TvPlaybackSettingsRow extends StatelessWidget {
 }
 
 class _TvPlaybackChoice {
-  const _TvPlaybackChoice(this.label, this.icon, {String? value})
-      : value = value ?? label;
+  const _TvPlaybackChoice(
+    this.label,
+    this.icon, {
+    String? value,
+    this.subtitle = '',
+  }) : value = value ?? label;
 
   final String label;
   final IconData icon;
   final String value;
+  final String subtitle;
 }
 
 class _TvPlaybackChoiceDialog extends StatefulWidget {
@@ -5050,11 +5924,13 @@ class _TvPlaybackChoiceDialog extends StatefulWidget {
     required this.title,
     required this.selected,
     required this.choices,
+    this.onBack,
   });
 
   final String title;
   final String selected;
   final List<_TvPlaybackChoice> choices;
+  final ValueChanged<BuildContext>? onBack;
 
   @override
   State<_TvPlaybackChoiceDialog> createState() =>
@@ -5157,7 +6033,12 @@ class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
           if (key == LogicalKeyboardKey.goBack ||
               key == LogicalKeyboardKey.escape ||
               key == LogicalKeyboardKey.browserBack) {
-            Navigator.of(context).pop();
+            final onBack = widget.onBack;
+            if (onBack != null) {
+              onBack(context);
+            } else {
+              Navigator.of(context).pop();
+            }
             return KeyEventResult.handled;
           }
           final focusedIndex = _choiceFocusNodes.indexWhere(
@@ -5175,6 +6056,11 @@ class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
                   ? widget.choices.length - 1
                   : currentIndex + 1,
             );
+            return KeyEventResult.handled;
+          }
+          if (key == LogicalKeyboardKey.arrowLeft ||
+              key == LogicalKeyboardKey.arrowRight) {
+            _focusChoice(currentIndex);
             return KeyEventResult.handled;
           }
           if (key == LogicalKeyboardKey.select ||
@@ -5221,28 +6107,59 @@ class _TvPlaybackChoiceDialogState extends State<_TvPlaybackChoiceDialog> {
                         for (var index = 0;
                             index < widget.choices.length;
                             index++)
-                          _TvPlaybackSettingsRow(
-                            icon: widget.choices[index].value == widget.selected
-                                ? Icons.check_circle_rounded
-                                : widget.choices[index].icon,
-                            title: widget.choices[index].label,
-                            value:
-                                widget.choices[index].value == widget.selected
-                                    ? 'Active'
-                                    : '',
-                            selected:
-                                widget.choices[index].value == widget.selected,
-                            focusNode: _choiceFocusNodes[index],
-                            onArrowUp: index == 0
-                                ? () => _focusChoice(index)
-                                : () => _focusChoice(index - 1),
-                            onArrowDown: index == widget.choices.length - 1
-                                ? () => _focusChoice(index)
-                                : () => _focusChoice(index + 1),
-                            onPressed: () => Navigator.of(
-                              context,
-                            ).pop(widget.choices[index].value),
-                          ),
+                          widget.choices[index].subtitle.trim().isNotEmpty
+                              ? Padding(
+                                  padding: const EdgeInsets.only(bottom: 12),
+                                  child: _TvSourceGroupButton(
+                                    icon: widget.choices[index].value ==
+                                            widget.selected
+                                        ? Icons.check_circle_rounded
+                                        : widget.choices[index].icon,
+                                    title: widget.choices[index].label,
+                                    subtitle: widget.choices[index].subtitle,
+                                    selected: widget.choices[index].value ==
+                                        widget.selected,
+                                    focusNode: _choiceFocusNodes[index],
+                                    autofocus: index == _selectedIndex,
+                                    onArrowUp: index == 0
+                                        ? () => _focusChoice(index)
+                                        : () => _focusChoice(index - 1),
+                                    onArrowDown:
+                                        index == widget.choices.length - 1
+                                            ? () => _focusChoice(index)
+                                            : () => _focusChoice(index + 1),
+                                    onArrowLeft: () => _focusChoice(index),
+                                    onArrowRight: () => _focusChoice(index),
+                                    onPressed: () => Navigator.of(context)
+                                        .pop(widget.choices[index].value),
+                                  ),
+                                )
+                              : _TvPlaybackSettingsRow(
+                                  icon: widget.choices[index].value ==
+                                          widget.selected
+                                      ? Icons.check_circle_rounded
+                                      : widget.choices[index].icon,
+                                  title: widget.choices[index].label,
+                                  value: widget.choices[index].value ==
+                                          widget.selected
+                                      ? 'Active'
+                                      : '',
+                                  selected: widget.choices[index].value ==
+                                      widget.selected,
+                                  focusNode: _choiceFocusNodes[index],
+                                  onArrowUp: index == 0
+                                      ? () => _focusChoice(index)
+                                      : () => _focusChoice(index - 1),
+                                  onArrowDown:
+                                      index == widget.choices.length - 1
+                                          ? () => _focusChoice(index)
+                                          : () => _focusChoice(index + 1),
+                                  onArrowLeft: () => _focusChoice(index),
+                                  onArrowRight: () => _focusChoice(index),
+                                  onPressed: () => Navigator.of(
+                                    context,
+                                  ).pop(widget.choices[index].value),
+                                ),
                       ],
                     ),
                   ),
@@ -5629,7 +6546,7 @@ class _TvPlaybackActionRow extends StatelessWidget {
             onPressed: onSourcesPressed,
             onArrowLeft: skipSegment != null && onSkipSegmentPressed != null
                 ? () => skipSegmentFocusNode.requestFocus()
-                : onFocusMainControls,
+                : () => lockFocusNode.requestFocus(),
             onArrowRight: () => settingsFocusNode.requestFocus(),
             onArrowUp: skipSegment != null && onSkipSegmentPressed != null
                 ? () => skipSegmentFocusNode.requestFocus()
@@ -5689,8 +6606,134 @@ class _TvPlaybackSourceGroup {
 
   String get label {
     final mirrorCount = sessionIndexes.length;
-    if (mirrorCount <= 1) return quality;
-    return '$quality - $mirrorCount mirrors';
+    final mirrorLabel = mirrorCount == 1 ? 'mirror' : 'mirrors';
+    return '$quality - $mirrorCount $mirrorLabel';
+  }
+}
+
+class _TvSourceGroupButton extends StatelessWidget {
+  const _TvSourceGroupButton({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onPressed,
+    this.selected = false,
+    this.autofocus = false,
+    this.enabled = true,
+    this.animateIcon = false,
+    this.focusNode,
+    this.onArrowLeft,
+    this.onArrowRight,
+    this.onArrowUp,
+    this.onArrowDown,
+    this.minHeight = 58,
+    this.horizontalPadding = 14,
+    this.verticalPadding = 10,
+    this.iconSize = 20,
+    this.fontSize = 15,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onPressed;
+  final bool selected;
+  final bool autofocus;
+  final bool enabled;
+  final bool animateIcon;
+  final FocusNode? focusNode;
+  final VoidCallback? onArrowLeft;
+  final VoidCallback? onArrowRight;
+  final VoidCallback? onArrowUp;
+  final VoidCallback? onArrowDown;
+  final double minHeight;
+  final double horizontalPadding;
+  final double verticalPadding;
+  final double iconSize;
+  final double fontSize;
+
+  @override
+  Widget build(BuildContext context) {
+    return _TvFocusable(
+      autofocus: autofocus,
+      enabled: enabled,
+      focusNode: focusNode,
+      onPressed: onPressed,
+      onArrowLeft: onArrowLeft,
+      onArrowRight: onArrowRight,
+      onArrowUp: onArrowUp,
+      onArrowDown: onArrowDown,
+      builder: (focused) {
+        final active = focused && enabled;
+        final selectedOrActive = selected || active;
+        final foreground = selectedOrActive ? Colors.black : Colors.white;
+        final secondary = selectedOrActive
+            ? const Color(0xDD000000)
+            : const Color(0xFFB8B3C8);
+        return AnimatedContainer(
+          duration: _tvDuration(130),
+          constraints: BoxConstraints(minHeight: minHeight),
+          width: double.infinity,
+          padding: EdgeInsets.symmetric(
+            horizontal: horizontalPadding,
+            vertical: verticalPadding,
+          ),
+          decoration: BoxDecoration(
+            color: selectedOrActive ? _tvAccentColor : const Color(0x24FFFFFF),
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(
+              color: active
+                  ? _tvSolidFocusBorder
+                  : selected
+                      ? const Color(0xAAFFFFFF)
+                      : const Color(0x22FFFFFF),
+              width: active ? 2 : 1,
+            ),
+          ),
+          child: Row(
+            children: [
+              animateIcon
+                  ? _LoopingIcon(icon: icon, color: foreground)
+                  : Icon(icon, color: foreground, size: iconSize),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: foreground,
+                        fontSize: fontSize,
+                        fontWeight: FontWeight.w900,
+                        height: 1.1,
+                      ),
+                    ),
+                    if (subtitle.trim().isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: secondary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                          height: 1.1,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 }
 

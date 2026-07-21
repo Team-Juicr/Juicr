@@ -437,6 +437,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   final _homeArtworkByKey = <String, _TvItem>{};
   final _homeArtworkHydrationKeys = <String>{};
   final _homeArtworkHydrationAttempts = <String, int>{};
+  int _homeArtworkHydrationGeneration = 0;
   bool _homeArtworkHydrating = false;
   Future<void>? _catalogLoadFuture;
   DateTime? _catalogLoadedAt;
@@ -787,6 +788,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
               .expand(_homeArtworkKeys),
         );
         _homeArtworkHydrationAttempts.clear();
+        _homeArtworkHydrationGeneration += 1;
         _catalogLoadedAt = loadedAt;
         _loading = false;
         _error = null;
@@ -1154,6 +1156,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
               .expand(_homeArtworkKeys),
         );
         _homeArtworkHydrationAttempts.clear();
+        _homeArtworkHydrationGeneration += 1;
         _homeEditorial = editorial;
         _catalogLoadedAt = DateTime.now();
         _loading = false;
@@ -1299,6 +1302,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       _homeArtworkByKey.clear();
       _homeArtworkHydrationKeys.clear();
       _homeArtworkHydrationAttempts.clear();
+      _homeArtworkHydrationGeneration += 1;
       _homeEditorial = null;
       _catalogLoadedAt = null;
     });
@@ -1495,18 +1499,17 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   Future<void> _refreshHomeRailArtwork() async {
     if (!mounted || _loading || _homeArtworkHydrating) return;
     const batchLimit = 4;
-    const maxAttempts = 2;
-    final candidates = <_TvItem>[
-      ..._items,
-      ..._movies,
-      ..._series,
-      ..._animation,
-      ..._liveTv,
-      ..._upcomingPicks,
-      ..._recentItems,
-      ..._homeHeroItems,
-      for (final rail in _rails) ...rail.items,
+    const visibleAttemptLimit = 8;
+    const backgroundAttemptLimit = 2;
+    final generation = _homeArtworkHydrationGeneration;
+    final visibleCandidates = <_TvItem>[
+      ..._homeHeroItems.take(8),
+      for (final rail in _rails) ...rail.items.take(8),
     ];
+    final visibleKeys = <String>{
+      for (final item in visibleCandidates) ..._homeArtworkKeys(item),
+    };
+    final candidates = <_TvItem>[...visibleCandidates];
     final candidatesByKey = <String, _TvItem>{};
     final seen = <String>{};
     for (final item in candidates) {
@@ -1519,7 +1522,10 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       if (_hasCompleteTvArtwork(item)) continue;
       if (item.tmdbId == null && item.id.trim().isEmpty) continue;
       final attempts = _homeArtworkHydrationAttempts[key] ?? 0;
-      if (attempts >= maxAttempts) continue;
+      final attemptLimit = visibleKeys.contains(key)
+          ? visibleAttemptLimit
+          : backgroundAttemptLimit;
+      if (attempts >= attemptLimit) continue;
       candidatesByKey[key] = item;
     }
     final pendingEntries = candidatesByKey.entries.toList(growable: false)
@@ -1537,21 +1543,20 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           (_homeArtworkHydrationAttempts[key] ?? 0) + 1;
     }
     if (pending.isEmpty) return;
-    final shouldContinue = pendingEntries.length > batchLimit;
+    var shouldContinue = pendingEntries.length > batchLimit;
     _homeArtworkHydrating = true;
     final byKey = <String, _TvItem>{};
     try {
-      final hydrated = <MapEntry<String, _TvItem>>[];
-      for (final entry in pending.entries) {
-        hydrated.add(
-          MapEntry(
+      final hydrated = await Future.wait(
+        pending.entries.map((entry) async {
+          return MapEntry(
             entry.key,
             await _hydrateHeroArtworkItem(entry.value),
-          ),
-        );
-        if (!mounted) return;
-      }
+          );
+        }),
+      );
       if (!mounted) return;
+      if (generation != _homeArtworkHydrationGeneration) return;
       for (final entry in hydrated) {
         final item = entry.value;
         final hasArtwork = _hasPrimaryTvArtwork(item) ||
@@ -1578,6 +1583,16 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           });
         }
       }
+      shouldContinue = shouldContinue ||
+          pending.entries.any((entry) {
+            if (!visibleKeys.contains(entry.key)) return false;
+            final decorated = entry.value.merge(byKey[entry.key] ?? entry.value);
+            if (_hasCompleteTvArtwork(_applyHomeArtwork(decorated))) {
+              return false;
+            }
+            return (_homeArtworkHydrationAttempts[entry.key] ?? 0) <
+                visibleAttemptLimit;
+          });
     } finally {
       _homeArtworkHydrating = false;
     }
@@ -1605,11 +1620,14 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         );
         _heroEditorialItems = _mergedArtworkList(_heroEditorialItems, byKey);
       });
+      if (mounted && generation == _homeArtworkHydrationGeneration) {
+        await _saveCatalogWarmSnapshot();
+      }
     }
     if (shouldContinue && mounted) {
       unawaited(
         Future<void>.delayed(
-          const Duration(milliseconds: 120),
+          const Duration(milliseconds: 300),
         ).then((_) => _refreshHomeRailArtwork()),
       );
     }
@@ -1664,7 +1682,9 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     required int limit,
   }) async {
     if (editorial.items.isEmpty) return const <_TvItem>[];
+    const visibleLogoLimit = 8;
     final ranked = <_TvItem>[];
+    final signalByKey = <String, _TvHomeEditorialTrendItem>{};
     final seen = <String>{};
     final seedPool = _availableHomeItems(seedItems).toList();
     for (final signal in editorial.items.take(limit)) {
@@ -1674,7 +1694,10 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         if (match == null || match.poster == null) continue;
         final normalized = _normalizeCatalogLane(match);
         final key = _homeUsedKey(normalized);
-        if (seen.add(key)) ranked.add(normalized);
+        if (seen.add(key)) {
+          signalByKey[key] = signal;
+          ranked.add(normalized);
+        }
       } catch (error) {
         debugPrint(
           'Juicr TV home signal item skipped '
@@ -1686,7 +1709,64 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       'Juicr TV home signal hydrated '
       'rail=${editorial.id.ifEmpty(editorial.title)} requested=${editorial.items.length} matched=${ranked.length}',
     );
-    return ranked;
+    final visibleItems = ranked.take(visibleLogoLimit).toList(growable: false);
+    if (visibleItems.every((item) => (item.logo ?? '').trim().isNotEmpty)) {
+      return ranked;
+    }
+    final hydratedVisible = await Future.wait([
+      for (final normalized in visibleItems)
+        _hydrateHomeSignalArtwork(
+          normalized,
+          signalByKey[_homeUsedKey(normalized)] ??
+              _TvHomeEditorialTrendItem(
+                type: normalized.type,
+                title: normalized.title,
+              ),
+        ),
+    ]);
+    return [
+      for (var index = 0; index < ranked.length; index += 1)
+        if (index < hydratedVisible.length) hydratedVisible[index] else ranked[index],
+    ];
+  }
+
+  Future<_TvItem> _hydrateHomeSignalArtwork(
+    _TvItem item,
+    _TvHomeEditorialTrendItem signal,
+  ) async {
+    if ((item.logo ?? '').trim().isNotEmpty || signal.tmdbId == null) {
+      return item;
+    }
+    for (final type in _homeSignalTypes(signal)) {
+      try {
+        final metaSeed = _TvItem(
+          id: 'tmdb:${signal.tmdbId}',
+          type: type,
+          title: signal.title,
+          color: item.color,
+          poster: item.poster,
+          background: item.background,
+          year: signal.year,
+          tmdbId: signal.tmdbId,
+          imdbId: item.imdbId,
+          genres: item.genres,
+          description: item.description,
+          imdbRating: item.imdbRating,
+          releaseDate: item.releaseDate,
+          runtime: item.runtime,
+        );
+        final meta =
+            await _api.meta(metaSeed).timeout(const Duration(seconds: 12));
+        final merged = item.merge(meta);
+        if ((merged.logo ?? '').trim().isNotEmpty) return merged;
+      } catch (error) {
+        debugPrint(
+          'Juicr TV home signal artwork skipped '
+          'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+        );
+      }
+    }
+    return item;
   }
 
   _TvItem? _findHomeSignalSeedMatch(
@@ -2040,12 +2120,33 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         .map(_itemFromRecentSnapshot)
         .whereType<_TvItem>()
         .toList();
+    final recentByProgressKey = <String, _TvItem>{};
+    for (final item in restoredRecent) {
+      final itemKey = _itemKey(item);
+      final legacyItemKey = item.id.trim();
+      recentByProgressKey[itemKey] = item;
+      if (legacyItemKey.isNotEmpty) recentByProgressKey[legacyItemKey] = item;
+    }
     final restoredProgress = <String, _TvPlaybackProgress>{};
+    final suspiciousProgressKeys = <String>[];
     for (final entry in state.progress.entries) {
-      restoredProgress[entry.key] = _TvPlaybackProgress(
+      final progress = _TvPlaybackProgress(
         position: Duration(milliseconds: entry.value.positionMillis),
         duration: Duration(milliseconds: entry.value.durationMillis ?? 0),
       );
+      final item = _itemForProgressKey(entry.key, recentByProgressKey);
+      if (item != null && _isSuspiciousLongFormProgress(item, progress)) {
+        debugPrint(
+          'Juicr TV suspicious progress ignored key=[redacted] '
+          'duration=${progress.duration.inSeconds}s',
+        );
+        suspiciousProgressKeys.add(entry.key);
+        continue;
+      }
+      restoredProgress[entry.key] = progress;
+    }
+    for (final key in suspiciousProgressKeys) {
+      unawaited(_libraryStore?.clearProgress(key) ?? Future<void>.value());
     }
     _likedItemKeys
       ..clear()
@@ -2728,28 +2829,11 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   }) async {
     const heroLimit = 12;
     const heroCandidateLimit = 36;
-    const heroArtworkCandidateLimit = 16;
     if (!_hasHeroEditorialScope(editorial)) {
-      final hydrated = await _hydrateHeroArtworkItems(
-        _itemsForEditorial(
-          editorial,
-          seedItems,
-        ).take(heroArtworkCandidateLimit),
-        limit: heroLimit,
-      );
-      return hydrated;
-    }
-    final ranked = await _hydrateHomeSignalRail(
-      editorial,
-      seedItems: seedItems,
-      limit: heroCandidateLimit,
-    );
-    if (ranked.isNotEmpty) {
-      final hydratedRanked = await _hydrateHeroArtworkItems(
-        ranked.take(heroArtworkCandidateLimit),
-        limit: heroLimit,
-      );
-      if (_hasLogoArtwork(hydratedRanked)) return hydratedRanked;
+      return _itemsForEditorial(
+        editorial,
+        seedItems,
+      ).take(heroLimit).toList(growable: false);
     }
     final types = editorial.types.isEmpty
         ? const ['movie', 'series', 'animation']
@@ -2763,46 +2847,17 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           type: type,
           editorial: editorial,
           genre: genre,
-          limit: perType * 3,
+          limit: perType,
         ),
     ]);
     final interleaved = _interleaveHeroBuckets(
       buckets,
     ).take(heroCandidateLimit).toList();
     if (interleaved.isNotEmpty) {
-      return _hydrateHeroArtworkItems(
-        interleaved.take(heroArtworkCandidateLimit),
-        limit: heroLimit,
-      );
+      return interleaved.take(heroLimit).toList(growable: false);
     }
     final editorialFallback = _itemsForEditorial(editorial, seedItems);
-    return _hydrateHeroArtworkItems(
-      editorialFallback.take(heroArtworkCandidateLimit),
-      limit: heroLimit,
-    );
-  }
-
-  Future<List<_TvItem>> _hydrateHeroArtworkItems(
-    Iterable<_TvItem> sourceItems, {
-    int limit = 12,
-  }) async {
-    final items = sourceItems.toList(growable: false);
-    if (items.isEmpty) return const <_TvItem>[];
-    final hydrated = await Future.wait([
-      for (final item in items) _hydrateHeroArtworkItem(item),
-    ]);
-    final withLogo = hydrated
-        .where((item) => (item.logo ?? '').trim().isNotEmpty)
-        .toList(growable: false);
-    if (withLogo.isEmpty) return hydrated.take(limit).toList(growable: false);
-    final withoutLogo = hydrated
-        .where((item) => (item.logo ?? '').trim().isEmpty)
-        .toList(growable: false);
-    return [...withLogo, ...withoutLogo].take(limit).toList(growable: false);
-  }
-
-  bool _hasLogoArtwork(Iterable<_TvItem> items) {
-    return items.any((item) => (item.logo ?? '').trim().isNotEmpty);
+    return editorialFallback.take(heroLimit).toList(growable: false);
   }
 
   Future<_TvItem> _hydrateHeroArtworkItem(_TvItem item) async {
@@ -2889,12 +2944,17 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
             if (!_homeItemMatchesEditorialIntent(item, editorial)) continue;
             if (seen.add(_homeUsedKey(item))) gathered.add(item);
           }
-          final matches = _bestEditorialMatches(
-            gathered,
-            editorial,
-            limit,
-            allowUnknownGenre: true,
-          );
+          final isDailyGenre =
+              editorial.curationKind.trim().toLowerCase() ==
+                  'tmdb_daily_genre';
+          final matches = isDailyGenre
+              ? gathered.take(limit).toList(growable: false)
+              : _bestEditorialMatches(
+                  gathered,
+                  editorial,
+                  limit,
+                  allowUnknownGenre: true,
+                );
           if (matches.length >= limit) return matches;
         } catch (error) {
           debugPrint(
@@ -2905,12 +2965,16 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         }
       }
     }
-    return _bestEditorialMatches(
-      gathered,
-      editorial,
-      limit,
-      allowUnknownGenre: true,
-    );
+    final isDailyGenre =
+        editorial.curationKind.trim().toLowerCase() == 'tmdb_daily_genre';
+    return isDailyGenre
+        ? gathered.take(limit).toList(growable: false)
+        : _bestEditorialMatches(
+            gathered,
+            editorial,
+            limit,
+            allowUnknownGenre: true,
+          );
   }
 
   List<String> _curatedHeroSortFallbacks(String preferred) {
@@ -4262,10 +4326,22 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     return ranked.take(3).toList(growable: false);
   }
 
+  String? _preferredVerifiedPlaybackEngineId() {
+    return switch (_tvSettings.playbackEngine) {
+      'Compatibility' => 'libvlc',
+      'Native' => 'media3',
+      _ => null,
+    };
+  }
+
   List<_PlaybackSession> _verifiedPlaybackSessionsFor(String key) {
+    final preferredEngineId = _preferredVerifiedPlaybackEngineId();
     final entries = _rankVerifiedSessions(
       _verifiedPlaybackSessions[key] ?? const <_TvVerifiedPlaybackSession>[],
-    );
+    ).where((entry) {
+      if (preferredEngineId == null) return true;
+      return entry.engineId == preferredEngineId;
+    });
     return entries.map((entry) => entry.session).toList(growable: false);
   }
 
@@ -4379,6 +4455,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     for (final key in candidates) {
       final progress = _watchedProgress[key];
       if (progress == null) continue;
+      if (_isSuspiciousLongFormProgress(item, progress)) continue;
       if (best == null ||
           progress.position > best.position ||
           (progress.position == best.position &&
@@ -4421,6 +4498,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       if (parsed == null) continue;
       final progress = entry.value;
       if (progress.position <= Duration.zero) continue;
+      if (_isSuspiciousLongFormProgress(item, progress)) continue;
       if (!_shouldOfferResume(progress)) continue;
       if (best == null ||
           parsed.season > best.season ||
@@ -4496,14 +4574,15 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           duration: Duration(seconds: 4),
         ),
       );
+    if (!mounted || requestGeneration != _playRequestGeneration) return;
     try {
       final resumeProgress = target.progress;
       if (!mounted) return;
       final cachedSessions = _verifiedPlaybackSessionsFor(verifiedCacheKey);
-      final usedVerifiedPlaybackCache = cachedSessions.isNotEmpty;
-      if (usedVerifiedPlaybackCache) {
+      final hasVerifiedPlaybackCache = cachedSessions.isNotEmpty;
+      if (hasVerifiedPlaybackCache) {
         debugPrint(
-          'Juicr TV playback using verified source cache '
+          'Juicr TV playback verified source cache available '
           'key=[redacted] count=${cachedSessions.length}',
         );
       }
@@ -4533,18 +4612,16 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         }
       }
 
-      Future<List<_PlaybackSession>>? freshFallbackFuture;
-      List<_PlaybackSession> freshSessions = const <_PlaybackSession>[];
-      if (usedVerifiedPlaybackCache) {
+      final freshSessions = await fetchFreshPlaybackSessions('initial lookup');
+      final usingVerifiedCacheFallback =
+          freshSessions.isEmpty && cachedSessions.isNotEmpty;
+      if (usingVerifiedCacheFallback) {
         debugPrint(
-          'Juicr TV fresh playback source refresh warming '
-          'while using verified cache',
+          'Juicr TV playback using verified source cache fallback '
+          'key=[redacted] count=${cachedSessions.length}',
         );
-        freshFallbackFuture = fetchFreshPlaybackSessions('source refresh');
-      } else {
-        freshSessions = await fetchFreshPlaybackSessions('initial lookup');
       }
-      final sessions = usedVerifiedPlaybackCache
+      final sessions = usingVerifiedCacheFallback
           ? _orderedPlaybackSessions(cachedSessions)
           : _orderedPlaybackSessions(freshSessions);
       if (!mounted || requestGeneration != _playRequestGeneration) return;
@@ -4576,27 +4653,13 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
               season: targetSeason,
               episode: targetEpisode,
             ),
-            resolveFreshSessions: usedVerifiedPlaybackCache
-                ? () async {
-                    debugPrint(
-                      'Juicr TV fresh playback fallback requested '
-                      'cacheKey=[redacted]',
-                    );
-                    final warmed =
-                        await (freshFallbackFuture ??
-                            Future<List<_PlaybackSession>>.value(
-                              const <_PlaybackSession>[],
-                            ));
-                    if (warmed.isNotEmpty) return warmed;
-                    debugPrint(
-                      'Juicr TV fresh playback retry requested '
-                      'after cache rejection',
-                    );
-                    return fetchFreshPlaybackSessions(
-                      'retry after cache rejection',
-                    );
-                  }
-                : null,
+            resolveFreshSessions: () async {
+              debugPrint(
+                'Juicr TV fresh playback refresh requested '
+                'cacheKey=[redacted]',
+              );
+              return fetchFreshPlaybackSessions('player refresh');
+            },
             onProgress: (season, episode, progress) {
               final progressKey = _playbackProgressKey(item, season, episode);
               _savePlaybackProgressForItem(
@@ -4627,7 +4690,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         _restoreTvFocusAfterRoutePop(previousFocus);
       }
       if (result is _TvPlaybackUnavailable) {
-        if (usedVerifiedPlaybackCache) {
+        if (usingVerifiedCacheFallback) {
           _forgetVerifiedPlaybackSessions(verifiedCacheKey);
         }
         messenger
@@ -4687,6 +4750,14 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     bool markHistory = false,
   }) {
     if (progress.position <= Duration.zero) return;
+    if (_isSuspiciousLongFormProgress(item, progress)) {
+      debugPrint(
+        'Juicr TV suspicious progress save skipped key=[redacted] '
+        'duration=${progress.duration.inSeconds}s',
+      );
+      unawaited(_libraryStore?.clearProgress(playbackKey) ?? Future<void>.value());
+      return;
+    }
     final normalizedProgress = progress.duration > Duration.zero
         ? progress
         : _TvPlaybackProgress(
@@ -4722,6 +4793,78 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         (progress.position.inMilliseconds / progress.duration.inMilliseconds) >=
             0.92 &&
         remaining <= const Duration(minutes: 5);
+  }
+
+  _TvItem? _itemForProgressKey(
+    String progressKey,
+    Map<String, _TvItem> recentByProgressKey,
+  ) {
+    final direct = recentByProgressKey[progressKey];
+    if (direct != null) return direct;
+    for (final entry in recentByProgressKey.entries) {
+      if (progressKey.startsWith('${entry.key}:')) return entry.value;
+    }
+    return null;
+  }
+
+  bool _isSuspiciousLongFormProgress(
+    _TvItem item,
+    _TvPlaybackProgress progress,
+  ) {
+    if (progress.duration <= Duration.zero) return false;
+    if (!_isLongFormPlaybackItem(item)) return false;
+    final expected = _expectedRuntimeForItem(item);
+    if (expected != null && expected >= const Duration(minutes: 20)) {
+      return progress.duration.inMilliseconds <
+          (expected.inMilliseconds * 0.55).round();
+    }
+    return progress.duration < const Duration(minutes: 12);
+  }
+
+  bool _isLongFormPlaybackItem(_TvItem item) {
+    final type = item.type.trim().toLowerCase();
+    return type == 'movie' ||
+        type == 'series' ||
+        type == 'animation' ||
+        type == 'anime';
+  }
+
+  Duration? _expectedRuntimeForItem(_TvItem item) {
+    final runtime = item.runtime?.trim();
+    if (runtime == null || runtime.isEmpty) return null;
+    final clock = _parseTvClockDuration(runtime);
+    if (clock != null) return clock;
+    final lower = runtime.toLowerCase();
+    final hours = RegExp(r'(\d+)\s*h').firstMatch(lower);
+    final minutes = RegExp(r'(\d+)\s*m').firstMatch(lower);
+    final hourValue = hours == null ? 0 : int.tryParse(hours.group(1)!) ?? 0;
+    final minuteValue =
+        minutes == null ? 0 : int.tryParse(minutes.group(1)!) ?? 0;
+    if (hourValue > 0 || minuteValue > 0) {
+      return Duration(hours: hourValue, minutes: minuteValue);
+    }
+    final bareMinutes = RegExp(r'\b(\d{2,3})\b').firstMatch(runtime);
+    final parsedMinutes =
+        bareMinutes == null ? null : int.tryParse(bareMinutes.group(1)!);
+    if (parsedMinutes != null && parsedMinutes > 0) {
+      return Duration(minutes: parsedMinutes);
+    }
+    return null;
+  }
+
+  Duration? _parseTvClockDuration(String raw) {
+    final parts = raw.trim().split(':');
+    if (parts.length < 2 || parts.length > 3) return null;
+    final values = parts.map((part) => int.tryParse(part.trim())).toList();
+    if (values.any((value) => value == null || value < 0)) return null;
+    if (values.length == 2) {
+      return Duration(minutes: values[0]!, seconds: values[1]!);
+    }
+    return Duration(
+      hours: values[0]!,
+      minutes: values[1]!,
+      seconds: values[2]!,
+    );
   }
 
   Future<List<_TvSubtitle>> _subtitlesForPlayback(

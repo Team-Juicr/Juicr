@@ -1850,16 +1850,12 @@ class _TvSettingsSurface extends StatelessWidget {
       ),
       const _TvSettingsSection(
         'Advanced',
-        'Consent-guarded P2P playback and source priority controls.',
+        'Advanced playback controls and source priority preferences.',
         Icons.admin_panel_settings_outlined,
         [
           _TvSettingsLine(
             'Advanced P2P playback',
-            'P2P playback stays behind heavy consent and enabled add-ons.',
-          ),
-          _TvSettingsLine(
-            'Advanced source priorities',
-            'Priority tuning stays separate from the P2P playback switch.',
+            'Configure consent-guarded P2P playback and source priority controls.',
           ),
         ],
       ),
@@ -1941,24 +1937,7 @@ class _TvSettingsSurface extends StatelessWidget {
       });
       return;
     }
-    var sectionSettings = settings;
-    if (section.title == 'Advanced' && !settings.hasP2pConsent) {
-      final accepted = await _confirmTvP2pConsent(context);
-      if (accepted != true) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (originFocusNode.canRequestFocus) {
-            originFocusNode.requestFocus();
-          }
-        });
-        return;
-      }
-      sectionSettings = settings.copyWith(
-        p2pPlaybackConsentAccepted: true,
-        p2pPlaybackConsentVersion: kTvP2pConsentVersion,
-        p2pPlaybackConsentAcceptedAt: DateTime.now().toUtc().toIso8601String(),
-      );
-      onSettingsChanged(sectionSettings);
-    }
+    final sectionSettings = settings;
     if (!context.mounted) return;
     await _showTvDialog<void>(
       context: context,
@@ -1983,40 +1962,6 @@ class _TvSettingsSurface extends StatelessWidget {
         originFocusNode.requestFocus();
       }
     });
-  }
-
-  Future<bool?> _confirmTvP2pConsent(BuildContext context) {
-    return _showTvDialog<bool>(
-      context: context,
-      builder: (dialogContext) => const _TvConsentDialog(
-        title: 'Heavy P2P consent',
-        intro:
-            'Advanced P2P playback is user-controlled. Juicr does not provide content or legal permission. Continue only if you understand the risks and will use sources you are allowed to access.',
-        confirmLabel: 'Save P2P consent',
-        acknowledgements: [
-          _TvConsentAcknowledgement(
-            'Juicr does not provide content',
-            'Juicr does not provide, host, promote, or endorse P2P content, media goods, or legal permission.',
-          ),
-          _TvConsentAcknowledgement(
-            'I choose my own sources',
-            'I am responsible for the add-ons, sources, and media I choose to use.',
-          ),
-          _TvConsentAcknowledgement(
-            'Network visibility',
-            'P2P can expose network information to peers and may be visible to my network provider.',
-          ),
-          _TvConsentAcknowledgement(
-            'Resource usage',
-            'P2P depends on availability and can use more bandwidth, battery, and storage.',
-          ),
-          _TvConsentAcknowledgement(
-            'TV add-ons are required',
-            'Advanced P2P playback on TV only applies to enabled user add-ons.',
-          ),
-        ],
-      ),
-    );
   }
 }
 
@@ -2130,13 +2075,13 @@ class _TvSettingsGridState extends State<_TvSettingsGrid> {
                 onArrowRight: index + 1 < widget.sections.length &&
                         index % _columnCount != _columnCount - 1
                     ? () => _focusIndex(index + 1)
-                    : null,
+                    : () => _focusIndex(index),
                 onArrowUp: index - _columnCount >= 0
                     ? () => _focusIndex(index - _columnCount, alignment: 0.2)
-                    : null,
+                    : () => _focusIndex(index, alignment: 0.2),
                 onArrowDown: index + _columnCount < widget.sections.length
                     ? () => _focusIndex(index + _columnCount, alignment: 0.56)
-                    : null,
+                    : () => _focusIndex(index, alignment: 0.56),
                 onPressed: () => widget.onOpenSection(
                   widget.sections[index],
                   _nodeFor(index),
@@ -2845,6 +2790,97 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     );
   }
 
+  Future<bool> _confirmTvP2pConsent(
+    BuildContext context,
+    _TvSettingsState current,
+    ValueChanged<_TvSettingsState> update,
+  ) async {
+    if (current.hasP2pConsent) return true;
+    final accepted = await _showTvDialog<bool>(
+      context: context,
+      builder: (dialogContext) => const _TvConsentDialog(
+        title: 'Heavy P2P consent',
+        intro:
+            'Advanced P2P playback is user-controlled. Juicr does not provide content or legal permission. Continue only if you understand the risks and will use sources you are allowed to access.',
+        confirmLabel: 'Save P2P consent',
+        acknowledgements: [
+          _TvConsentAcknowledgement(
+            'Juicr does not provide content',
+            'Juicr does not provide, host, promote, or endorse P2P content, media goods, or legal permission.',
+          ),
+          _TvConsentAcknowledgement(
+            'I choose my own sources',
+            'I am responsible for the add-ons, sources, and media I choose to use.',
+          ),
+          _TvConsentAcknowledgement(
+            'Network visibility',
+            'P2P can expose network information to peers and may be visible to my network provider.',
+          ),
+          _TvConsentAcknowledgement(
+            'Resource usage',
+            'P2P depends on availability and can use more bandwidth, battery, and storage.',
+          ),
+          _TvConsentAcknowledgement(
+            'TV add-ons are required',
+            'Advanced P2P playback on TV only applies to enabled user add-ons.',
+          ),
+        ],
+      ),
+    );
+    _restoreLastActionFocus();
+    if (accepted != true) return false;
+    final consented = current.copyWith(
+      p2pPlaybackConsentAccepted: true,
+      p2pPlaybackConsentVersion: kTvP2pConsentVersion,
+      p2pPlaybackConsentAcceptedAt: DateTime.now().toUtc().toIso8601String(),
+    );
+    update(consented);
+    return true;
+  }
+
+  Future<void> _openAdvancedP2pPlayback(
+    BuildContext context,
+    _TvSettingsState current,
+    ValueChanged<_TvSettingsState> update,
+  ) async {
+    if (!await _confirmTvP2pConsent(context, current, update)) return;
+    if (!context.mounted) return;
+    final latest = _current.hasP2pConsent ? _current : current;
+    await _showTvDialog<void>(
+      context: context,
+      builder: (dialogContext) => _TvSettingsSectionDialog(
+        section: const _TvSettingsSection(
+          'Advanced P2P playback',
+          'Consent-guarded P2P playback and source priority controls.',
+          Icons.hub_outlined,
+          [
+            _TvSettingsLine(
+              'Advanced P2P playback',
+              'P2P playback stays behind heavy consent and enabled add-ons.',
+            ),
+            _TvSettingsLine(
+              'Advanced source priorities',
+              'Priority tuning stays separate from the P2P playback switch.',
+            ),
+          ],
+        ),
+        settings: latest,
+        accountSignedIn: widget.accountSignedIn,
+        accountLabel: widget.accountLabel,
+        accountSyncLabel: widget.accountSyncLabel,
+        recentCount: widget.recentCount,
+        savedCount: widget.savedCount,
+        completedCount: widget.completedCount,
+        activeWatchLabel: widget.activeWatchLabel,
+        onAccountSignIn: widget.onAccountSignIn,
+        onAccountSignOut: widget.onAccountSignOut,
+        onAccountSync: widget.onAccountSync,
+        onSettingsChanged: update,
+      ),
+    );
+    _restoreLastActionFocus();
+  }
+
   Future<void> _openP2pSourcePriorities(
     BuildContext context,
     _TvSettingsState current,
@@ -3058,7 +3094,19 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
           _TvSettingsAction(
             title: 'Advanced P2P playback',
             subtitle:
-                'Consent-guarded P2P playback and source priority controls for enabled add-ons.',
+                'Configure consent-guarded P2P playback and source priority controls.',
+            value: 'Configure',
+            icon: Icons.hub_outlined,
+            onPressed: () =>
+                unawaited(_openAdvancedP2pPlayback(context, current, update)),
+          ),
+        ];
+      case 'Advanced P2P playback':
+        return [
+          _TvSettingsAction(
+            title: 'Advanced P2P playback',
+            subtitle:
+                'Consent-guarded P2P playback for enabled add-ons.',
             value: !current.hasUserAddOns
                 ? 'Add-on'
                 : current.p2pPlaybackEnabled
@@ -3261,6 +3309,8 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
                             onArrowDown: index == actions.length - 1
                                 ? () => _focusAction(0)
                                 : () => _focusAction(index + 1),
+                            onArrowLeft: () => _focusAction(index),
+                            onArrowRight: () => _focusAction(index),
                           ),
                         ),
                     ],
@@ -4039,6 +4089,8 @@ class _TvSettingsLineCard extends StatelessWidget {
     this.onFocus,
     this.onArrowUp,
     this.onArrowDown,
+    this.onArrowLeft,
+    this.onArrowRight,
   });
 
   final _TvSettingsAction action;
@@ -4047,6 +4099,8 @@ class _TvSettingsLineCard extends StatelessWidget {
   final VoidCallback? onFocus;
   final VoidCallback? onArrowUp;
   final VoidCallback? onArrowDown;
+  final VoidCallback? onArrowLeft;
+  final VoidCallback? onArrowRight;
 
   @override
   Widget build(BuildContext context) {
@@ -4058,6 +4112,8 @@ class _TvSettingsLineCard extends StatelessWidget {
       onPressed: action.onPressed,
       onArrowUp: onArrowUp,
       onArrowDown: onArrowDown,
+      onArrowLeft: onArrowLeft,
+      onArrowRight: onArrowRight,
       builder: (focused) {
         return AnimatedContainer(
           duration: _tvDuration(140),

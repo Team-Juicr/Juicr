@@ -14,14 +14,12 @@ void main() {
       'emoji': 'leaf',
       'leaderboardOptIn': true,
       'usernameLocked': true,
-      'adPreferences': {'adsEnabled': false, 'resetGuestOnSignOut': false},
     });
 
     expect(session.token, 'token-1');
     expect(session.isValid, isTrue);
     expect(profile.isUsable, isTrue);
     expect(profile.leaderboardOptIn, isTrue);
-    expect(profile.adPreferences.adsEnabled, isFalse);
     expect(profile.toJson()['email'], 'user@example.com');
   });
 

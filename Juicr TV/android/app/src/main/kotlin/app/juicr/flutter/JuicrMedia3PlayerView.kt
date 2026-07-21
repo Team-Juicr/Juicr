@@ -33,6 +33,8 @@ import io.flutter.plugin.platform.PlatformViewFactory
 import kotlin.math.max
 
 private const val DEFAULT_MEDIA3_USER_AGENT = "JuicrApp/1 Android Media3"
+private const val DEFAULT_MAX_AUTO_VIDEO_WIDTH = 1920
+private const val DEFAULT_MAX_AUTO_VIDEO_HEIGHT = 1080
 
 class JuicrMedia3PlayerViewFactory(
     messenger: BinaryMessenger
@@ -113,6 +115,7 @@ class JuicrMedia3PlayerView(
     private var released = false
     private var firstFrameRendered = false
     private var droppedVideoFrames = 0
+    private var audioSinkErrorCount = 0
     private var bandwidthKbps = 0L
     private var lastTrackSummary = "unknown"
     private var lastAudioTrackSummary = "unknown"
@@ -134,6 +137,7 @@ class JuicrMedia3PlayerView(
         val subtitleAutoSelect = (args?.get("subtitleAutoSelect") as? String).orEmpty().lowercase()
         val trackSelector = DefaultTrackSelector(context)
         val trackParams = trackSelector.parameters.buildUpon()
+        trackParams.setMaxVideoSize(DEFAULT_MAX_AUTO_VIDEO_WIDTH, DEFAULT_MAX_AUTO_VIDEO_HEIGHT)
         preferredAudioLanguage?.let { trackParams.setPreferredAudioLanguage(it) }
         subtitleLanguage?.let { trackParams.setPreferredTextLanguage(it) }
         if (subtitleAutoSelect == "off" || subtitleAutoSelect == "none") {
@@ -247,6 +251,10 @@ class JuicrMedia3PlayerView(
         droppedVideoFrames += droppedFrames
     }
 
+    override fun onAudioSinkError(eventTime: AnalyticsListener.EventTime, audioSinkError: Exception) {
+        audioSinkErrorCount += 1
+    }
+
     override fun onBandwidthEstimate(
         eventTime: AnalyticsListener.EventTime,
         totalLoadTimeMs: Int,
@@ -283,6 +291,7 @@ class JuicrMedia3PlayerView(
                 "playbackState" to Player.STATE_IDLE,
                 "firstFrameRendered" to false,
                 "droppedVideoFrames" to droppedVideoFrames,
+                "audioSinkErrorCount" to audioSinkErrorCount,
                 "bandwidthKbps" to bandwidthKbps,
                 "trackSummary" to lastTrackSummary,
                 "audioTrackSummary" to lastAudioTrackSummary,
@@ -311,6 +320,7 @@ class JuicrMedia3PlayerView(
             "playbackState" to player.playbackState,
             "firstFrameRendered" to firstFrameRendered,
             "droppedVideoFrames" to droppedVideoFrames,
+            "audioSinkErrorCount" to audioSinkErrorCount,
             "bandwidthKbps" to bandwidthKbps,
             "trackSummary" to lastTrackSummary,
             "audioTrackSummary" to lastAudioTrackSummary,
@@ -365,7 +375,7 @@ class JuicrMedia3PlayerView(
             }
             val viewAspect = viewWidth / viewHeight
             val sourceAspect = when (videoSizeMode) {
-                "16:9" -> 16f / 9f
+                "16:9", "wide" -> 16f / 9f
                 else -> videoWidth / videoHeight
             }
             val matrix = Matrix()

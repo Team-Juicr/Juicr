@@ -61,32 +61,6 @@ class TvAccountSession {
   }
 }
 
-class TvAccountAdPreferences {
-  const TvAccountAdPreferences({
-    required this.adsEnabled,
-    this.resetGuestOnSignOut = true,
-  });
-
-  factory TvAccountAdPreferences.fromJson(Object? value) {
-    final json = value is Map ? Map<String, Object?>.from(value) : const <String, Object?>{};
-    return TvAccountAdPreferences(
-      adsEnabled: _boolFromAccountValue(json['adsEnabled'], fallback: true),
-      resetGuestOnSignOut: json['resetGuestOnSignOut'] != false,
-    );
-  }
-
-  final bool adsEnabled;
-  final bool resetGuestOnSignOut;
-
-  Map<String, Object?> toJson() {
-    return <String, Object?>{
-      'adsEnabled': adsEnabled,
-      'source': 'account',
-      'resetGuestOnSignOut': resetGuestOnSignOut,
-    };
-  }
-}
-
 class TvAccountProfile {
   const TvAccountProfile({
     required this.id,
@@ -95,7 +69,6 @@ class TvAccountProfile {
     this.emoji = '',
     this.leaderboardOptIn = false,
     this.usernameLocked = false,
-    this.adPreferences = const TvAccountAdPreferences(adsEnabled: true),
     this.createdAt,
     this.lastLoginAt,
   });
@@ -108,7 +81,6 @@ class TvAccountProfile {
       emoji: (json['emoji'] ?? '').toString().trim(),
       leaderboardOptIn: json['leaderboardOptIn'] == true,
       usernameLocked: json['usernameLocked'] == true,
-      adPreferences: TvAccountAdPreferences.fromJson(json['adPreferences']),
       createdAt: DateTime.tryParse((json['createdAt'] ?? '').toString()),
       lastLoginAt: DateTime.tryParse((json['lastLoginAt'] ?? '').toString()),
     );
@@ -120,7 +92,6 @@ class TvAccountProfile {
   final String emoji;
   final bool leaderboardOptIn;
   final bool usernameLocked;
-  final TvAccountAdPreferences adPreferences;
   final DateTime? createdAt;
   final DateTime? lastLoginAt;
 
@@ -134,7 +105,6 @@ class TvAccountProfile {
       if (emoji.isNotEmpty) 'emoji': emoji,
       'leaderboardOptIn': leaderboardOptIn,
       'usernameLocked': usernameLocked,
-      'adPreferences': adPreferences.toJson(),
       if (createdAt != null) 'createdAt': createdAt!.toIso8601String(),
       if (lastLoginAt != null) 'lastLoginAt': lastLoginAt!.toIso8601String(),
     };
@@ -190,13 +160,3 @@ TvAccountProfile? _profileFromEncoded(String? encoded) {
   }
 }
 
-bool _boolFromAccountValue(Object? value, {required bool fallback}) {
-  if (value is bool) return value;
-  if (value is num) return value != 0;
-  if (value is String) {
-    final normalized = value.trim().toLowerCase();
-    if (normalized == 'true' || normalized == '1') return true;
-    if (normalized == 'false' || normalized == '0') return false;
-  }
-  return fallback;
-}

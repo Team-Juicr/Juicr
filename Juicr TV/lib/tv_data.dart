@@ -5,10 +5,14 @@ class _TvApi {
     ..connectionTimeout = const Duration(seconds: 12);
 
   static const int _catalogCacheLimit = 72;
+  static const int _metaCacheLimit = 160;
   static final Map<String, List<_TvItem>> _catalogCache =
       <String, List<_TvItem>>{};
   static final Map<String, Future<List<_TvItem>>> _catalogInFlight =
       <String, Future<List<_TvItem>>>{};
+  static final Map<String, _TvItem> _metaCache = <String, _TvItem>{};
+  static final Map<String, Future<_TvItem>> _metaInflight =
+      <String, Future<_TvItem>>{};
   static List<String>? _nativeProviderCache;
   static DateTime? _nativeProviderCacheStoredAt;
   static const List<String> _defaultNativeProviderOrder = <String>[
@@ -213,6 +217,24 @@ class _TvApi {
   }
 
   Future<_TvItem> meta(_TvItem item) async {
+    final cacheKey = _metaCacheKey(item);
+    final cached = _metaCache[cacheKey];
+    if (cached != null) return item.merge(cached);
+    final inFlight = _metaInflight[cacheKey];
+    if (inFlight != null) return item.merge(await inFlight);
+    final future = _fetchMetaUncached(item);
+    _metaInflight[cacheKey] = future;
+    try {
+      final merged = await future;
+      _metaCache[cacheKey] = merged;
+      _evictOldestMetaCacheEntries();
+      return item.merge(merged);
+    } finally {
+      _metaInflight.remove(cacheKey);
+    }
+  }
+
+  Future<_TvItem> _fetchMetaUncached(_TvItem item) async {
     final uri = Uri.parse('$_apiBase/meta').replace(
       queryParameters: {
         'type': item.type == 'animation' ? 'series' : item.type,
@@ -231,6 +253,21 @@ class _TvApi {
         fallbackType: item.type,
       ),
     );
+  }
+
+  String _metaCacheKey(_TvItem item) {
+    return [
+      item.type == 'animation' ? 'series' : item.type,
+      _tvResolveHostedId(item),
+      _tvImdbIdForHostedLookup(item) ?? '',
+      item.tmdbId?.toString() ?? '',
+    ].join('|');
+  }
+
+  void _evictOldestMetaCacheEntries() {
+    while (_metaCache.length > _metaCacheLimit) {
+      _metaCache.remove(_metaCache.keys.first);
+    }
   }
 
   Future<List<_TvItem>> recommendations(_TvItem item) async {

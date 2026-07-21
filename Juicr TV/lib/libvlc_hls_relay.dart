@@ -100,6 +100,7 @@ class LibVlcHlsRelay {
   var _headCount = 0;
   var _rangeCount = 0;
   var _ignoredRangeCount = 0;
+  var _forwardedRangeCount = 0;
   var _notFoundCount = 0;
   var _upstreamErrorCount = 0;
   var _lastStatusBucket = 'none';
@@ -107,6 +108,7 @@ class LibVlcHlsRelay {
   String get summary =>
       'requests=$_requestCount playlists=$_playlistCount media=$_mediaCount '
       'heads=$_headCount ranges=$_rangeCount ignoredRanges=$_ignoredRangeCount '
+      'forwardedRanges=$_forwardedRangeCount '
       'notFound=$_notFoundCount upstreamErrors=$_upstreamErrorCount '
       'lastStatus=$_lastStatusBucket';
 
@@ -150,17 +152,16 @@ class LibVlcHlsRelay {
     final knownPlaylistRequest = _playlistIds.contains(id);
     if (range != null && range.trim().isNotEmpty) {
       _rangeCount += 1;
-      _ignoredRangeCount += 1;
     }
 
     if (_continuousTsMode && id == 'root') {
-      await _handleContinuousTsRequest(request, upstream);
+      await _handleContinuousTsRequest(request, upstream, range: range);
       return;
     }
 
     HttpClientRequest upstreamRequest;
     try {
-      upstreamRequest = await _openUpstream(upstream);
+      upstreamRequest = await _openUpstream(upstream, range: range);
     } catch (_) {
       _upstreamErrorCount += 1;
       _onEvent('native libvlc hls relay request failed stage=open $summary');
@@ -317,8 +318,9 @@ class LibVlcHlsRelay {
 
   Future<void> _handleContinuousTsRequest(
     HttpRequest request,
-    Uri playlistUri,
-  ) async {
+    Uri playlistUri, {
+    String? range,
+  }) async {
     _playlistCount += 1;
     request.response.statusCode = HttpStatus.ok;
     request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
@@ -333,7 +335,9 @@ class LibVlcHlsRelay {
     var streamedBytes = 0;
     var rejectedSegments = 0;
     try {
-      final plan = _trimPlanForResume(await _continuousTsPlan(playlistUri));
+      final plan = _trimPlanForResume(
+        await _continuousTsPlan(playlistUri),
+      );
       if (plan.segmentUris.isEmpty) {
         _upstreamErrorCount += 1;
         _onEvent(
@@ -473,10 +477,16 @@ class LibVlcHlsRelay {
     );
   }
 
-  Future<_ContinuousTsPlan> _continuousTsPlan(Uri playlistUri) async {
+  Future<_ContinuousTsPlan> _continuousTsPlan(
+    Uri playlistUri, {
+    String? range,
+  }) async {
     var currentUri = playlistUri;
     for (var depth = 0; depth < 3; depth += 1) {
-      final request = await _openUpstream(currentUri);
+      final request = await _openUpstream(
+        currentUri,
+        range: depth == 0 ? range : null,
+      );
       final response = await request.close();
       _lastStatusBucket = _statusBucket(response.statusCode);
       if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -512,7 +522,9 @@ class LibVlcHlsRelay {
         currentUri = nestedPlaylist;
         continue;
       }
-      final liveTail = _tailWindowForRollingPlaylist(segmentPlan);
+      final liveTail = _playlistHasEndList(body)
+          ? segmentPlan
+          : _tailWindowForRollingPlaylist(segmentPlan);
       return _ContinuousTsPlan(
         segmentUris: liveTail.segmentUris,
         segmentDurations: liveTail.segmentDurations,
@@ -579,7 +591,7 @@ class LibVlcHlsRelay {
     );
   }
 
-  Future<HttpClientRequest> _openUpstream(Uri upstream) async {
+  Future<HttpClientRequest> _openUpstream(Uri upstream, {String? range}) async {
     final request = await _client.openUrl('GET', upstream);
     if (!_limitHeadersToUpstreamOrigin || _sameOrigin(upstream, _uriById['root'])) {
       for (final header in _headers.entries) {
@@ -590,8 +602,30 @@ class LibVlcHlsRelay {
         request.headers.set(name, value);
       }
     }
+    final normalizedRange = _safeForwardRange(range);
+    if (normalizedRange != null) {
+      request.headers.set(HttpHeaders.rangeHeader, normalizedRange);
+      _forwardedRangeCount += 1;
+    } else if (range != null && range.trim().isNotEmpty) {
+      _ignoredRangeCount += 1;
+    }
     request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
     return request;
+  }
+
+  static String? _safeForwardRange(String? range) {
+    final value = range?.trim();
+    if (value == null || value.isEmpty) return null;
+    final match = RegExp(r'^bytes=(\d+)-(\d*)$').firstMatch(value);
+    if (match == null) return null;
+    final start = int.tryParse(match.group(1) ?? '');
+    if (start == null || start < 0) return null;
+    final endText = match.group(2) ?? '';
+    if (endText.isNotEmpty) {
+      final end = int.tryParse(endText);
+      if (end == null || end < start) return null;
+    }
+    return value;
   }
 
   static bool _sameOrigin(Uri left, Uri? right) {
@@ -672,6 +706,10 @@ class LibVlcHlsRelay {
 
   static bool _playlistLooksLikeMaster(String body) {
     return body.contains('#EXT-X-STREAM-INF');
+  }
+
+  static bool _playlistHasEndList(String body) {
+    return body.contains('#EXT-X-ENDLIST');
   }
 
   static Uri? _firstVariantUri(Uri baseUri, String body) {

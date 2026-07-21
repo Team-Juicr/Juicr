@@ -49,6 +49,9 @@ android {
     }
 
     buildTypes {
+        profile {
+            initWith debug
+        }
         release {
             signingConfig = hasReleaseSigningConfig ? signingConfigs.release : signingConfigs.debug
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
