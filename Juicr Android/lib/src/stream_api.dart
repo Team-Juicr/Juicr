@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 
 import 'app_state.dart';
+import 'android_playback_request.dart';
 import 'catalog_item.dart';
 import 'copy_normalization.dart';
 import 'diagnostic_log.dart';
@@ -12,6 +13,7 @@ import 'language_options.dart';
 import 'p2p_stream_bridge.dart';
 import 'personal_server_api.dart';
 import 'playback_provider.dart';
+import 'playback_request_transport.dart';
 import 'source_ranking.dart';
 
 class StreamCatalogResult {
@@ -108,12 +110,12 @@ class LeaderboardResult {
       scope: (json['scope'] ?? '').toString().trim(),
       rows: rawRows is List
           ? rawRows
-                .whereType<Map>()
-                .map(
-                  (row) =>
-                      LeaderboardEntry.fromJson(Map<String, dynamic>.from(row)),
-                )
-                .toList(growable: false)
+              .whereType<Map>()
+              .map(
+                (row) =>
+                    LeaderboardEntry.fromJson(Map<String, dynamic>.from(row)),
+              )
+              .toList(growable: false)
           : const <LeaderboardEntry>[],
       viewer: LeaderboardViewer.fromJson(json['viewer']),
     );
@@ -159,8 +161,8 @@ class LeaderboardViewer {
     final json = value is Map<String, dynamic>
         ? value
         : value is Map
-        ? Map<String, dynamic>.from(value)
-        : const <String, dynamic>{};
+            ? Map<String, dynamic>.from(value)
+            : const <String, dynamic>{};
     final rank = _intValue(json['rank']);
     return LeaderboardViewer(
       rank: rank != null && rank > 0 ? rank : null,
@@ -338,15 +340,14 @@ class HomeEditorialRail {
       genres: genres.isNotEmpty
           ? genres
           : routeGenre.isNotEmpty && routeGenre.toLowerCase() != 'all genres'
-          ? [routeGenre]
-          : const <String>[],
+              ? [routeGenre]
+              : const <String>[],
       types: (types.isNotEmpty ? types : [if (routeType.isNotEmpty) routeType])
           .map(_mediaTypeFromRemote)
           .whereType<MediaType>()
           .toList(growable: false),
       sort: _catalogSortFromRemote(sort),
-      perType:
-          int.tryParse(
+      perType: int.tryParse(
             (json['perType'] ?? '').toString(),
           )?.clamp(1, 12).toInt() ??
           4,
@@ -359,18 +360,15 @@ class HomeEditorialRail {
       curationKind: (json['curationKind'] ?? '').toString().trim(),
       notificationHook: (json['notificationHook'] ?? '').toString().trim(),
       pageOneOnly: json['pageOneOnly'] == true,
-      limit:
-          int.tryParse(
+      limit: int.tryParse(
             (json['limit'] ?? '').toString(),
           )?.clamp(1, 20).toInt() ??
           10,
-      movieLimit:
-          int.tryParse(
+      movieLimit: int.tryParse(
             (json['movieLimit'] ?? '').toString(),
           )?.clamp(1, 10).toInt() ??
           5,
-      seriesLimit:
-          int.tryParse(
+      seriesLimit: int.tryParse(
             (json['seriesLimit'] ?? '').toString(),
           )?.clamp(1, 10).toInt() ??
           5,
@@ -530,8 +528,7 @@ class NotificationAutomaticPolicy {
       dailyCurationEnabled: json['dailyCurationEnabled'] != false,
       smartSuggestionsEnabled: json['smartSuggestionsEnabled'] != false,
       interstitialCardsEnabled: json['interstitialCardsEnabled'] != false,
-      dailyCap:
-          int.tryParse(
+      dailyCap: int.tryParse(
             (json['dailyCap'] ?? '').toString(),
           )?.clamp(0, 3).toInt() ??
           0,
@@ -576,13 +573,11 @@ class NotificationInterstitialPolicy {
     return NotificationInterstitialPolicy(
       enabled: json['enabled'] == true,
       carousel: json['carousel'] != false,
-      maxCards:
-          int.tryParse(
+      maxCards: int.tryParse(
             (json['maxCards'] ?? '').toString(),
           )?.clamp(1, 8).toInt() ??
           5,
-      minHoursBetweenShows:
-          int.tryParse(
+      minHoursBetweenShows: int.tryParse(
             (json['minHoursBetweenShows'] ?? '').toString(),
           )?.clamp(1, 168).toInt() ??
           24,
@@ -671,7 +666,8 @@ CatalogSort _catalogSortFromRemote(String value) {
     'imdb_rating' ||
     'rating' ||
     'best' ||
-    'featured' => CatalogSort.imdbRating,
+    'featured' =>
+      CatalogSort.imdbRating,
     'toprated' || 'top_rated' || 'top-rated' => CatalogSort.topRated,
     'newest' || 'latest' || 'recent' => CatalogSort.newest,
     'oldest' => CatalogSort.oldest,
@@ -680,11 +676,13 @@ CatalogSort _catalogSortFromRemote(String value) {
     'z_a' ||
     'z-a' ||
     'alphadesc' ||
-    'alpha_desc' => CatalogSort.alphaDesc,
+    'alpha_desc' =>
+      CatalogSort.alphaDesc,
     'nowplaying' || 'now_playing' || 'now-playing' => CatalogSort.nowPlaying,
     'airingtoday' ||
     'airing_today' ||
-    'airing-today' => CatalogSort.airingToday,
+    'airing-today' =>
+      CatalogSort.airingToday,
     'ontv' || 'on_tv' || 'on-tv' => CatalogSort.onTv,
     'upcoming' || 'comingsoon' || 'coming_soon' => CatalogSort.upcoming,
     'hidden' ||
@@ -692,7 +690,8 @@ CatalogSort _catalogSortFromRemote(String value) {
     'hidden_gems' ||
     'hidden-gems' ||
     'obscure' ||
-    'gems' => CatalogSort.hiddenGems,
+    'gems' =>
+      CatalogSort.hiddenGems,
     'new' || 'year' => CatalogSort.year,
     'popular' || 'top' || 'trending' => CatalogSort.top,
     _ => CatalogSort.top,
@@ -977,7 +976,16 @@ class RuntimeAppPolicy {
 }
 
 class StreamApi {
-  StreamApi({http.Client? client}) : _client = client ?? http.Client();
+  StreamApi({
+    http.Client? client,
+    PlaybackHttpClientFactory? playbackClientFactory,
+    Duration remoteBootstrapTimeout = const Duration(seconds: 75),
+  })  : _client = client ?? http.Client(),
+        _playbackTransport = PlaybackRequestTransport(
+          playbackClientFactory ??
+              (client == null ? () => http.Client() : () => client),
+        ),
+        _remoteBootstrapTimeout = remoteBootstrapTimeout;
 
   static const String baseUrl = 'https://api.juicr.app';
   static const String subtitleLanguages = 'en,es,fr,de,pt';
@@ -999,19 +1007,15 @@ class StreamApi {
   static const int _metadataCacheLimit = 160;
   static const int _recommendationsCacheLimit = 80;
   static const int _remotePlaybackBusyBackoffSeconds = 8;
-  static const Duration _remoteBootstrapTimeout = Duration(seconds: 75);
   static const Duration _remotePlaybackBusyBackoff = Duration(
     seconds: _remotePlaybackBusyBackoffSeconds,
   );
-  static const Map<String, String> _hostedHeaders = <String, String>{
-    'user-agent': 'JuicrApp/1 Flutter',
-    'x-juicr-client': 'flutter-native',
-    'x-juicr-client-version': '1',
-    'x-juicr-capabilities':
-        'playback_v2,source_pool,mirrors,playback_feedback,subtitle_v2',
-  };
+  static const Map<String, String> _hostedHeaders =
+      androidPlaybackRequestHeaders;
 
   final http.Client _client;
+  final PlaybackRequestTransport _playbackTransport;
+  final Duration _remoteBootstrapTimeout;
   late final PersonalServerApi _personalServers = PersonalServerApi(
     client: _client,
   );
@@ -1030,7 +1034,7 @@ class StreamApi {
   static final Map<String, List<String>> _catalogOriginCountriesCache =
       <String, List<String>>{};
   static final Map<String, Future<List<String>>>
-  _catalogOriginCountriesInFlight = <String, Future<List<String>>>{};
+      _catalogOriginCountriesInFlight = <String, Future<List<String>>>{};
   static final Map<String, MetaDetails> _metadataCache =
       <String, MetaDetails>{};
   static final Map<String, Future<MetaDetails>> _metadataInFlight =
@@ -1066,7 +1070,8 @@ class StreamApi {
     _configCacheStoredAt = null;
   }
 
-  void close() {
+  Future<void> close() async {
+    await _playbackTransport.close();
     _client.close();
   }
 
@@ -1131,12 +1136,10 @@ class StreamApi {
     final cleanToken = token.trim();
     if (cleanToken.isEmpty) return null;
     final uri = Uri.parse('$baseUrl/auth/session');
-    final response = await _client
-        .get(
-          uri,
-          headers: {..._hostedHeaders, 'authorization': 'Bearer $cleanToken'},
-        )
-        .timeout(const Duration(seconds: 8));
+    final response = await _client.get(
+      uri,
+      headers: {..._hostedHeaders, 'authorization': 'Bearer $cleanToken'},
+    ).timeout(const Duration(seconds: 8));
     if (response.statusCode == 401) return null;
     final decoded = _decodeResponse(response, 'Account session');
     return _accountProfileFromAuth(decoded['user']);
@@ -1145,16 +1148,14 @@ class StreamApi {
   Future<void> signOutAuthSession(String token) async {
     final cleanToken = token.trim();
     final uri = Uri.parse('$baseUrl/auth/sign-out');
-    final response = await _client
-        .post(
-          uri,
-          headers: {
-            ..._hostedHeaders,
-            'content-type': 'application/json',
-            if (cleanToken.isNotEmpty) 'authorization': 'Bearer $cleanToken',
-          },
-        )
-        .timeout(const Duration(seconds: 8));
+    final response = await _client.post(
+      uri,
+      headers: {
+        ..._hostedHeaders,
+        'content-type': 'application/json',
+        if (cleanToken.isNotEmpty) 'authorization': 'Bearer $cleanToken',
+      },
+    ).timeout(const Duration(seconds: 8));
     _decodeResponse(response, 'Sign out');
   }
 
@@ -1185,12 +1186,10 @@ class StreamApi {
     final cleanToken = token.trim();
     if (cleanToken.isEmpty) return null;
     final uri = Uri.parse('$baseUrl/account/library-sync');
-    final response = await _client
-        .get(
-          uri,
-          headers: {..._hostedHeaders, 'authorization': 'Bearer $cleanToken'},
-        )
-        .timeout(const Duration(seconds: 8));
+    final response = await _client.get(
+      uri,
+      headers: {..._hostedHeaders, 'authorization': 'Bearer $cleanToken'},
+    ).timeout(const Duration(seconds: 8));
     final decoded = _decodeResponse(response, 'Library sync');
     return AccountLibrarySyncSnapshotResult.fromJson(decoded);
   }
@@ -1244,15 +1243,13 @@ class StreamApi {
       '$baseUrl/leaderboard',
     ).replace(queryParameters: {'scope': scope.trim()});
     final cleanToken = token.trim();
-    final response = await _client
-        .get(
-          uri,
-          headers: {
-            ..._hostedHeaders,
-            if (cleanToken.isNotEmpty) 'authorization': 'Bearer $cleanToken',
-          },
-        )
-        .timeout(const Duration(seconds: 8));
+    final response = await _client.get(
+      uri,
+      headers: {
+        ..._hostedHeaders,
+        if (cleanToken.isNotEmpty) 'authorization': 'Bearer $cleanToken',
+      },
+    ).timeout(const Duration(seconds: 8));
     final decoded = _decodeResponse(response, 'Leaderboard');
     return LeaderboardResult.fromJson(decoded);
   }
@@ -1526,18 +1523,16 @@ class StreamApi {
   }
 
   String _configScopeKey() {
-    final addons =
-        AppState.userAddons.value
-            .where((addon) => addon.active)
-            .map((addon) => '${addon.id}:${addon.manifestUrl}')
-            .toList()
-          ..sort();
-    final personalServers =
-        AppState.personalServerConnections.value
-            .where((connection) => connection.active && connection.isConfigured)
-            .map((connection) => connection.type.id)
-            .toList()
-          ..sort();
+    final addons = AppState.userAddons.value
+        .where((addon) => addon.active)
+        .map((addon) => '${addon.id}:${addon.manifestUrl}')
+        .toList()
+      ..sort();
+    final personalServers = AppState.personalServerConnections.value
+        .where((connection) => connection.active && connection.isConfigured)
+        .map((connection) => connection.type.id)
+        .toList()
+      ..sort();
     return <String>[
       AppState.defaultCatalogEnabled.value
           ? 'default-catalog-on'
@@ -1568,18 +1563,15 @@ class StreamApi {
         final serverHealth = raw['serverHealth'];
         final health = serverHealth is Map ? serverHealth : raw;
         if (providerId.trim().isEmpty) continue;
-        final serverLabel = serverHealth is Map
-            ? (serverHealth['label'] ?? '').toString()
-            : '';
+        final serverLabel =
+            serverHealth is Map ? (serverHealth['label'] ?? '').toString() : '';
         final rowLabel = _providerHealthLabelFromResolverRow(raw);
-        final label = _isUsefulProviderHealthLabel(serverLabel)
-            ? serverLabel
-            : rowLabel;
+        final label =
+            _isUsefulProviderHealthLabel(serverLabel) ? serverLabel : rowLabel;
         AppState.recordNativeProviderServerHealth(
           providerId: providerId,
           label: label,
-          sourceCount:
-              _firstInt(health, const [
+          sourceCount: _firstInt(health, const [
                 'sourceCount',
                 'avgSourceCount',
                 'lastSourceCount',
@@ -1589,8 +1581,7 @@ class StreamApi {
                 'avgSourceCount',
                 'lastSourceCount',
               ]),
-          responseMillis:
-              _firstInt(health, const [
+          responseMillis: _firstInt(health, const [
                 'medianMs',
                 'avgLatencyMs',
                 'lastLatencyMs',
@@ -1784,9 +1775,8 @@ class StreamApi {
             'year',
             'latest',
           ].any(label.contains);
-          final yearOptions = catalog
-              .extraOptions('genre')
-              .where(_looksLikeYear);
+          final yearOptions =
+              catalog.extraOptions('genre').where(_looksLikeYear);
           if (!looksYearCapable && yearOptions.isEmpty) continue;
           if (yearOptions.isEmpty) continue;
           yearsByType
@@ -1892,29 +1882,28 @@ class StreamApi {
       queryParameters: {if (normalizedId.isNotEmpty) 'id': normalizedId},
     );
     try {
-      final check =
-          await _resolveHealthSampleOrEmpty(
-            uri,
-            fallbackSample: fallbackSample,
-          ).timeout(
-            const Duration(seconds: 4),
-            onTimeout: () {
-              DiagnosticLog.add(
-                'playback health sample timeout after 4s id=${fallbackSample.id}: using fallback sample',
-              );
-              return ProviderHealthSampleCheck(
-                sample: fallbackSample,
-                providerCounts: const <String, int>{},
-                sourceClassCounts: const <String, int>{},
-                timedOut: true,
-                result: const PlaybackResult(
-                  sources: <PlaybackSource>[],
-                  embeds: <PlaybackCandidate>[],
-                  debug: PlaybackDebug.empty,
-                ),
-              );
-            },
+      final check = await _resolveHealthSampleOrEmpty(
+        uri,
+        fallbackSample: fallbackSample,
+      ).timeout(
+        const Duration(seconds: 4),
+        onTimeout: () {
+          DiagnosticLog.add(
+            'playback health sample timeout after 4s id=${fallbackSample.id}: using fallback sample',
           );
+          return ProviderHealthSampleCheck(
+            sample: fallbackSample,
+            providerCounts: const <String, int>{},
+            sourceClassCounts: const <String, int>{},
+            timedOut: true,
+            result: const PlaybackResult(
+              sources: <PlaybackSource>[],
+              embeds: <PlaybackCandidate>[],
+              debug: PlaybackDebug.empty,
+            ),
+          );
+        },
+      );
       DiagnosticLog.add(
         'playback health sample ok type=${check.sample.type.compatTypeValue} id=${check.sample.id} sources=${check.result.sources.length} embeds=${check.result.embeds.length}',
       );
@@ -1957,8 +1946,7 @@ class StreamApi {
     bool deepSearch = false,
     bool preferDefaultCatalog = false,
   }) async {
-    final effectivePreferDefaultCatalog =
-        preferDefaultCatalog ||
+    final effectivePreferDefaultCatalog = preferDefaultCatalog ||
         _shouldPreferDefaultCatalogForBrowse(
           sort,
           year: year,
@@ -2033,8 +2021,7 @@ class StreamApi {
     bool deepSearch = false,
     bool preferDefaultCatalog = false,
   }) async {
-    final effectivePreferDefaultCatalog =
-        preferDefaultCatalog ||
+    final effectivePreferDefaultCatalog = preferDefaultCatalog ||
         _shouldPreferDefaultCatalogForBrowse(
           sort,
           year: year,
@@ -2105,8 +2092,7 @@ class StreamApi {
     final hasYearFilter = cleanYear != null && cleanYear.isNotEmpty;
     final cleanGenre = genre?.trim() ?? '';
     final cleanOriginalLanguage = _normalizeOriginalLanguage(originalLanguage);
-    final focusedCatalogFilter =
-        cleanedSearch.isNotEmpty ||
+    final focusedCatalogFilter = cleanedSearch.isNotEmpty ||
         hasYearFilter ||
         (originCountry?.trim().isNotEmpty == true) ||
         cleanOriginalLanguage.isNotEmpty ||
@@ -2119,8 +2105,8 @@ class StreamApi {
     final personalItems = preferDefaultCatalog
         ? const <CatalogItem>[]
         : await _personalServers
-              .catalog(type: type, sort: sort, skip: skip, search: search)
-              .catchError((_) => const <CatalogItem>[]);
+            .catalog(type: type, sort: sort, skip: skip, search: search)
+            .catchError((_) => const <CatalogItem>[]);
     var supplementalItems = personalItems;
     final addonResult = preferDefaultCatalog
         ? null
@@ -2134,8 +2120,7 @@ class StreamApi {
           );
     if (addonResult != null) {
       if (cleanedSearch.isEmpty || addonResult.items.isNotEmpty) {
-        final yearFilter =
-            addonGenre != null &&
+        final yearFilter = addonGenre != null &&
             RegExp(r'^\d{4}$').hasMatch(addonGenre.trim());
         if (cleanedSearch.isEmpty && addonResult.items.isEmpty && yearFilter) {
           defaultFallbackReason = 'addon returned no year matches';
@@ -2253,8 +2238,7 @@ class StreamApi {
       company: company,
       collection: collection,
       search: search,
-      softFail:
-          (addonResult != null && cleanedSearch.isNotEmpty) ||
+      softFail: (addonResult != null && cleanedSearch.isNotEmpty) ||
           (skip > 0 && cleanedSearch.isEmpty),
     );
     final mergedResult = _filterCatalogResultForAdultLane(
@@ -2397,11 +2381,9 @@ class StreamApi {
     }
     return StreamCatalogResult(
       items: items,
-      skipDelta:
-          base.skipDelta ??
+      skipDelta: base.skipDelta ??
           (base.items.isEmpty ? PersonalServerApi.pageSize : pageSize),
-      hasMore:
-          base.hasMore == true ||
+      hasMore: base.hasMore == true ||
           personalItems.length >= PersonalServerApi.pageSize,
     );
   }
@@ -2647,9 +2629,8 @@ class StreamApi {
     String? search,
     bool deepSearch = false,
   }) async {
-    final activeAddons = AppState.userAddons.value
-        .where((addon) => addon.active)
-        .toList();
+    final activeAddons =
+        AppState.userAddons.value.where((addon) => addon.active).toList();
     if (activeAddons.isEmpty) return null;
 
     final items = <CatalogItem>[];
@@ -2755,10 +2736,9 @@ class StreamApi {
     final selectedYear = year?.trim().isNotEmpty == true
         ? year!.trim()
         : genre != null && RegExp(r'^\d{4}$').hasMatch(genre.trim())
-        ? genre.trim()
-        : null;
-    final selectedGenre =
-        cleanedSearch.isEmpty &&
+            ? genre.trim()
+            : null;
+    final selectedGenre = cleanedSearch.isEmpty &&
             genre != null &&
             genre.trim().isNotEmpty &&
             genre != 'All genres' &&
@@ -2792,11 +2772,9 @@ class StreamApi {
       try {
         final startPage = (skip ~/ _builtInCatalogPageSize) + 1;
         const maxFilteredPageAdvances = 4;
-        for (
-          var page = startPage;
-          page < startPage + maxFilteredPageAdvances;
-          page += 1
-        ) {
+        for (var page = startPage;
+            page < startPage + maxFilteredPageAdvances;
+            page += 1) {
           final catalogType = _backendCatalogTypeFor(type);
           final query = <String, String>{
             'type': catalogType,
@@ -2906,10 +2884,8 @@ class StreamApi {
     ].join(':');
     final cachedMatches = _builtInGenreScanCache[cacheKey];
     if (cachedMatches != null) {
-      final pageMatches = cachedMatches
-          .skip(skip)
-          .take(_builtInCatalogPageSize)
-          .toList();
+      final pageMatches =
+          cachedMatches.skip(skip).take(_builtInCatalogPageSize).toList();
       DiagnosticLog.add(
         'catalog built-in genre scan cache type=${type.compatTypeValue} sort=${sort.id} genre="$genre" matched=${cachedMatches.length} returned=${pageMatches.length}',
       );
@@ -2927,11 +2903,9 @@ class StreamApi {
       _builtInGenreScanTargetMatches,
     );
     var scanExhausted = false;
-    for (
-      var page = 1;
-      page <= _builtInGenreScanMaxPages && matches.length < targetMatches;
-      page += 1
-    ) {
+    for (var page = 1;
+        page <= _builtInGenreScanMaxPages && matches.length < targetMatches;
+        page += 1) {
       try {
         final query = <String, String>{
           'type': _backendCatalogTypeFor(type),
@@ -2994,10 +2968,8 @@ class StreamApi {
         'catalog built-in genre scan cache skipped type=${type.compatTypeValue} sort=${sort.id} genre="$genre" reason=scan_error',
       );
     }
-    final pageMatches = matches
-        .skip(skip)
-        .take(_builtInCatalogPageSize)
-        .toList();
+    final pageMatches =
+        matches.skip(skip).take(_builtInCatalogPageSize).toList();
     DiagnosticLog.add(
       'catalog built-in genre scan type=${type.compatTypeValue} sort=${sort.id} genre="$genre" matched=${matches.length} returned=${pageMatches.length}',
     );
@@ -3024,8 +2996,8 @@ class StreamApi {
     final selectedYear = year?.trim().isNotEmpty == true
         ? year!.trim()
         : genre != null && RegExp(r'^\d{4}$').hasMatch(genre.trim())
-        ? genre.trim()
-        : null;
+            ? genre.trim()
+            : null;
     final targetMatches = max(
       skip + _builtInCatalogPageSize,
       _builtInAnimationScanTargetMatches,
@@ -3055,12 +3027,10 @@ class StreamApi {
     ];
 
     for (final genrePass in genrePasses) {
-      for (
-        var page = 1;
-        page <= _builtInAnimationScanMaxPages &&
-            animationMatches.length < targetMatches;
-        page += 1
-      ) {
+      for (var page = 1;
+          page <= _builtInAnimationScanMaxPages &&
+              animationMatches.length < targetMatches;
+          page += 1) {
         try {
           final query = <String, String>{
             'type': MediaType.animation.compatTypeValue,
@@ -3133,10 +3103,8 @@ class StreamApi {
       if (animationMatches.length >= targetMatches) break;
     }
 
-    final pageMatches = animationMatches
-        .skip(skip)
-        .take(_builtInCatalogPageSize)
-        .toList();
+    final pageMatches =
+        animationMatches.skip(skip).take(_builtInCatalogPageSize).toList();
     DiagnosticLog.add(
       'catalog built-in animation scan sort=${sort.id} genre=${genre ?? ""} search="$cleanedSearch" matched=${animationMatches.length} returned=${pageMatches.length}',
     );
@@ -3144,8 +3112,7 @@ class StreamApi {
     return StreamCatalogResult(
       items: pageMatches,
       skipDelta: _builtInCatalogPageSize,
-      hasMore:
-          pageMatches.isNotEmpty &&
+      hasMore: pageMatches.isNotEmpty &&
           (serverHasMore ||
               !exhausted ||
               skip + _builtInCatalogPageSize < animationMatches.length),
@@ -3190,11 +3157,9 @@ class StreamApi {
     final today = _todayReleaseDate();
     final cleanOriginalLanguage = _normalizeOriginalLanguage(originalLanguage);
 
-    for (
-      var page = 1;
-      page <= _builtInYearScanMaxPages && matches.length < targetMatches;
-      page += 1
-    ) {
+    for (var page = 1;
+        page <= _builtInYearScanMaxPages && matches.length < targetMatches;
+        page += 1) {
       try {
         final query = <String, String>{
           'type': type.compatTypeValue,
@@ -3257,10 +3222,8 @@ class StreamApi {
       }
     }
 
-    final pageMatches = matches
-        .skip(skip)
-        .take(_builtInCatalogPageSize)
-        .toList();
+    final pageMatches =
+        matches.skip(skip).take(_builtInCatalogPageSize).toList();
     DiagnosticLog.add(
       'catalog built-in year direct type=${type.compatTypeValue} sort=${sort.id} year="$year" raw=$scannedRaw matched=${matches.length} returned=${pageMatches.length} origin=${originCountry ?? ""}',
     );
@@ -3269,8 +3232,7 @@ class StreamApi {
     return StreamCatalogResult(
       items: pageMatches,
       skipDelta: _builtInCatalogPageSize,
-      hasMore:
-          pageFilled &&
+      hasMore: pageFilled &&
           (!scanExhausted || skip + _builtInCatalogPageSize < matches.length),
     );
   }
@@ -3284,10 +3246,8 @@ class StreamApi {
     final cacheKey = '${type.compatTypeValue}:$year';
     final cachedMatches = _builtInYearScanCache[cacheKey];
     if (cachedMatches != null) {
-      final pageMatches = cachedMatches
-          .skip(skip)
-          .take(_builtInCatalogPageSize)
-          .toList();
+      final pageMatches =
+          cachedMatches.skip(skip).take(_builtInCatalogPageSize).toList();
       DiagnosticLog.add(
         'catalog built-in year scan cache type=${type.compatTypeValue} year="$year" matched=${cachedMatches.length} returned=${pageMatches.length}',
       );
@@ -3304,11 +3264,9 @@ class StreamApi {
       _builtInYearScanTargetMatches,
     );
     var scanExhausted = false;
-    for (
-      var page = 1;
-      page <= _builtInYearScanMaxPages && matches.length < targetMatches;
-      page += 1
-    ) {
+    for (var page = 1;
+        page <= _builtInYearScanMaxPages && matches.length < targetMatches;
+        page += 1) {
       try {
         final query = <String, String>{
           'type': type.compatTypeValue,
@@ -3347,10 +3305,8 @@ class StreamApi {
     if (!hitTarget || scanExhausted) {
       _builtInYearScanCache[cacheKey] = List<CatalogItem>.unmodifiable(matches);
     }
-    final pageMatches = matches
-        .skip(skip)
-        .take(_builtInCatalogPageSize)
-        .toList();
+    final pageMatches =
+        matches.skip(skip).take(_builtInCatalogPageSize).toList();
     DiagnosticLog.add(
       'catalog built-in year scan type=${type.compatTypeValue} year="$year" matched=${matches.length} returned=${pageMatches.length}',
     );
@@ -3434,9 +3390,8 @@ class StreamApi {
       catalogType: catalog.type,
     );
     DiagnosticLog.add('addon catalog start addon=${addon.name} uri=[hidden]');
-    final response = await _client
-        .get(uri)
-        .timeout(const Duration(seconds: 12));
+    final response =
+        await _client.get(uri).timeout(const Duration(seconds: 12));
     final decoded = _decodeResponse(response, 'Add-on catalog');
     final metas = decoded['metas'] ?? decoded['items'];
     if (metas is! List) return const <CatalogItem>[];
@@ -3564,15 +3519,13 @@ class StreamApi {
   }
 
   bool _hasUsefulMetadata(CatalogItem details, CatalogItem fallback) {
-    final hasArtwork =
-        (details.poster?.trim().isNotEmpty ?? false) ||
+    final hasArtwork = (details.poster?.trim().isNotEmpty ?? false) ||
         (details.background?.trim().isNotEmpty ?? false) ||
         (details.logo?.trim().isNotEmpty ?? false);
     final hasDescription = (details.description?.trim().isNotEmpty ?? false);
     final hasGenres = details.genres.isNotEmpty;
     final hasRating = (details.imdbRating?.trim().isNotEmpty ?? false);
-    final changedTitle =
-        details.name.trim().isNotEmpty &&
+    final changedTitle = details.name.trim().isNotEmpty &&
         details.name.trim().toLowerCase() != fallback.name.trim().toLowerCase();
     return hasArtwork ||
         hasDescription ||
@@ -3690,9 +3643,8 @@ class StreamApi {
   }
 
   Future<MetaDetails?> _addonMetaDetails(CatalogItem item) async {
-    final activeAddons = AppState.userAddons.value
-        .where((addon) => addon.active)
-        .toList();
+    final activeAddons =
+        AppState.userAddons.value.where((addon) => addon.active).toList();
     for (final addon in activeAddons) {
       try {
         final manifest = await _addonManifest(addon);
@@ -3708,9 +3660,8 @@ class StreamApi {
             DiagnosticLog.add(
               'addon metadata start addon=${addon.name} uri=[hidden]',
             );
-            final response = await _client
-                .get(uri)
-                .timeout(const Duration(seconds: 10));
+            final response =
+                await _client.get(uri).timeout(const Duration(seconds: 10));
             final decoded = _decodeResponse(response, 'Add-on metadata');
             final rawMeta = decoded['meta'] ?? decoded['item'];
             if (rawMeta is! Map<String, dynamic>) continue;
@@ -3730,7 +3681,11 @@ class StreamApi {
     return null;
   }
 
-  Future<PlaybackResult> resolveMovie(CatalogItem item) {
+  Future<PlaybackResult> resolveMovie(
+    CatalogItem item, {
+    int? recoveryAttempt,
+    PlaybackRequestCancellation? cancellation,
+  }) {
     if (item.isPersonalServerItem) {
       return _personalServers.playback(item).then((result) {
         if (result == null) {
@@ -3744,15 +3699,19 @@ class StreamApi {
     if (!AppState.defaultProvidersEnabled.value) {
       throw const StreamApiException('Default stream providers are disabled.');
     }
-    final id = _resolveId(item);
+    final requestSpec = buildAndroidPlaybackRequestSpec(
+      item,
+      series: false,
+      recoveryAttempt: recoveryAttempt,
+    );
+    final id = requestSpec.query['id']!;
     DiagnosticLog.add(
       'resolveMovie id=$id selectedNative=${AppState.selectedNativeProviderId}',
     );
     return _resolveRemote(
-      Uri.parse('$baseUrl/resolve/movie').replace(
-        queryParameters: {'id': id, 'mediaType': item.type.compatTypeValue},
-      ),
+      requestSpec,
       cooldownKey: 'movie:$id',
+      cancellation: cancellation,
     );
   }
 
@@ -3772,6 +3731,8 @@ class StreamApi {
   Future<List<PlaybackSource>> resolveMovieNativeSources(
     CatalogItem item, {
     required String providerId,
+    int? recoveryAttempt,
+    PlaybackRequestCancellation? cancellation,
   }) {
     if (item.isPersonalServerItem) {
       return _personalServers
@@ -3803,20 +3764,20 @@ class StreamApi {
       );
       return Future<List<PlaybackSource>>.value(const <PlaybackSource>[]);
     }
-    final id = _resolveId(item);
     final resolverProviderId = _resolverProviderIdFor(providerId);
+    final requestSpec = buildAndroidPlaybackRequestSpec(
+      item,
+      series: false,
+      recoveryAttempt: recoveryAttempt,
+      opaqueSession: false,
+      additionalQuery: <String, String>{'provider': resolverProviderId},
+    );
     return _resolveHostedNativeSources(
-      Uri.parse('$baseUrl/resolve/movie').replace(
-        queryParameters: {
-          'id': id,
-          'mediaType': item.type.compatTypeValue,
-          'provider': resolverProviderId,
-          'title': item.name,
-          if (item.year != null && item.year!.isNotEmpty) 'year': item.year!,
-        },
-      ),
+      requestSpec.uri(baseUrl),
       providerId: providerId,
       resolverProviderId: resolverProviderId,
+      playbackHeaders: requestSpec.headers,
+      cancellation: cancellation,
     );
   }
 
@@ -3892,6 +3853,8 @@ class StreamApi {
     CatalogItem item, {
     required int season,
     required int episode,
+    int? recoveryAttempt,
+    PlaybackRequestCancellation? cancellation,
   }) {
     if (item.isPersonalServerItem) {
       return _personalServers.playback(item).then((result) {
@@ -3906,20 +3869,21 @@ class StreamApi {
     if (!AppState.defaultProvidersEnabled.value) {
       throw const StreamApiException('Default stream providers are disabled.');
     }
-    final id = _resolveId(item);
+    final requestSpec = buildAndroidPlaybackRequestSpec(
+      item,
+      series: true,
+      season: season,
+      episode: episode,
+      recoveryAttempt: recoveryAttempt,
+    );
+    final id = requestSpec.query['id']!;
     DiagnosticLog.add(
       'resolveEpisode id=$id S$season E$episode selectedNative=${AppState.selectedNativeProviderId}',
     );
     return _resolveRemote(
-      Uri.parse('$baseUrl/resolve/tv').replace(
-        queryParameters: {
-          'id': id,
-          'season': season.toString(),
-          'episode': episode.toString(),
-          'mediaType': item.type.compatTypeValue,
-        },
-      ),
+      requestSpec,
       cooldownKey: 'tv:$id:$season:$episode',
+      cancellation: cancellation,
     );
   }
 
@@ -3944,9 +3908,8 @@ class StreamApi {
     if (requestIds.isEmpty) {
       throw const StreamApiException('No active stream add-ons.');
     }
-    final activeAddons = AppState.userAddons.value
-        .where((addon) => addon.active)
-        .toList();
+    final activeAddons =
+        AppState.userAddons.value.where((addon) => addon.active).toList();
     if (activeAddons.isEmpty) {
       throw const StreamApiException('No active stream add-ons.');
     }
@@ -3973,9 +3936,8 @@ class StreamApi {
             DiagnosticLog.add(
               'addon stream start addon=${addon.name} uri=[hidden]',
             );
-            final response = await _client
-                .get(uri)
-                .timeout(const Duration(seconds: 18));
+            final response =
+                await _client.get(uri).timeout(const Duration(seconds: 18));
             final decoded = _decodeResponse(response, 'Add-on streams');
             final candidateStreams = decoded['streams'];
             if (candidateStreams is List && candidateStreams.isNotEmpty) {
@@ -4135,9 +4097,8 @@ class StreamApi {
     required String id,
     required String label,
   }) async {
-    final activeAddons = AppState.userAddons.value
-        .where((addon) => addon.active)
-        .toList();
+    final activeAddons =
+        AppState.userAddons.value.where((addon) => addon.active).toList();
     if (activeAddons.isEmpty) return const <PlaybackSubtitle>[];
 
     final subtitles = <PlaybackSubtitle>[];
@@ -4169,9 +4130,8 @@ class StreamApi {
           DiagnosticLog.add(
             'addon subtitles start addon=${addon.name} uri=[hidden]',
           );
-          final response = await _client
-              .get(uri)
-              .timeout(const Duration(seconds: 12));
+          final response =
+              await _client.get(uri).timeout(const Duration(seconds: 12));
           final decoded = _decodeResponse(response, 'Add-on subtitles');
           final rawSubtitles = decoded['subtitles'] ?? decoded['items'];
           final parsed = _mapList(
@@ -4200,9 +4160,8 @@ class StreamApi {
     required String id,
     required String label,
   }) async {
-    final activeAddons = AppState.userAddons.value
-        .where((addon) => addon.active)
-        .toList();
+    final activeAddons =
+        AppState.userAddons.value.where((addon) => addon.active).toList();
     if (activeAddons.isEmpty) return const <TrailerItem>[];
 
     final trailers = <TrailerItem>[];
@@ -4226,9 +4185,8 @@ class StreamApi {
             DiagnosticLog.add(
               'addon trailers start addon=${addon.name} resource=$resource uri=[hidden]',
             );
-            final response = await _client
-                .get(uri)
-                .timeout(const Duration(seconds: 10));
+            final response =
+                await _client.get(uri).timeout(const Duration(seconds: 10));
             final decoded = _decodeResponse(response, 'Add-on trailers');
             final rawTrailers = decoded['trailers'] ?? decoded['items'];
             final parsed = _mapList(
@@ -4258,6 +4216,8 @@ class StreamApi {
     required int season,
     required int episode,
     required String providerId,
+    int? recoveryAttempt,
+    PlaybackRequestCancellation? cancellation,
   }) {
     if (!AppState.defaultProvidersEnabled.value) {
       DiagnosticLog.add(
@@ -4265,22 +4225,22 @@ class StreamApi {
       );
       return Future<List<PlaybackSource>>.value(const <PlaybackSource>[]);
     }
-    final id = _resolveId(item);
     final resolverProviderId = _resolverProviderIdFor(providerId);
+    final requestSpec = buildAndroidPlaybackRequestSpec(
+      item,
+      series: true,
+      season: season,
+      episode: episode,
+      recoveryAttempt: recoveryAttempt,
+      opaqueSession: false,
+      additionalQuery: <String, String>{'provider': resolverProviderId},
+    );
     return _resolveHostedNativeSources(
-      Uri.parse('$baseUrl/resolve/tv').replace(
-        queryParameters: {
-          'id': id,
-          'season': season.toString(),
-          'episode': episode.toString(),
-          'mediaType': item.type.compatTypeValue,
-          'provider': resolverProviderId,
-          'title': item.name,
-          if (item.year != null && item.year!.isNotEmpty) 'year': item.year!,
-        },
-      ),
+      requestSpec.uri(baseUrl),
       providerId: providerId,
       resolverProviderId: resolverProviderId,
+      playbackHeaders: requestSpec.headers,
+      cancellation: cancellation,
     );
   }
 
@@ -4321,8 +4281,9 @@ class StreamApi {
   }
 
   Future<PlaybackResult> _resolveRemote(
-    Uri remoteUri, {
+    AndroidPlaybackRequestSpec requestSpec, {
     required String cooldownKey,
+    PlaybackRequestCancellation? cancellation,
   }) async {
     final now = DateTime.now();
     _remotePlaybackBusyUntilByKey.removeWhere(
@@ -4339,21 +4300,26 @@ class StreamApi {
       );
     }
     DiagnosticLog.add('remote resolve start: uri=[hidden]');
-    final remote = await _resolve(remoteUri).timeout(
-      _remoteBootstrapTimeout,
-      onTimeout: () {
-        _remotePlaybackBusyUntilByKey[cooldownKey] = DateTime.now().add(
-          _remotePlaybackBusyBackoff,
-        );
-        DiagnosticLog.add(
-          'remote resolve timeout after ${_remoteBootstrapTimeout.inSeconds}s: fail closed before provider scan key=$cooldownKey',
-        );
-        throw const StreamApiTemporaryBlockException(
-          'Finding sources is taking longer than usual. Try again in a few seconds.',
-          retryAfterSeconds: _remotePlaybackBusyBackoffSeconds,
-        );
-      },
-    );
+    PlaybackResult remote;
+    try {
+      remote = await _resolvePlayback(
+        requestSpec.uri(baseUrl),
+        headers: requestSpec.headers,
+        timeout: _remoteBootstrapTimeout,
+        cancellation: cancellation,
+      );
+    } on TimeoutException {
+      _remotePlaybackBusyUntilByKey[cooldownKey] = DateTime.now().add(
+        _remotePlaybackBusyBackoff,
+      );
+      DiagnosticLog.add(
+        'remote resolve timeout after ${_remoteBootstrapTimeout.inSeconds}s: fail closed before provider scan key=$cooldownKey',
+      );
+      throw const StreamApiTemporaryBlockException(
+        'Finding sources is taking longer than usual. Try again in a few seconds.',
+        retryAfterSeconds: _remotePlaybackBusyBackoffSeconds,
+      );
+    }
     DiagnosticLog.add(
       'remote resolve ok: sources=${remote.sources.length} embeds=${remote.embeds.length} sourceClasses=${_playbackSourceClassCountsDiagnostic(remote.sources)}',
     );
@@ -4366,8 +4332,7 @@ class StreamApi {
   }) async {
     final response = await _getHosted(uri);
     final decoded = _decodeResponse(response, 'Playback health sample');
-    final sample =
-        _providerHealthSampleFromJson(decoded['sample']) ??
+    final sample = _providerHealthSampleFromJson(decoded['sample']) ??
         _providerHealthSampleFromJson(decoded) ??
         fallbackSample;
     return ProviderHealthSampleCheck(
@@ -4406,23 +4371,65 @@ class StreamApi {
     return result;
   }
 
+  Future<PlaybackResult> _resolvePlayback(
+    Uri uri, {
+    required Map<String, String> headers,
+    required Duration timeout,
+    PlaybackRequestCancellation? cancellation,
+  }) async {
+    final response = await _playbackTransport.get(
+      uri,
+      headers: headers,
+      timeout: timeout,
+      cancellation: cancellation,
+    );
+    final decoded = _decodeResponse(response, 'Playback');
+    final result = PlaybackResult.fromJson(decoded);
+    if (result.sources.isEmpty) {
+      DiagnosticLog.add(
+        'playback response empty ${_playbackEmptyDiagnostic(decoded)}',
+      );
+      if (result.retryAfterSeconds > 0) {
+        throw StreamApiTemporaryBlockException(
+          'Title unavailable; retry after ${result.retryAfterSeconds}s.',
+          retryAfterSeconds: result.retryAfterSeconds,
+        );
+      }
+      final remoteBlock = _playbackTemporaryBlockMessage(decoded);
+      if (remoteBlock != null) {
+        throw StreamApiTemporaryBlockException(remoteBlock);
+      }
+      throw const StreamApiException(
+        'Playback response did not include playable sources.',
+      );
+    }
+    return result;
+  }
+
   Future<List<PlaybackSource>> _resolveHostedNativeSources(
     Uri uri, {
     required String providerId,
     String? resolverProviderId,
+    Map<String, String>? playbackHeaders,
+    PlaybackRequestCancellation? cancellation,
   }) async {
     final remoteProviderId = resolverProviderId ?? providerId;
     try {
       DiagnosticLog.add(
         'hosted playback lookup start provider=$providerId remoteProvider=$remoteProviderId uri=[hidden]',
       );
-      final timeoutSeconds =
-          AppState.playerBehaviorSettings.value.experimentalControlsEnabled
+      final timeoutSeconds = AppState
+              .playerBehaviorSettings.value.experimentalControlsEnabled
           ? AppState.playerBehaviorSettings.value.providerResolveTimeoutSeconds
           : const PlayerBehaviorSettings().providerResolveTimeoutSeconds;
-      final result = await _resolve(
-        uri,
-      ).timeout(Duration(seconds: timeoutSeconds));
+      final result = playbackHeaders == null
+          ? await _resolve(uri).timeout(Duration(seconds: timeoutSeconds))
+          : await _resolvePlayback(
+              uri,
+              headers: playbackHeaders,
+              timeout: Duration(seconds: timeoutSeconds),
+              cancellation: cancellation,
+            );
       final sources = result.sources
           .where(
             (source) =>
@@ -4548,9 +4555,8 @@ MetaDetails _mergeMetaDetails(MetaDetails primary, MetaDetails fallback) {
   return MetaDetails(
     item: primary.item.merge(fallback.item),
     runtime: primary.runtime ?? fallback.runtime,
-    director: primary.director.isNotEmpty
-        ? primary.director
-        : fallback.director,
+    director:
+        primary.director.isNotEmpty ? primary.director : fallback.director,
     cast: primary.cast.isNotEmpty ? primary.cast : fallback.cast,
     directorPeople: primary.directorPeople.isNotEmpty
         ? primary.directorPeople
@@ -5044,10 +5050,9 @@ class _AddonRouteSummary {
       'external_only' => 'External routes need an explicit handoff.',
       'p2p_ready' =>
         'Advanced P2P playback is enabled for recognized sources. Source health can still vary.',
-      'torrent_locked' =>
-        P2pLocalStreamBridge.instance.isAvailable
-            ? 'P2P playback needs Advanced P2P consent and the playback switch enabled. Use direct or account-backed streams first.'
-            : 'P2P playback needs a build with Advanced P2P support. Use direct or account-backed streams first.',
+      'torrent_locked' => P2pLocalStreamBridge.instance.isAvailable
+          ? 'P2P playback needs Advanced P2P consent and the playback switch enabled. Use direct or account-backed streams first.'
+          : 'P2P playback needs a build with Advanced P2P support. Use direct or account-backed streams first.',
       'account_required' =>
         'The add-on may need account setup before it can return direct streams.',
       'unsupported' =>
@@ -5093,8 +5098,7 @@ class _AddonRouteAttemptEvidence {
     required MediaType mediaType,
     required _AddonRouteSummary summary,
   }) {
-    final total =
-        summary.direct +
+    final total = summary.direct +
         summary.external +
         summary.torrentLocked +
         summary.accountRequired +
@@ -5259,8 +5263,7 @@ Map<String, dynamic> _decodeResponse(http.Response response, String label) {
 
   if (response.statusCode < 200 || response.statusCode >= 300) {
     final message = decoded?['error'] ?? decoded?['message'];
-    final retryAfter =
-        _intValue(decoded?['retryAfterSeconds']) ??
+    final retryAfter = _intValue(decoded?['retryAfterSeconds']) ??
         _intValue(response.headers['retry-after']);
     if (response.statusCode == 429 || (retryAfter != null && retryAfter > 0)) {
       throw StreamApiTemporaryBlockException(
@@ -5386,18 +5389,16 @@ class _AddonManifest {
 
     final hasSearch = search != null && search.trim().isNotEmpty;
     if (hasSearch) {
-      final searchable = byType
-          .where((catalog) => catalog.supportsExtra('search'))
-          .toList();
+      final searchable =
+          byType.where((catalog) => catalog.supportsExtra('search')).toList();
       if (searchable.isNotEmpty)
         return _bestSortedCatalog(searchable, sort) ?? searchable.first;
     }
 
     final hasGenre = genre != null && genre != 'All genres';
     if (hasGenre) {
-      final genreCatalogs = byType
-          .where((catalog) => catalog.supportsExtra('genre'))
-          .toList();
+      final genreCatalogs =
+          byType.where((catalog) => catalog.supportsExtra('genre')).toList();
       if (genreCatalogs.isNotEmpty) {
         final yearFilter = RegExp(r'^\d{4}$').hasMatch(genre.trim());
         if (yearFilter) {
@@ -5427,31 +5428,31 @@ class _AddonManifest {
     final keywords = switch (sort) {
       CatalogSort.top => const ['popular', 'top', 'trending', 'netflix'],
       CatalogSort.topRated => const [
-        'top_rated',
-        'top rated',
-        'rating',
-        'best',
-      ],
+          'top_rated',
+          'top rated',
+          'rating',
+          'best',
+        ],
       CatalogSort.newest => const ['new', 'latest', 'recent'],
       CatalogSort.oldest => const ['oldest', 'classic'],
       CatalogSort.alphaAsc => const ['a-z', 'az', 'alphabetical'],
       CatalogSort.alphaDesc => const ['z-a', 'za'],
       CatalogSort.nowPlaying => const ['now_playing', 'now playing', 'new'],
       CatalogSort.airingToday => const [
-        'airing_today',
-        'airing today',
-        'today',
-      ],
+          'airing_today',
+          'airing today',
+          'today',
+        ],
       CatalogSort.onTv => const ['on_tv', 'on tv', 'currently airing'],
       CatalogSort.year => const ['new', 'recent', 'year', 'latest'],
       CatalogSort.upcoming => const ['upcoming', 'coming soon'],
       CatalogSort.imdbRating => const ['featured', 'imdb', 'rating', 'best'],
       CatalogSort.hiddenGems => const [
-        'hidden',
-        'hidden gems',
-        'gems',
-        'obscure',
-      ],
+          'hidden',
+          'hidden gems',
+          'gems',
+          'obscure',
+        ],
     };
     for (final catalog in catalogs) {
       final label = '${catalog.id} ${catalog.name}'.toLowerCase();
@@ -5516,9 +5517,8 @@ Uri _addonCatalogUri(
     extras.add('skip=$skip');
   }
   final extraPath = extras.isEmpty ? '' : '/${extras.join('&')}';
-  final effectiveType = catalogType.trim().isEmpty
-      ? type.compatTypeValue
-      : catalogType;
+  final effectiveType =
+      catalogType.trim().isEmpty ? type.compatTypeValue : catalogType;
   return Uri.parse('$base/catalog/$effectiveType/$catalogId$extraPath.json');
 }
 
@@ -5665,19 +5665,18 @@ bool _looksLikeExternalDirectStream(Map<String, dynamic> stream, String url) {
   if (_looksLikeDirectMediaUrl(url)) return true;
   if (_looksDebridStream(stream, url)) return true;
 
-  final text =
-      [
-            stream['name'],
-            stream['title'],
-            stream['description'],
-            stream['message'],
-            stream['error'],
-            stream['behaviorHints'],
-            url,
-          ]
-          .whereType<Object>()
-          .map((value) => value.toString().toLowerCase())
-          .join(' ');
+  final text = [
+    stream['name'],
+    stream['title'],
+    stream['description'],
+    stream['message'],
+    stream['error'],
+    stream['behaviorHints'],
+    url,
+  ]
+      .whereType<Object>()
+      .map((value) => value.toString().toLowerCase())
+      .join(' ');
   final hasQuality = RegExp(
     r'\b(2160p|1440p|1080p|720p|480p|360p|4k)\b',
     caseSensitive: false,
@@ -5698,18 +5697,17 @@ String _youtubeWatchUrl(String ytId) {
 }
 
 bool _looksAccountRequiredStream(Map<String, dynamic> stream) {
-  final text =
-      [
-            stream['name'],
-            stream['title'],
-            stream['description'],
-            stream['message'],
-            stream['error'],
-            stream['externalUrl'],
-          ]
-          .whereType<Object>()
-          .map((value) => value.toString().toLowerCase())
-          .join(' ');
+  final text = [
+    stream['name'],
+    stream['title'],
+    stream['description'],
+    stream['message'],
+    stream['error'],
+    stream['externalUrl'],
+  ]
+      .whereType<Object>()
+      .map((value) => value.toString().toLowerCase())
+      .join(' ');
   return text.contains('debrid') ||
       text.contains('cached') ||
       text.contains('premium') ||
@@ -5832,13 +5830,11 @@ String _providerHealthLabelFromResolverRow(Map<dynamic, dynamic> row) {
   final failures = _intOrNull(row['failureCount']) ?? 0;
   final timeouts = _intOrNull(row['timeoutCount']) ?? 0;
   final noSources = _intOrNull(row['noSourceCount']) ?? 0;
-  final latencyMs =
-      _intOrNull(row['medianMs']) ??
+  final latencyMs = _intOrNull(row['medianMs']) ??
       _intOrNull(row['avgLatencyMs']) ??
       _intOrNull(row['lastLatencyMs']) ??
       0;
-  final sourceCount =
-      _intOrNull(row['sourceCount']) ??
+  final sourceCount = _intOrNull(row['sourceCount']) ??
       _intOrNull(row['avgSourceCount']) ??
       _intOrNull(row['lastSourceCount']) ??
       0;

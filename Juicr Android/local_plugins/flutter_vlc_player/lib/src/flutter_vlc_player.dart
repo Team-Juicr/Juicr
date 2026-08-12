@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_vlc_player/src/vlc_player_controller.dart';
 import 'package:flutter_vlc_player/src/vlc_player_platform.dart';
@@ -8,6 +10,7 @@ class VlcPlayer extends StatefulWidget {
   final double aspectRatio;
   final Widget? placeholder;
   final bool virtualDisplay;
+  final void Function(int)? onPlatformViewCreated;
 
   const VlcPlayer({
     /// The [VlcPlayerController] responsible for the video being rendered in
@@ -26,6 +29,10 @@ class VlcPlayer extends StatefulWidget {
     /// Specify whether Virtual displays or Hybrid composition is used on Android.
     /// iOS only uses Hybrid composition.
     this.virtualDisplay = true,
+
+    /// Optional platform-view callback override used by hosts that need to
+    /// observe view attachment before delegating to the controller.
+    this.onPlatformViewCreated,
     super.key,
   });
 
@@ -63,21 +70,27 @@ class _VlcPlayerState extends State<VlcPlayer> {
 
   @override
   Widget build(BuildContext context) {
+    final onPlatformViewCreated =
+        widget.onPlatformViewCreated ?? widget.controller.onPlatformViewCreated;
+    final platformView =
+        defaultTargetPlatform == TargetPlatform.android && widget.virtualDisplay
+            ? AndroidView(
+              viewType: 'flutter_video_plugin/getVideoView',
+              hitTestBehavior: PlatformViewHitTestBehavior.transparent,
+              onPlatformViewCreated: onPlatformViewCreated,
+            )
+            : vlcPlayerPlatform.buildView(
+              onPlatformViewCreated,
+              virtualDisplay: widget.virtualDisplay,
+            );
     return AspectRatio(
       aspectRatio: widget.aspectRatio,
       child: Stack(
+        fit: StackFit.expand,
         children: <Widget>[
-          Offstage(
-            offstage: _isInitialized,
-            child: widget.placeholder ?? Container(),
-          ),
-          Offstage(
-            offstage: !_isInitialized,
-            child: vlcPlayerPlatform.buildView(
-              widget.controller.onPlatformViewCreated,
-              virtualDisplay: widget.virtualDisplay,
-            ),
-          ),
+          platformView,
+          if (!_isInitialized)
+            Positioned.fill(child: widget.placeholder ?? Container()),
         ],
       ),
     );

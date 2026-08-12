@@ -11,11 +11,13 @@ import 'app_state.dart';
 import 'catalog_item.dart';
 import 'diagnostic_log.dart';
 import 'details_save_sheet.dart';
+import 'details_season_ownership.dart';
 import 'juicr_bottom_sheet.dart';
 import 'libvlc_hls_relay.dart';
 import 'motion.dart';
 import 'native_player_page.dart';
 import 'playback_provider.dart';
+import 'playback_request_transport.dart';
 import 'stream_api.dart';
 import 'system_ui.dart';
 import 'visual_style.dart';
@@ -60,6 +62,10 @@ class _DetailsPageState extends State<DetailsPage>
   static const double _detailsPrimaryActionHeight = 48;
   static const double _detailsPrimaryActionGap = 12;
   static const double _detailsPrimaryActionIconSize = 20;
+  static const Duration _detailsPlaybackLaunchTimeout = Duration(seconds: 75);
+  static const Duration _detailsPlaybackSupportDataTimeout = Duration(
+    seconds: 5,
+  );
   static const TextStyle _detailsPrimaryActionTextStyle = TextStyle(
     fontSize: 15,
     fontWeight: FontWeight.w900,
@@ -78,14 +84,18 @@ class _DetailsPageState extends State<DetailsPage>
   final ScrollController _scrollController = ScrollController();
   late final AnimationController _playbackBusyController;
   late final AnimationController _trailerBusyController;
+  late final DetailsSeasonOwnership _seasonOwnership;
+  late final DetailsTitleHydrationOwnership _titleHydrationOwnership;
   bool _disposed = false;
-  late final Future<MetaDetails> _detailsFuture;
-  late final Future<StreamConfig?> _configFuture;
-  late final Future<List<TrailerItem>> _trailersFuture;
-  late final Future<List<CatalogItem>> _recommendationsFuture;
+  late Future<MetaDetails> _detailsFuture;
+  late Future<StreamConfig?> _configFuture;
+  late Future<List<TrailerItem>> _trailersFuture;
+  late Future<List<CatalogItem>> _recommendationsFuture;
   bool _showCollapsedTitle = false;
   bool _openingPlayback = false;
   bool _openingTrailer = false;
+  int _playbackLaunchGeneration = 0;
+  PlaybackRequestCancellation? _playbackRequestCancellation;
   String? _openingEpisodeKey;
   LibVlcHlsRelay? _externalPlayerRelay;
   final Map<String, DateTime> _playbackRetryAfterByKey = <String, DateTime>{};
@@ -93,6 +103,13 @@ class _DetailsPageState extends State<DetailsPage>
   @override
   void initState() {
     super.initState();
+    _seasonOwnership = DetailsSeasonOwnership(
+      titleIdentity: _detailsTitleIdentity(widget.item),
+      availableSeasons: const <int>[],
+    );
+    _titleHydrationOwnership = DetailsTitleHydrationOwnership(
+      titleIdentity: _detailsTitleIdentity(widget.item),
+    );
     AppState.recordTasteForItem(widget.item, weight: 2);
     _playbackBusyController = AnimationController(
       vsync: this,
@@ -102,57 +119,101 @@ class _DetailsPageState extends State<DetailsPage>
       vsync: this,
       duration: const Duration(milliseconds: 900),
     );
-    if (widget.item.isLocalCatalogItem) {
-      _detailsFuture = Future<MetaDetails>.value(
-        MetaDetails(item: widget.item),
+    _configureTitleFutures(widget.item);
+    _scrollController.addListener(_handleScroll);
+    if (widget.autoOpenTrailer) {
+      final trailerTitleIdentity = _detailsTitleIdentity(widget.item);
+      final trailerGeneration = _titleHydrationOwnership.generation;
+      unawaited(
+        _trailersFuture.then<void>((trailers) {
+          if (mounted &&
+              trailers.isNotEmpty &&
+              _titleHydrationOwnership.accepts(
+                trailerTitleIdentity,
+                trailerGeneration,
+              )) {
+            unawaited(_openTrailer(widget.item.name, trailers));
+          }
+        }).catchError((_) {}),
       );
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant DetailsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final titleIdentity = _detailsTitleIdentity(widget.item);
+    if (titleIdentity != _seasonOwnership.titleIdentity) {
+      _playbackRequestCancellation?.cancel();
+      _playbackRequestCancellation = null;
+      _playbackLaunchGeneration += 1;
+      _openingPlayback = false;
+      _playbackBusyController
+        ..stop()
+        ..reset();
+      _titleHydrationOwnership.resetForTitle(titleIdentity);
+      _seasonOwnership.resetForTitle(
+        titleIdentity: titleIdentity,
+        availableSeasons: const <int>[],
+      );
+      _configureTitleFutures(widget.item);
+    }
+  }
+
+  void _configureTitleFutures(CatalogItem item) {
+    final titleIdentity = _detailsTitleIdentity(item);
+    final generation = _titleHydrationOwnership.generation;
+    bool ownsTitle() =>
+        _titleHydrationOwnership.accepts(titleIdentity, generation);
+
+    if (item.isLocalCatalogItem) {
+      _detailsFuture = Future<MetaDetails>.value(MetaDetails(item: item));
       _recommendationsFuture = Future<List<CatalogItem>>.value(
         const <CatalogItem>[],
       );
       _configFuture = Future<StreamConfig?>.value(null);
-      _trailersFuture = Future<List<TrailerItem>>.value(const <TrailerItem>[]);
-    } else {
-      _detailsFuture = _loadDetailsMetadata(widget.item);
-      _recommendationsFuture = widget.item.type.isLive
-          ? Future<List<CatalogItem>>.value(const <CatalogItem>[])
-          : _detailsFuture.then((details) {
-              final merged = _mergeDetailsMetadataArtwork(
-                details.item,
-                widget.item,
-              );
-              return _loadRecommendations(
-                _recommendationSourceForDetails(merged, details),
-              );
-            }).catchError((Object error) {
-              DiagnosticLog.add(
-                'details recommendations skipped reason=metadata_unavailable id=${widget.item.id} error=$error',
-              );
-              return const <CatalogItem>[];
-            });
-      _configFuture = widget.item.type.isLive
-          ? Future<StreamConfig?>.value(null)
-          : StreamApi.cachedConfig == null
-              ? _api
-                  .config()
-                  .then<StreamConfig?>((config) => config)
-                  .catchError((_) => null)
-              : Future<StreamConfig?>.value(StreamApi.cachedConfig);
-      _trailersFuture = widget.item.type.isLive
-          ? Future.value(const <TrailerItem>[])
-          : _detailsFuture.then(
-              (details) => _api.resolveTrailers(
-                _trailerSourceForDetails(widget.item, details),
-              ),
+      _trailersFuture = Future<List<TrailerItem>>.value(
+        const <TrailerItem>[],
+      );
+      return;
+    }
+
+    _detailsFuture = _loadDetailsMetadata(item);
+    _recommendationsFuture = item.type.isLive
+        ? Future<List<CatalogItem>>.value(const <CatalogItem>[])
+        : _detailsFuture.then((details) async {
+            if (!ownsTitle()) return const <CatalogItem>[];
+            final merged = _mergeDetailsMetadataArtwork(details.item, item);
+            final recommendations = await _loadRecommendations(
+              _recommendationSourceForDetails(merged, details),
             );
-    }
-    _scrollController.addListener(_handleScroll);
-    if (widget.autoOpenTrailer) {
-      _trailersFuture.then((trailers) {
-        if (mounted && trailers.isNotEmpty) {
-          unawaited(_openTrailer(widget.item.name, trailers));
-        }
-      }).catchError((_) => const <TrailerItem>[]);
-    }
+            return ownsTitle() ? recommendations : const <CatalogItem>[];
+          }).catchError((Object error) {
+            if (ownsTitle()) {
+              DiagnosticLog.add(
+                'details recommendations skipped '
+                'reason=metadata_unavailable error=${error.runtimeType}',
+              );
+            }
+            return const <CatalogItem>[];
+          });
+    _configFuture = item.type.isLive
+        ? Future<StreamConfig?>.value(null)
+        : StreamApi.cachedConfig == null
+            ? _api
+                .config()
+                .then<StreamConfig?>((config) => ownsTitle() ? config : null)
+                .catchError((_) => null)
+            : Future<StreamConfig?>.value(StreamApi.cachedConfig);
+    _trailersFuture = item.type.isLive
+        ? Future<List<TrailerItem>>.value(const <TrailerItem>[])
+        : _detailsFuture.then((details) async {
+            if (!ownsTitle()) return const <TrailerItem>[];
+            final trailers = await _api.resolveTrailers(
+              _trailerSourceForDetails(item, details),
+            );
+            return ownsTitle() ? trailers : const <TrailerItem>[];
+          });
   }
 
   Future<MetaDetails> _loadDetailsMetadata(CatalogItem item) async {
@@ -368,13 +429,17 @@ class _DetailsPageState extends State<DetailsPage>
   @override
   void dispose() {
     _disposed = true;
+    _playbackRequestCancellation?.cancel();
+    _playbackRequestCancellation = null;
+    _titleHydrationOwnership.dispose();
+    _seasonOwnership.dispose();
     _playbackBusyController.dispose();
     _trailerBusyController.dispose();
     _scrollController
       ..removeListener(_handleScroll)
       ..dispose();
     unawaited(_stopExternalPlayerRelay('dispose'));
-    _api.close();
+    unawaited(_api.close());
     super.dispose();
   }
 
@@ -422,8 +487,9 @@ class _DetailsPageState extends State<DetailsPage>
   Future<String?> _openNativePlayer(
     String title,
     List<NativePlaybackRequest> sources, {
-    required Future<List<PlaybackSource>> Function(String providerId)
-        resolveNativeProvider,
+    required NativePlaybackSourceResolver resolveNativeProvider,
+    NativePlaybackSourceResolver? resolveRecoveryNativeProvider,
+    NativePlaybackRequestResolver? resolveFreshRequests,
     Future<List<PlaybackSubtitle>> Function()? resolveSubtitles,
     String? logoUrl,
     CatalogItem? progressItem,
@@ -432,21 +498,28 @@ class _DetailsPageState extends State<DetailsPage>
     int? skipSegmentSeason,
     int? skipSegmentEpisode,
     String? nextEpisodeLabel,
-    Future<NativePlayerNextEpisode?> Function()? onNextEpisode,
+    Future<NativePlayerNextEpisode?> Function(
+      PlaybackRequestCancellation cancellation,
+    )? onNextEpisode,
     bool limitToFirstQualityPass = false,
     bool liveMode = false,
+    bool preferSavedResume = false,
   }) async {
     if (!mounted) return null;
+    final routeStartedAt = DateTime.now();
     final routeStopwatch = Stopwatch()..start();
     DiagnosticLog.add(
       'native route opening titleLength=${title.length} requests=${sources.length} limitToFirstQualityPass=$limitToFirstQualityPass liveMode=$liveMode',
     );
+    _clearPlaybackLaunchBusy(reason: 'native_route_open');
     final result = await Navigator.of(context).push<String>(
       AppPageRoute<String>(
         builder: (_) => NativePlayerPage(
           title: title,
           sources: sources,
           resolveProvider: resolveNativeProvider,
+          resolveRecoveryProvider: resolveRecoveryNativeProvider,
+          resolveFreshRequests: resolveFreshRequests,
           resolveSubtitles: resolveSubtitles,
           logoUrl: logoUrl,
           progressItem: progressItem,
@@ -458,6 +531,8 @@ class _DetailsPageState extends State<DetailsPage>
           onNextEpisode: onNextEpisode,
           limitToFirstQualityPass: limitToFirstQualityPass,
           liveMode: liveMode,
+          preferSavedResume: preferSavedResume,
+          startupStartedAt: routeStartedAt,
           enableProviderWarmup: sources.any(
             (request) => request.sources.isNotEmpty,
           ),
@@ -470,8 +545,91 @@ class _DetailsPageState extends State<DetailsPage>
     return result;
   }
 
+  Future<List<NativePlaybackRequest>> _resolveFreshNativeRequests(
+    List<NativePlaybackRequest> requests,
+    Future<List<PlaybackSource>> Function(
+      String providerId,
+      PlaybackRequestCancellation cancellation,
+    ) resolveRecoveryNativeProvider,
+    Future<PlaybackResult> Function(PlaybackRequestCancellation cancellation)
+        resolveFreshPlayback, {
+    PlaybackRequestCancellation? parentCancellation,
+  }) async {
+    final providerIds = requests
+        .map((request) => request.providerId)
+        .where((providerId) => providerId.isNotEmpty)
+        .toSet()
+        .take(8)
+        .toList(growable: false);
+    final routeFuture = (() async {
+      try {
+        return await runCancelablePlaybackAttempt<PlaybackResult>(
+          timeout: const Duration(seconds: 30),
+          parentCancellation:
+              parentCancellation ?? _playbackRequestCancellation,
+          operation: resolveFreshPlayback,
+        );
+      } catch (error) {
+        DiagnosticLog.add(
+          'details fresh route unavailable error=${error.runtimeType}',
+        );
+        return _emptyPlaybackResult;
+      }
+    })();
+    final providerFuture = Future.wait(
+      providerIds.map((providerId) async {
+        try {
+          return await runCancelablePlaybackAttempt<List<PlaybackSource>>(
+            timeout: const Duration(seconds: 8),
+            parentCancellation:
+                parentCancellation ?? _playbackRequestCancellation,
+            operation: (cancellation) =>
+                resolveRecoveryNativeProvider(providerId, cancellation),
+          );
+        } catch (error) {
+          DiagnosticLog.add(
+            'details fresh provider unavailable '
+            'provider=${_nativeProviderDiagnosticLabel(providerId)} '
+            'error=${error.runtimeType}',
+          );
+          return const <PlaybackSource>[];
+        }
+      }),
+    );
+    final result = await routeFuture;
+    final providerSources = await providerFuture;
+    final combined = <PlaybackSource>[
+      ...result.sources,
+      for (final sources in providerSources) ...sources,
+    ];
+    final seenSessions = <String>{};
+    final sources = [
+      for (final source in _orderSources(_nativeEligibleSources(combined)))
+        if (seenSessions.add('${source.providerId}|${source.url}')) source,
+    ];
+    final byProvider = <String, List<PlaybackSource>>{};
+    for (final source in sources) {
+      byProvider
+          .putIfAbsent(source.providerId, () => <PlaybackSource>[])
+          .add(source);
+    }
+    final usable = [
+      for (final entry in byProvider.entries)
+        if (entry.value.isNotEmpty)
+          NativePlaybackRequest(
+            providerId: entry.key,
+            sources: entry.value,
+          ),
+    ];
+    DiagnosticLog.add(
+      'details fresh route resolved providers=${usable.length} '
+      'sources=${sources.length} attemptedRoutes=${providerIds.length + 1}',
+    );
+    return usable;
+  }
+
   Future<void> _runPlaybackLaunch(
-    Future<void> Function() action, {
+    Future<void> Function(int launchGeneration) action, {
     required String launchKey,
   }) async {
     if (!mounted) return;
@@ -491,24 +649,73 @@ class _DetailsPageState extends State<DetailsPage>
       );
       return;
     }
+    _playbackRequestCancellation?.cancel();
+    final requestCancellation = PlaybackRequestCancellation();
+    _playbackRequestCancellation = requestCancellation;
+    final launchGeneration = ++_playbackLaunchGeneration;
     setState(() => _openingPlayback = true);
     _playbackBusyController.repeat();
+    var timedOut = false;
     try {
-      await action();
+      final actionFuture = action(launchGeneration);
+      await actionFuture.timeout(
+        _detailsPlaybackLaunchTimeout,
+        onTimeout: () async {
+          if (!_openingPlayback ||
+              _playbackLaunchGeneration != launchGeneration) {
+            return;
+          }
+          timedOut = true;
+          requestCancellation.cancel();
+          try {
+            await actionFuture.timeout(const Duration(milliseconds: 250));
+          } catch (_) {
+            // Cancellation settlement errors are expected and remain private.
+          }
+          _playbackLaunchGeneration++;
+          DiagnosticLog.add(
+            'details playback launch timed out key=$launchKey timeoutMs=${_detailsPlaybackLaunchTimeout.inMilliseconds}',
+          );
+          _showPlaybackSnackBar('Playback took too long. Try again.');
+        },
+      );
     } finally {
-      if (mounted) {
-        _playbackBusyController.stop();
-        _playbackBusyController.reset();
-        setState(() => _openingPlayback = false);
+      if (identical(_playbackRequestCancellation, requestCancellation)) {
+        requestCancellation.cancel();
+        _playbackRequestCancellation = null;
+      }
+      final shouldClearBusy = _playbackLaunchGeneration == launchGeneration ||
+          (timedOut && _playbackLaunchGeneration == launchGeneration + 1);
+      if (shouldClearBusy) {
+        _clearPlaybackLaunchBusy(reason: 'launch_finished');
       }
     }
+  }
+
+  void _clearPlaybackLaunchBusy({required String reason}) {
+    if (!_disposed) {
+      _playbackBusyController.stop();
+      _playbackBusyController.reset();
+    }
+    if (mounted && _openingPlayback) {
+      DiagnosticLog.add('details playback launch busy cleared reason=$reason');
+      setState(() => _openingPlayback = false);
+    }
+  }
+
+  bool _playbackLaunchCanContinue(int? launchGeneration) {
+    if (launchGeneration == null) return mounted && !_disposed;
+    return mounted &&
+        !_disposed &&
+        _openingPlayback &&
+        _playbackLaunchGeneration == launchGeneration;
   }
 
   Future<void> _openMovieFromDetailsPrimary(
     CatalogItem item, {
     required bool hasCompleted,
   }) async {
-    await _runPlaybackLaunch(() async {
+    await _runPlaybackLaunch((launchGeneration) async {
       DiagnosticLog.screen(
         context,
         item.type == MediaType.liveTv
@@ -518,7 +725,11 @@ class _DetailsPageState extends State<DetailsPage>
       DiagnosticLog.add(
         'details watch ${item.type.compatTypeValue} pressed id=${item.id} completed=$hasCompleted',
       );
-      await _openMoviePlayerSafely(item.name, item);
+      await _openMoviePlayerSafely(
+        item.name,
+        item,
+        launchGeneration: launchGeneration,
+      );
     }, launchKey: item.id);
   }
 
@@ -648,8 +859,17 @@ class _DetailsPageState extends State<DetailsPage>
     String title,
     PlaybackResult result, {
     required AdBlockConfig adBlock,
-    required Future<List<PlaybackSource>> Function(String providerId)
-        resolveNativeProvider,
+    required Future<PlaybackResult> Function(
+      PlaybackRequestCancellation cancellation,
+    ) resolveFreshPlayback,
+    required Future<List<PlaybackSource>> Function(
+      String providerId,
+      PlaybackRequestCancellation cancellation,
+    ) resolveNativeProvider,
+    Future<List<PlaybackSource>> Function(
+      String providerId,
+      PlaybackRequestCancellation cancellation,
+    )? resolveRecoveryNativeProvider,
     Future<List<PlaybackSubtitle>> Function()? resolveSubtitles,
     String? logoUrl,
     String? artworkUrl,
@@ -661,6 +881,7 @@ class _DetailsPageState extends State<DetailsPage>
     EpisodeItem? nextEpisode,
     List<EpisodeItem> episodeList = const <EpisodeItem>[],
     bool liveMode = false,
+    bool preferSavedResume = false,
     required String rewardedAdReason,
   }) async {
     DiagnosticLog.add(
@@ -693,14 +914,19 @@ class _DetailsPageState extends State<DetailsPage>
       await _tryExternalPlayer(
         title,
         sources,
-        resolveNativeProvider: resolveNativeProvider,
+        resolveNativeProvider: (providerId) => resolveNativeProvider(
+          providerId,
+          _playbackRequestCancellation ?? PlaybackRequestCancellation(),
+        ),
       );
       return;
     }
     final playedNative = await _tryNativeSources(
       title,
       sources,
+      resolveFreshPlayback: resolveFreshPlayback,
       resolveNativeProvider: resolveNativeProvider,
+      resolveRecoveryNativeProvider: resolveRecoveryNativeProvider,
       resolveSubtitles: resolveSubtitles,
       logoUrl: logoUrl,
       progressItem: progressItem,
@@ -711,10 +937,15 @@ class _DetailsPageState extends State<DetailsPage>
       nextEpisodeLabel: nextEpisode == null ? null : 'Next episode',
       onNextEpisode: nextEpisode == null || progressItem == null
           ? null
-          : () =>
-              _buildNativeNextEpisode(progressItem, nextEpisode, episodeList),
+          : (cancellation) => _buildNativeNextEpisode(
+                progressItem,
+                nextEpisode,
+                episodeList,
+                cancellation: cancellation,
+              ),
       liveMode: liveMode,
       rewardedAdReason: rewardedAdReason,
+      preferSavedResume: preferSavedResume,
     );
     if (playedNative || !mounted) return;
     _showPlaybackSnackBar(_videoUnavailableSnack);
@@ -863,8 +1094,17 @@ class _DetailsPageState extends State<DetailsPage>
   Future<bool> _tryNativeSources(
     String title,
     List<PlaybackSource> sources, {
-    required Future<List<PlaybackSource>> Function(String providerId)
-        resolveNativeProvider,
+    required Future<PlaybackResult> Function(
+      PlaybackRequestCancellation cancellation,
+    ) resolveFreshPlayback,
+    required Future<List<PlaybackSource>> Function(
+      String providerId,
+      PlaybackRequestCancellation cancellation,
+    ) resolveNativeProvider,
+    Future<List<PlaybackSource>> Function(
+      String providerId,
+      PlaybackRequestCancellation cancellation,
+    )? resolveRecoveryNativeProvider,
     Future<List<PlaybackSubtitle>> Function()? resolveSubtitles,
     String? logoUrl,
     CatalogItem? progressItem,
@@ -873,8 +1113,11 @@ class _DetailsPageState extends State<DetailsPage>
     int? skipSegmentSeason,
     int? skipSegmentEpisode,
     String? nextEpisodeLabel,
-    Future<NativePlayerNextEpisode?> Function()? onNextEpisode,
+    Future<NativePlayerNextEpisode?> Function(
+      PlaybackRequestCancellation cancellation,
+    )? onNextEpisode,
     bool liveMode = false,
+    bool preferSavedResume = false,
     required String rewardedAdReason,
   }) async {
     final initialByProvider = <String, List<PlaybackSource>>{};
@@ -909,10 +1152,7 @@ class _DetailsPageState extends State<DetailsPage>
       playbackKey,
       resolvedSourcesByProvider: initialByProvider,
     );
-    final verifiedCacheProviderIds =
-        verifiedCacheRequests.map((request) => request.providerId).toSet();
     final prioritizedResolvedProviderIds = <String>{
-      ...verifiedCacheProviderIds,
       ...personalProviderIds,
       ...publicIptvProviderIds,
       ...addonProviderIds,
@@ -925,39 +1165,40 @@ class _DetailsPageState extends State<DetailsPage>
               (initialByProvider[providerId]?.isNotEmpty ?? false),
         )
         .toList(growable: false);
+    final resolvedProviderIdsWithSources = initialByProvider.entries
+        .where((entry) => entry.value.isNotEmpty)
+        .map((entry) => entry.key)
+        .toSet();
     final requests = [
-      ...verifiedCacheRequests,
       for (final providerId in personalProviderIds)
-        if (!verifiedCacheProviderIds.contains(providerId))
-          NativePlaybackRequest(
-            providerId: providerId,
-            sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
-          ),
+        NativePlaybackRequest(
+          providerId: providerId,
+          sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
+        ),
       for (final providerId in publicIptvProviderIds)
-        if (!verifiedCacheProviderIds.contains(providerId))
-          NativePlaybackRequest(
-            providerId: providerId,
-            sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
-          ),
+        NativePlaybackRequest(
+          providerId: providerId,
+          sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
+        ),
       for (final providerId in addonProviderIds)
-        if (!verifiedCacheProviderIds.contains(providerId))
-          NativePlaybackRequest(
-            providerId: providerId,
-            sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
-          ),
+        NativePlaybackRequest(
+          providerId: providerId,
+          sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
+        ),
       if (publicIptvProviderIds.isEmpty)
         for (final providerId in defaultProviderSelection.providerIds)
-          if (!verifiedCacheProviderIds.contains(providerId))
-            NativePlaybackRequest(
-              providerId: providerId,
-              sources:
-                  initialByProvider[providerId] ?? const <PlaybackSource>[],
-            ),
+          NativePlaybackRequest(
+            providerId: providerId,
+            sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
+          ),
       for (final providerId in remainingResolvedProviderIds)
         NativePlaybackRequest(
           providerId: providerId,
           sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
         ),
+      for (final request in verifiedCacheRequests)
+        if (!resolvedProviderIdsWithSources.contains(request.providerId))
+          request,
     ];
     DiagnosticLog.add(
       "native request order=${requests.map((request) => _nativeProviderDiagnosticLabel(request.providerId)).join('>')} key=${playbackKey ?? progressItem?.id ?? 'none'}",
@@ -976,7 +1217,22 @@ class _DetailsPageState extends State<DetailsPage>
     final result = await _openNativePlayer(
       title,
       requests,
-      resolveNativeProvider: resolveNativeProvider,
+      resolveNativeProvider: (providerId, cancellation) => resolveNativeProvider(
+        providerId,
+        cancellation,
+      ),
+      resolveFreshRequests: (cancellation) => _resolveFreshNativeRequests(
+        requests,
+        resolveRecoveryNativeProvider ?? resolveNativeProvider,
+        resolveFreshPlayback,
+        parentCancellation: cancellation,
+      ),
+      resolveRecoveryNativeProvider: resolveRecoveryNativeProvider == null
+          ? null
+          : (providerId, cancellation) => resolveRecoveryNativeProvider(
+                providerId,
+                cancellation,
+              ),
       resolveSubtitles: resolveSubtitles,
       logoUrl: logoUrl,
       progressItem: progressItem,
@@ -988,6 +1244,7 @@ class _DetailsPageState extends State<DetailsPage>
       onNextEpisode: onNextEpisode,
       limitToFirstQualityPass: defaultProviderSelection.cappedColdScan,
       liveMode: liveMode,
+      preferSavedResume: preferSavedResume,
     );
     DiagnosticLog.add('native route completed result=${result ?? 'closed'}');
     if (result?.startsWith('native_error') == true && mounted) {
@@ -997,6 +1254,26 @@ class _DetailsPageState extends State<DetailsPage>
       _showPlaybackSnackBar(_friendlyNativePlaybackError(detail));
     }
     return true;
+  }
+
+  PlaybackResult? _verifiedCachePlaybackResultFor(
+    String? playbackKey, {
+    required Object error,
+    required String context,
+  }) {
+    final cached = AppState.verifiedPlaybackSourcesFor(playbackKey)
+        .map((entry) => entry.source)
+        .where((source) => source.url.isNotEmpty)
+        .toList(growable: false);
+    if (cached.isEmpty) return null;
+    DiagnosticLog.add(
+      'details playback fresh resolve failed; using verified cache fallback context=$context count=${cached.length} error=${error.runtimeType}',
+    );
+    return PlaybackResult(
+      sources: cached,
+      embeds: const <PlaybackCandidate>[],
+      debug: PlaybackDebug.empty,
+    );
   }
 
   String _friendlyNativePlaybackError(String detail) {
@@ -1061,12 +1338,14 @@ class _DetailsPageState extends State<DetailsPage>
     ];
   }
 
-  bool _shouldResolveFreshSourcesWithVerifiedCache({
+  void _prepareFreshResolveWithVerifiedCache({
     required bool hasVerifiedSource,
   }) {
-    if (!hasVerifiedSource) return false;
+    if (!hasVerifiedSource) return;
     _activateSingleUserAddonIfItIsTheOnlySource();
-    return true;
+    DiagnosticLog.add(
+      'details playback resolving fresh sources with verified cache fallback key=[redacted]',
+    );
   }
 
   _DefaultNativeProviderSelection _defaultNativeProviderSelectionForPlayback({
@@ -1113,7 +1392,11 @@ class _DetailsPageState extends State<DetailsPage>
     );
   }
 
-  Future<void> _openMoviePlayerSafely(String title, CatalogItem item) async {
+  Future<void> _openMoviePlayerSafely(
+    String title,
+    CatalogItem item, {
+    int? launchGeneration,
+  }) async {
     if (item.isLocalCatalogItem) {
       DiagnosticLog.add(
         'details local playback locked id=${item.id} catalogId=${item.localCatalogId ?? 'unknown'} itemId=${item.localCatalogItemId ?? 'unknown'}',
@@ -1137,28 +1420,65 @@ class _DetailsPageState extends State<DetailsPage>
           'details playback has verified source cache key=[redacted]',
         );
       }
-      final shouldResolveFreshSources =
-          _shouldResolveFreshSourcesWithVerifiedCache(
+      _prepareFreshResolveWithVerifiedCache(
         hasVerifiedSource: hasVerifiedSource,
       );
-      if (hasVerifiedSource && !shouldResolveFreshSources) {
-        DiagnosticLog.add(
-          'details playback using verified source cache without fresh resolve key=[redacted]',
+      PlaybackResult result;
+      try {
+        result = await _resolveMovieForActiveSources(item);
+      } catch (error) {
+        final cachedResult = _verifiedCachePlaybackResultFor(
+          playbackKey,
+          error: error,
+          context: diagnosticType,
         );
+        if (cachedResult == null) rethrow;
+        result = cachedResult;
       }
-      final result = await _resolveMovieForActiveSources(item);
       playbackKey ??= _playbackCacheKeyForResult(cacheBasePlaybackKey, result);
-      if (!mounted) return;
-      final config = await _configFuture;
-      if (!mounted) return;
-      final playbackMetadataItem = await _playbackMetadataItem(item);
-      if (!mounted) return;
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
+      final config = await _configFuture.timeout(
+        _detailsPlaybackSupportDataTimeout,
+        onTimeout: () {
+          DiagnosticLog.add(
+            'details playback config fallback reason=timeout',
+          );
+          return null;
+        },
+      );
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
+      final playbackMetadataItem = await _playbackMetadataItem(item).timeout(
+        _detailsPlaybackSupportDataTimeout,
+        onTimeout: () {
+          DiagnosticLog.add(
+            'details playback metadata fallback reason=timeout id=${item.id}',
+          );
+          return item;
+        },
+      );
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
       await _openResolvedPlayback(
         title,
         result,
         adBlock: config?.adBlock ?? AdBlockConfig.disabled,
-        resolveNativeProvider: (providerId) =>
-            _api.resolveMovieNativeSources(item, providerId: providerId),
+        resolveFreshPlayback: (cancellation) => _resolveMovieForActiveSources(
+          item,
+          recoveryAttempt: 0,
+          cancellation: cancellation,
+        ),
+        resolveNativeProvider: (providerId, cancellation) =>
+            _api.resolveMovieNativeSources(
+          item,
+          providerId: providerId,
+          cancellation: cancellation,
+        ),
+        resolveRecoveryNativeProvider: (providerId, cancellation) =>
+            _api.resolveMovieNativeSources(
+          item,
+          providerId: providerId,
+          recoveryAttempt: 0,
+          cancellation: cancellation,
+        ),
         resolveSubtitles: () => _api.resolveMovieSubtitles(
           item,
           includeDefault: AppState.defaultSubtitlesEnabled.value,
@@ -1176,6 +1496,7 @@ class _DetailsPageState extends State<DetailsPage>
         'details playback launch ok type=$diagnosticType id=${item.id} elapsed=${launchStopwatch.elapsedMilliseconds}ms',
       );
     } catch (error) {
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
       final diagnosticType = item.type.isLive ? 'liveTv' : 'movie';
       DiagnosticLog.add(
         'details playback launch failed type=$diagnosticType id=${item.id} elapsed=${launchStopwatch.elapsedMilliseconds}ms error=$error',
@@ -1191,6 +1512,8 @@ class _DetailsPageState extends State<DetailsPage>
     CatalogItem item, {
     List<EpisodeItem> episodes = const <EpisodeItem>[],
     EpisodeItem? startEpisode,
+    int? launchGeneration,
+    bool preferSavedResume = false,
   }) async {
     final launchStopwatch = Stopwatch()..start();
     final effectiveStartEpisode =
@@ -1210,36 +1533,76 @@ class _DetailsPageState extends State<DetailsPage>
           'details playback has verified source cache key=[redacted]',
         );
       }
-      final shouldResolveFreshSources =
-          _shouldResolveFreshSourcesWithVerifiedCache(
+      _prepareFreshResolveWithVerifiedCache(
         hasVerifiedSource: hasVerifiedSource,
       );
-      if (hasVerifiedSource && !shouldResolveFreshSources) {
-        DiagnosticLog.add(
-          'details playback using verified source cache without fresh resolve key=[redacted]',
+      PlaybackResult result;
+      try {
+        result = await _resolveEpisodeForActiveSources(
+          item,
+          season: season,
+          episode: episode,
+          episodeItem: effectiveStartEpisode,
         );
+      } catch (error) {
+        final cachedResult = _verifiedCachePlaybackResultFor(
+          playbackKey,
+          error: error,
+          context: 'series',
+        );
+        if (cachedResult == null) rethrow;
+        result = cachedResult;
       }
-      final result = await _resolveEpisodeForActiveSources(
-        item,
-        season: season,
-        episode: episode,
-        episodeItem: effectiveStartEpisode,
-      );
       playbackKey ??= _playbackCacheKeyForResult(basePlaybackKey, result);
-      if (!mounted) return;
-      final config = await _configFuture;
-      if (!mounted) return;
-      final playbackMetadataItem = await _playbackMetadataItem(item);
-      if (!mounted) return;
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
+      final config = await _configFuture.timeout(
+        _detailsPlaybackSupportDataTimeout,
+        onTimeout: () {
+          DiagnosticLog.add(
+            'details playback config fallback reason=timeout',
+          );
+          return null;
+        },
+      );
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
+      final playbackMetadataItem = await _playbackMetadataItem(item).timeout(
+        _detailsPlaybackSupportDataTimeout,
+        onTimeout: () {
+          DiagnosticLog.add(
+            'details playback metadata fallback reason=timeout id=${item.id}',
+          );
+          return item;
+        },
+      );
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
       await _openResolvedPlayback(
         effectiveStartEpisode == null ? title : '$title S$season E$episode',
         result,
         adBlock: config?.adBlock ?? AdBlockConfig.disabled,
-        resolveNativeProvider: (providerId) => _api.resolveEpisodeNativeSources(
+        resolveFreshPlayback: (cancellation) => _resolveEpisodeForActiveSources(
+          item,
+          season: season,
+          episode: episode,
+          episodeItem: effectiveStartEpisode,
+          recoveryAttempt: 0,
+          cancellation: cancellation,
+        ),
+        resolveNativeProvider: (providerId, cancellation) =>
+            _api.resolveEpisodeNativeSources(
           item,
           season: season,
           episode: episode,
           providerId: providerId,
+          cancellation: cancellation,
+        ),
+        resolveRecoveryNativeProvider: (providerId, cancellation) =>
+            _api.resolveEpisodeNativeSources(
+          item,
+          season: season,
+          episode: episode,
+          providerId: providerId,
+          recoveryAttempt: 0,
+          cancellation: cancellation,
         ),
         resolveSubtitles: () => _api.resolveEpisodeSubtitles(
           item,
@@ -1257,11 +1620,13 @@ class _DetailsPageState extends State<DetailsPage>
         nextEpisode: nextEpisode,
         episodeList: episodes,
         rewardedAdReason: 'episode_playback',
+        preferSavedResume: preferSavedResume,
       );
       DiagnosticLog.add(
         'details playback launch ok type=series id=${item.id} season=$season episode=$episode elapsed=${launchStopwatch.elapsedMilliseconds}ms',
       );
     } catch (error) {
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
       DiagnosticLog.add(
         'details playback launch failed type=series id=${item.id} elapsed=${launchStopwatch.elapsedMilliseconds}ms error=$error',
       );
@@ -1277,6 +1642,7 @@ class _DetailsPageState extends State<DetailsPage>
     required int season,
     required int episode,
     List<EpisodeItem> episodes = const <EpisodeItem>[],
+    int? launchGeneration,
   }) async {
     final launchStopwatch = Stopwatch()..start();
     final basePlaybackKey = '${item.id}:$season:$episode';
@@ -1292,36 +1658,76 @@ class _DetailsPageState extends State<DetailsPage>
           'details playback has verified source cache key=[redacted]',
         );
       }
-      final shouldResolveFreshSources =
-          _shouldResolveFreshSourcesWithVerifiedCache(
+      _prepareFreshResolveWithVerifiedCache(
         hasVerifiedSource: hasVerifiedSource,
       );
-      if (hasVerifiedSource && !shouldResolveFreshSources) {
-        DiagnosticLog.add(
-          'details playback using verified source cache without fresh resolve key=[redacted]',
+      PlaybackResult result;
+      try {
+        result = await _resolveEpisodeForActiveSources(
+          item,
+          season: season,
+          episode: episode,
+          episodeItem: _episodeFor(episodes, season, episode),
         );
+      } catch (error) {
+        final cachedResult = _verifiedCachePlaybackResultFor(
+          playbackKey,
+          error: error,
+          context: 'episode',
+        );
+        if (cachedResult == null) rethrow;
+        result = cachedResult;
       }
-      final result = await _resolveEpisodeForActiveSources(
-        item,
-        season: season,
-        episode: episode,
-        episodeItem: _episodeFor(episodes, season, episode),
-      );
       playbackKey ??= _playbackCacheKeyForResult(basePlaybackKey, result);
-      if (!mounted) return;
-      final config = await _configFuture;
-      if (!mounted) return;
-      final playbackMetadataItem = await _playbackMetadataItem(item);
-      if (!mounted) return;
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
+      final config = await _configFuture.timeout(
+        _detailsPlaybackSupportDataTimeout,
+        onTimeout: () {
+          DiagnosticLog.add(
+            'details playback config fallback reason=timeout',
+          );
+          return null;
+        },
+      );
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
+      final playbackMetadataItem = await _playbackMetadataItem(item).timeout(
+        _detailsPlaybackSupportDataTimeout,
+        onTimeout: () {
+          DiagnosticLog.add(
+            'details playback metadata fallback reason=timeout id=${item.id}',
+          );
+          return item;
+        },
+      );
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
       await _openResolvedPlayback(
         title,
         result,
         adBlock: config?.adBlock ?? AdBlockConfig.disabled,
-        resolveNativeProvider: (providerId) => _api.resolveEpisodeNativeSources(
+        resolveFreshPlayback: (cancellation) => _resolveEpisodeForActiveSources(
+          item,
+          season: season,
+          episode: episode,
+          episodeItem: _episodeFor(episodes, season, episode),
+          recoveryAttempt: 0,
+          cancellation: cancellation,
+        ),
+        resolveNativeProvider: (providerId, cancellation) =>
+            _api.resolveEpisodeNativeSources(
           item,
           season: season,
           episode: episode,
           providerId: providerId,
+          cancellation: cancellation,
+        ),
+        resolveRecoveryNativeProvider: (providerId, cancellation) =>
+            _api.resolveEpisodeNativeSources(
+          item,
+          season: season,
+          episode: episode,
+          providerId: providerId,
+          recoveryAttempt: 0,
+          cancellation: cancellation,
         ),
         resolveSubtitles: () => _api.resolveEpisodeSubtitles(
           item,
@@ -1344,6 +1750,7 @@ class _DetailsPageState extends State<DetailsPage>
         'details playback launch ok type=episode id=${item.id} season=$season episode=$episode elapsed=${launchStopwatch.elapsedMilliseconds}ms',
       );
     } catch (error) {
+      if (!_playbackLaunchCanContinue(launchGeneration)) return;
       DiagnosticLog.add(
         'details playback launch failed type=episode id=${item.id} season=$season episode=$episode elapsed=${launchStopwatch.elapsedMilliseconds}ms error=$error',
       );
@@ -1365,7 +1772,11 @@ class _DetailsPageState extends State<DetailsPage>
     return text;
   }
 
-  Future<PlaybackResult> _resolveMovieForActiveSources(CatalogItem item) async {
+  Future<PlaybackResult> _resolveMovieForActiveSources(
+    CatalogItem item, {
+    int? recoveryAttempt,
+    PlaybackRequestCancellation? cancellation,
+  }) async {
     final stopwatch = Stopwatch()..start();
     if (item.type == MediaType.liveTv) {
       return _resolveLiveTvForPlayback(item, stopwatch: stopwatch);
@@ -1390,7 +1801,11 @@ class _DetailsPageState extends State<DetailsPage>
     if (!AppState.defaultProvidersEnabled.value) {
       throw const StreamApiException('No stream source is active.');
     }
-    final result = await _api.resolveMovie(item);
+    final result = await _api.resolveMovie(
+      item,
+      recoveryAttempt: recoveryAttempt,
+      cancellation: cancellation ?? _playbackRequestCancellation,
+    );
     DiagnosticLog.add(
       'details resolve movie default ok id=${item.id} elapsed=${stopwatch.elapsedMilliseconds}ms sources=${result.sources.length}',
     );
@@ -1417,6 +1832,7 @@ class _DetailsPageState extends State<DetailsPage>
         final sources = await _api.resolveMovieNativeSources(
           item,
           providerId: 'public-iptv',
+          cancellation: _playbackRequestCancellation,
         );
         DiagnosticLog.add(
           'details resolve live tv public-iptv ok id=${item.id} elapsed=${stopwatch.elapsedMilliseconds}ms attempt=${attempt + 1} sources=${sources.length}',
@@ -1456,6 +1872,8 @@ class _DetailsPageState extends State<DetailsPage>
     required int season,
     required int episode,
     EpisodeItem? episodeItem,
+    int? recoveryAttempt,
+    PlaybackRequestCancellation? cancellation,
   }) async {
     final stopwatch = Stopwatch()..start();
     if (item.isPersonalServerItem) {
@@ -1522,6 +1940,8 @@ class _DetailsPageState extends State<DetailsPage>
       item,
       season: season,
       episode: episode,
+      recoveryAttempt: recoveryAttempt,
+      cancellation: cancellation ?? _playbackRequestCancellation,
     );
     DiagnosticLog.add(
       'details resolve episode default ok id=${item.id} season=$season episode=$episode elapsed=${stopwatch.elapsedMilliseconds}ms sources=${result.sources.length}',
@@ -1646,8 +2066,9 @@ class _DetailsPageState extends State<DetailsPage>
   Future<NativePlayerNextEpisode?> _buildNativeNextEpisode(
     CatalogItem item,
     EpisodeItem episode,
-    List<EpisodeItem> episodes,
-  ) async {
+    List<EpisodeItem> episodes, {
+    PlaybackRequestCancellation? cancellation,
+  }) async {
     final basePlaybackKey = '${item.id}:${episode.season}:${episode.episode}';
     var playbackKey = _verifiedPlaybackKeyFor(basePlaybackKey);
     final hasVerifiedSource = playbackKey != null;
@@ -1661,6 +2082,7 @@ class _DetailsPageState extends State<DetailsPage>
       season: episode.season,
       episode: episode.episode,
       episodeItem: episode,
+      cancellation: cancellation,
     );
     playbackKey ??= _playbackCacheKeyForResult(basePlaybackKey, result);
     final sources = _orderSources(_nativeEligibleSources(result.sources));
@@ -1695,10 +2117,7 @@ class _DetailsPageState extends State<DetailsPage>
       playbackKey,
       resolvedSourcesByProvider: initialByProvider,
     );
-    final verifiedCacheProviderIds =
-        verifiedCacheRequests.map((request) => request.providerId).toSet();
     final prioritizedResolvedProviderIds = <String>{
-      ...verifiedCacheProviderIds,
       ...personalProviderIds,
       ...addonProviderIds,
       ...defaultProviderSelection.providerIds,
@@ -1710,31 +2129,34 @@ class _DetailsPageState extends State<DetailsPage>
               (initialByProvider[providerId]?.isNotEmpty ?? false),
         )
         .toList(growable: false);
+    final resolvedProviderIdsWithSources = initialByProvider.entries
+        .where((entry) => entry.value.isNotEmpty)
+        .map((entry) => entry.key)
+        .toSet();
     final requests = [
-      ...verifiedCacheRequests,
       for (final providerId in personalProviderIds)
-        if (!verifiedCacheProviderIds.contains(providerId))
-          NativePlaybackRequest(
-            providerId: providerId,
-            sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
-          ),
+        NativePlaybackRequest(
+          providerId: providerId,
+          sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
+        ),
       for (final providerId in addonProviderIds)
-        if (!verifiedCacheProviderIds.contains(providerId))
-          NativePlaybackRequest(
-            providerId: providerId,
-            sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
-          ),
+        NativePlaybackRequest(
+          providerId: providerId,
+          sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
+        ),
       for (final providerId in defaultProviderSelection.providerIds)
-        if (!verifiedCacheProviderIds.contains(providerId))
-          NativePlaybackRequest(
-            providerId: providerId,
-            sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
-          ),
+        NativePlaybackRequest(
+          providerId: providerId,
+          sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
+        ),
       for (final providerId in remainingResolvedProviderIds)
         NativePlaybackRequest(
           providerId: providerId,
           sources: initialByProvider[providerId] ?? const <PlaybackSource>[],
         ),
+      for (final request in verifiedCacheRequests)
+        if (!resolvedProviderIdsWithSources.contains(request.providerId))
+          request,
     ];
     final nextEpisode = _nextEpisodeAfter(
       episodes,
@@ -1746,11 +2168,40 @@ class _DetailsPageState extends State<DetailsPage>
     return NativePlayerNextEpisode(
       title: '${item.name} S${episode.season} E${episode.episode}',
       sources: requests,
-      resolveProvider: (providerId) => _api.resolveEpisodeNativeSources(
+      resolveProvider: (providerId, cancellation) => _api.resolveEpisodeNativeSources(
         item,
         season: episode.season,
         episode: episode.episode,
         providerId: providerId,
+        cancellation: cancellation,
+      ),
+      resolveRecoveryProvider: (providerId, cancellation) => _api.resolveEpisodeNativeSources(
+        item,
+        season: episode.season,
+        episode: episode.episode,
+        providerId: providerId,
+        recoveryAttempt: 0,
+        cancellation: cancellation,
+      ),
+      resolveFreshRequests: (cancellation) => _resolveFreshNativeRequests(
+        requests,
+        (providerId, cancellation) => _api.resolveEpisodeNativeSources(
+          item,
+          season: episode.season,
+          episode: episode.episode,
+          providerId: providerId,
+          recoveryAttempt: 0,
+          cancellation: cancellation,
+        ),
+        (cancellation) => _resolveEpisodeForActiveSources(
+          item,
+          season: episode.season,
+          episode: episode.episode,
+          episodeItem: episode,
+          recoveryAttempt: 0,
+          cancellation: cancellation,
+        ),
+        parentCancellation: cancellation,
       ),
       resolveSubtitles: () => _api.resolveEpisodeSubtitles(
         item,
@@ -1767,7 +2218,12 @@ class _DetailsPageState extends State<DetailsPage>
       nextEpisodeLabel: nextEpisode == null ? null : 'Next episode',
       onNextEpisode: nextEpisode == null
           ? null
-          : () => _buildNativeNextEpisode(item, nextEpisode, episodes),
+          : (cancellation) => _buildNativeNextEpisode(
+                item,
+                nextEpisode,
+                episodes,
+                cancellation: cancellation,
+              ),
       limitToFirstQualityPass: defaultProviderSelection.cappedColdScan,
     );
   }
@@ -2341,7 +2797,9 @@ class _DetailsPageState extends State<DetailsPage>
                                                         }
                                                         try {
                                                           await _runPlaybackLaunch(
-                                                            () async {
+                                                            (
+                                                              launchGeneration,
+                                                            ) async {
                                                               DiagnosticLog
                                                                   .screen(
                                                                 context,
@@ -2357,6 +2815,11 @@ class _DetailsPageState extends State<DetailsPage>
                                                                     episodes,
                                                                 startEpisode:
                                                                     resumeEpisode,
+                                                                preferSavedResume:
+                                                                    entry !=
+                                                                        null,
+                                                                launchGeneration:
+                                                                    launchGeneration,
                                                               );
                                                             },
                                                             launchKey:
@@ -2529,6 +2992,7 @@ class _DetailsPageState extends State<DetailsPage>
                               _EpisodeList(
                                 item: item,
                                 episodes: details.videos,
+                                seasonOwnership: _seasonOwnership,
                                 playbackLocked: item.isUpcoming,
                                 busy: _openingPlayback,
                                 busyEpisodeKey: _openingEpisodeKey,
@@ -2542,13 +3006,16 @@ class _DetailsPageState extends State<DetailsPage>
                                     });
                                   }
                                   try {
-                                    await _runPlaybackLaunch(() async {
+                                    await _runPlaybackLaunch((
+                                      launchGeneration,
+                                    ) async {
                                       await _openEpisodePlayerSafely(
                                         '${item.name} S${episode.season} E${episode.episode}',
                                         item,
                                         season: episode.season,
                                         episode: episode.episode,
                                         episodes: details.videos,
+                                        launchGeneration: launchGeneration,
                                       );
                                     }, launchKey: episodeKey);
                                   } finally {
@@ -3223,7 +3690,7 @@ class _ContinueProgressPill extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Continue watching',
+                  'Time remaining',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   strutStyle: const StrutStyle(
@@ -3238,7 +3705,7 @@ class _ContinueProgressPill extends StatelessWidget {
               ),
               const SizedBox(width: 10),
               Text(
-                entry.remainingLabel,
+                entry.remainingTimeLabel,
                 strutStyle: const StrutStyle(
                   forceStrutHeight: true,
                   height: 1.1,
@@ -4044,16 +4511,13 @@ class _TrailerDialogState extends State<_TrailerDialog> {
     if (!_fullscreenLocked) return;
     _fullscreenLocked = false;
     DiagnosticLog.add(
-      'details trailer dialog fullscreen exit orientation=fluid',
+      'details trailer dialog fullscreen exit orientation=shell_policy',
     );
     endJuicrImmersiveSession();
     await restoreJuicrSystemUi(force: true);
-    await SystemChrome.setPreferredOrientations(const [
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    await applyJuicrShellOrientation(
+      forcePortrait: AppState.forcePortraitShell.value,
+    );
   }
 
   Future<void> _closeTrailerDialog(String reason) async {
@@ -4961,6 +5425,7 @@ class _EpisodeList extends StatefulWidget {
   const _EpisodeList({
     required this.item,
     required this.episodes,
+    required this.seasonOwnership,
     required this.onPlay,
     required this.playbackLocked,
     required this.busy,
@@ -4970,6 +5435,7 @@ class _EpisodeList extends StatefulWidget {
 
   final CatalogItem item;
   final List<EpisodeItem> episodes;
+  final DetailsSeasonOwnership seasonOwnership;
   final ValueChanged<EpisodeItem> onPlay;
   final bool playbackLocked;
   final bool busy;
@@ -4981,26 +5447,38 @@ class _EpisodeList extends StatefulWidget {
 }
 
 class _EpisodeListState extends State<_EpisodeList> {
-  late int _selectedSeason;
   String? _expandedEpisodeKey;
+  DetailsSeasonOwnership get _seasonOwnership => widget.seasonOwnership;
+  int get _selectedSeason => _seasonOwnership.selectedSeason;
 
   @override
   void initState() {
     super.initState();
-    final seasons = _seasonNumbers;
-    _selectedSeason = seasons.isEmpty ? 1 : seasons.first;
+    _seasonOwnership.applyAsyncSeasons(
+      titleIdentity: _detailsTitleIdentity(widget.item),
+      generation: _seasonOwnership.generation,
+      availableSeasons: _seasonNumbers,
+    );
   }
 
   @override
   void didUpdateWidget(covariant _EpisodeList oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final seasons = _seasonNumbers;
-    if (seasons.isEmpty) {
-      _selectedSeason = 1;
-      return;
+    final previousSeason = _selectedSeason;
+    final titleIdentity = _detailsTitleIdentity(widget.item);
+    if (titleIdentity != _seasonOwnership.titleIdentity) {
+      _seasonOwnership.resetForTitle(
+        titleIdentity: titleIdentity,
+        availableSeasons: _seasonNumbers,
+      );
+    } else {
+      _seasonOwnership.applyAsyncSeasons(
+        titleIdentity: titleIdentity,
+        generation: _seasonOwnership.generation,
+        availableSeasons: _seasonNumbers,
+      );
     }
-    if (!seasons.contains(_selectedSeason)) {
-      _selectedSeason = seasons.first;
+    if (_selectedSeason != previousSeason) {
       _expandedEpisodeKey = null;
     }
   }
@@ -5073,7 +5551,8 @@ class _EpisodeListState extends State<_EpisodeList> {
                               'details season selected season=$season',
                             );
                             setState(() {
-                              _selectedSeason = season;
+                              _seasonOwnership.selectSeason(season);
+                              _expandedEpisodeKey = null;
                             });
                           },
                   ),
@@ -5448,7 +5927,7 @@ class _EpisodeProgressStatus extends StatelessWidget {
             const SizedBox(width: 6),
             Expanded(
               child: Text(
-                'Continue watching',
+                'Time remaining',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -5459,7 +5938,7 @@ class _EpisodeProgressStatus extends StatelessWidget {
             ),
             const SizedBox(width: 8),
             Text(
-              progressValue >= 0.92 ? 'Almost done' : entry.remainingLabel,
+              progressValue >= 0.92 ? 'Almost done' : entry.remainingTimeLabel,
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
                     color: colorScheme.onSurface.withValues(alpha: 0.72),
                     fontWeight: FontWeight.w800,
@@ -5533,6 +6012,17 @@ class _EpisodePlayButton extends StatelessWidget {
   }
 }
 
+String _detailsTitleIdentity(CatalogItem item) {
+  return <String>[
+    item.type.compatTypeValue,
+    item.id,
+    item.localCatalogId ?? '',
+    item.localCatalogItemId ?? '',
+    item.personalServerTypeId ?? '',
+    item.personalServerItemId ?? '',
+  ].join(':');
+}
+
 int _detailsImageCacheWidth(BuildContext context, double logicalWidth) {
   final width = logicalWidth * MediaQuery.devicePixelRatioOf(context);
   return width.clamp(120, 1200).round();
@@ -5551,39 +6041,47 @@ class _SeasonChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(999),
-        onTap: onTap,
-        child: Builder(
-          builder: (context) {
-            final colorScheme = Theme.of(context).colorScheme;
-            return Ink(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              decoration: BoxDecoration(
-                color: selected
-                    ? Color.alphaBlend(
-                        colorScheme.primary.withValues(alpha: 0.16),
-                        JuicrVisual.flatCardColor(colorScheme),
-                      )
-                    : Color.alphaBlend(
-                        colorScheme.onSurface.withValues(alpha: 0.06),
-                        JuicrVisual.flatCardColor(colorScheme),
+    return Semantics(
+      button: true,
+      selected: selected,
+      enabled: onTap != null,
+      label: label,
+      excludeSemantics: true,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(999),
+          onTap: onTap,
+          child: Builder(
+            builder: (context) {
+              final colorScheme = Theme.of(context).colorScheme;
+              return Ink(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                decoration: BoxDecoration(
+                  color: selected
+                      ? Color.alphaBlend(
+                          colorScheme.primary.withValues(alpha: 0.16),
+                          JuicrVisual.flatCardColor(colorScheme),
+                        )
+                      : Color.alphaBlend(
+                          colorScheme.onSurface.withValues(alpha: 0.06),
+                          JuicrVisual.flatCardColor(colorScheme),
+                        ),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  label,
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        color: selected
+                            ? colorScheme.primary
+                            : colorScheme.onSurface.withValues(alpha: 0.74),
+                        fontWeight: FontWeight.w800,
                       ),
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Text(
-                label,
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      color: selected
-                          ? colorScheme.primary
-                          : colorScheme.onSurface.withValues(alpha: 0.74),
-                      fontWeight: FontWeight.w800,
-                    ),
-              ),
-            );
-          },
+                ),
+              );
+            },
+          ),
         ),
       ),
     );

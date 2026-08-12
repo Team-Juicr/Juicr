@@ -40,7 +40,6 @@ public class FlutterVlcPlayerFactory extends PlatformViewFactory {
     @NonNull
     @Override
     public PlatformView create(Context context, int viewId, Object args) {
-//        Map<String, Object> params = (Map<String, Object>) args;
         return flutterVlcPlayerBuilder.build(viewId, context, messenger, textureRegistry, keyForAsset, keyForAssetAndPackageName);
     }
 

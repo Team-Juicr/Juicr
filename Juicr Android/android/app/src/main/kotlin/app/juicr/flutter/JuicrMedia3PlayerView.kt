@@ -1,9 +1,11 @@
 package app.juicr.flutter
 
 import android.content.Context
+import android.graphics.Color
 import android.graphics.Matrix
 import android.net.Uri
-import android.graphics.Color
+import android.os.Build
+import android.view.MotionEvent
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -16,11 +18,15 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
@@ -30,11 +36,43 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
+import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 import kotlin.math.max
 
 private const val DEFAULT_MEDIA3_USER_AGENT = "JuicrApp/1 Android Media3"
 private const val DEFAULT_MAX_AUTO_VIDEO_WIDTH = 1920
 private const val DEFAULT_MAX_AUTO_VIDEO_HEIGHT = 1080
+private const val VOD_BACK_BUFFER_MS = 45_000
+
+private fun isAndroidEmulator(): Boolean {
+    val hardware = Build.HARDWARE.lowercase()
+    val model = Build.MODEL.lowercase()
+    return hardware.contains("ranchu") ||
+        hardware.contains("goldfish") ||
+        model.contains("sdk_gphone")
+}
+
+private fun media3CodecSelectorForDevice(): MediaCodecSelector {
+    if (!isAndroidEmulator()) return MediaCodecSelector.DEFAULT
+    return MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+        if (mimeType != MimeTypes.VIDEO_H264) {
+            return@MediaCodecSelector MediaCodecSelector.DEFAULT.getDecoderInfos(
+                mimeType,
+                requiresSecureDecoder,
+                requiresTunnelingDecoder
+            )
+        }
+        MediaCodecSelector.PREFER_SOFTWARE.getDecoderInfos(
+            mimeType,
+            requiresSecureDecoder,
+            requiresTunnelingDecoder
+        )
+    }
+}
 
 class JuicrMedia3PlayerViewFactory(
     messenger: BinaryMessenger
@@ -47,7 +85,7 @@ class JuicrMedia3PlayerViewFactory(
     }
 
     override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
-        val playerView = JuicrMedia3PlayerView(context, viewId, args as? Map<*, *>)
+        val playerView = JuicrMedia3PlayerView(context, viewId, args as? Map<*, *>, channel)
         players[viewId] = playerView
         return playerView
     }
@@ -102,7 +140,8 @@ class JuicrMedia3PlayerViewFactory(
 class JuicrMedia3PlayerView(
     context: Context,
     private val viewId: Int,
-    args: Map<*, *>?
+    args: Map<*, *>?,
+    private val channel: MethodChannel
 ) : PlatformView, Player.Listener, AnalyticsListener {
     private val rootView = FrameLayout(context)
     private val textureView = TextureView(context)
@@ -120,6 +159,9 @@ class JuicrMedia3PlayerView(
     private var lastTrackSummary = "unknown"
     private var lastAudioTrackSummary = "unknown"
     private var errorBucket = "none"
+    private val loadCompletedCounts = mutableMapOf<String, Int>()
+    private val loadErrorCounts = mutableMapOf<String, Int>()
+    private var lastLoadErrorBucket = "none"
     private val liveMode = args?.get("liveMode") == true
     private val sourceClass = (args?.get("sourceClass") as? String).orEmpty()
     private val sourceType = normalizedSourceType(args?.get("type"))
@@ -154,14 +196,16 @@ class JuicrMedia3PlayerView(
             .setLoadErrorHandlingPolicy(JuicrMedia3LoadErrorPolicy(liveMode))
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                if (liveMode) 6000 else 16000,
-                if (liveMode) 24000 else 50000,
+                if (liveMode) 6000 else 30000,
+                if (liveMode) 24000 else 120000,
                 if (liveMode) 900 else 1200,
                 if (liveMode) 1600 else 2500
             )
+            .setBackBuffer(if (liveMode) 0 else VOD_BACK_BUFFER_MS, true)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
         val renderersFactory = DefaultRenderersFactory(context)
+            .setMediaCodecSelector(media3CodecSelectorForDevice())
             .setEnableDecoderFallback(true)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         player = ExoPlayer.Builder(context)
@@ -184,6 +228,23 @@ class JuicrMedia3PlayerView(
         rootView.isFocusable = false
         textureView.isClickable = false
         textureView.isFocusable = false
+        val tapForwarder = View.OnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_UP && !released) {
+                channel.invokeMethod(
+                    "surfaceTap",
+                    mapOf(
+                        "viewId" to viewId,
+                        "x" to event.x,
+                        "y" to event.y,
+                        "width" to rootView.width,
+                        "height" to rootView.height
+                    )
+                )
+            }
+            false
+        }
+        rootView.setOnTouchListener(tapForwarder)
+        textureView.setOnTouchListener(tapForwarder)
         textureView.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             val nextWidth = right - left
             val nextHeight = bottom - top
@@ -202,7 +263,14 @@ class JuicrMedia3PlayerView(
 
         val url = args?.get("url") as? String
         if (!url.isNullOrBlank()) {
-            player.setMediaItem(buildMediaItem(url, args))
+            val mediaItem = buildMediaItem(url, args)
+            val initialPositionMs =
+                (args?.get("initialPositionMs") as? Number)?.toLong() ?: 0L
+            if (initialPositionMs > 0L) {
+                player.setMediaItem(mediaItem, initialPositionMs)
+            } else {
+                player.setMediaItem(mediaItem)
+            }
             player.prepare()
         } else {
             errorDescription = "missing_source"
@@ -268,6 +336,25 @@ class JuicrMedia3PlayerView(
         lastAudioTrackSummary = audioTrackSummaryFor(tracks)
     }
 
+    override fun onLoadCompleted(
+        eventTime: AnalyticsListener.EventTime,
+        loadEventInfo: LoadEventInfo,
+        mediaLoadData: MediaLoadData
+    ) {
+        incrementLoadCount(loadCompletedCounts, mediaLoadKind(mediaLoadData))
+    }
+
+    override fun onLoadError(
+        eventTime: AnalyticsListener.EventTime,
+        loadEventInfo: LoadEventInfo,
+        mediaLoadData: MediaLoadData,
+        error: IOException,
+        wasCanceled: Boolean
+    ) {
+        incrementLoadCount(loadErrorCounts, mediaLoadKind(mediaLoadData))
+        lastLoadErrorBucket = mediaLoadErrorBucket(error, wasCanceled)
+    }
+
     fun state(): Map<String, Any> {
         if (released) {
             return mapOf(
@@ -281,6 +368,8 @@ class JuicrMedia3PlayerView(
                 "ended" to false,
                 "durationMs" to 0L,
                 "positionMs" to 0L,
+                "bufferedPositionMs" to 0L,
+                "totalBufferedDurationMs" to 0L,
                 "playbackSpeed" to 1.0f,
                 "width" to 0,
                 "height" to 0,
@@ -290,6 +379,9 @@ class JuicrMedia3PlayerView(
                 "bandwidthKbps" to bandwidthKbps,
                 "trackSummary" to lastTrackSummary,
                 "audioTrackSummary" to lastAudioTrackSummary,
+                "loadCompletedSummary" to loadCompletedSummary(),
+                "loadErrorSummary" to loadErrorSummary(),
+                "lastLoadErrorBucket" to lastLoadErrorBucket,
                 "sourceClass" to sourceClass,
                 "sourceType" to sourceType.ifBlank { "unknown" },
                 "mimeType" to (sourceMimeType ?: "unknown"),
@@ -299,6 +391,8 @@ class JuicrMedia3PlayerView(
         }
         val durationMs = if (player.duration > 0) player.duration else 0L
         val positionMs = max(0L, player.currentPosition)
+        val bufferedPositionMs = max(positionMs, player.bufferedPosition)
+        val totalBufferedDurationMs = max(0L, player.totalBufferedDuration)
         return mapOf(
             "viewId" to viewId,
             "initialized" to initialized,
@@ -310,6 +404,8 @@ class JuicrMedia3PlayerView(
             "ended" to (player.playbackState == Player.STATE_ENDED),
             "durationMs" to durationMs,
             "positionMs" to positionMs,
+            "bufferedPositionMs" to bufferedPositionMs,
+            "totalBufferedDurationMs" to totalBufferedDurationMs,
             "playbackSpeed" to player.playbackParameters.speed,
             "width" to width,
             "height" to height,
@@ -319,6 +415,9 @@ class JuicrMedia3PlayerView(
             "bandwidthKbps" to bandwidthKbps,
             "trackSummary" to lastTrackSummary,
             "audioTrackSummary" to lastAudioTrackSummary,
+            "loadCompletedSummary" to loadCompletedSummary(),
+            "loadErrorSummary" to loadErrorSummary(),
+            "lastLoadErrorBucket" to lastLoadErrorBucket,
             "sourceClass" to sourceClass,
             "sourceType" to sourceType.ifBlank { "unknown" },
             "mimeType" to (sourceMimeType ?: "unknown"),
@@ -479,6 +578,59 @@ class JuicrMedia3PlayerView(
                 message.contains("codec") -> "renderer"
             else -> "playback"
         }
+    }
+
+    private fun mediaLoadKind(mediaLoadData: MediaLoadData): String {
+        return when {
+            mediaLoadData.dataType == C.DATA_TYPE_MANIFEST -> "manifest"
+            mediaLoadData.trackType == C.TRACK_TYPE_VIDEO -> "video"
+            mediaLoadData.trackType == C.TRACK_TYPE_AUDIO -> "audio"
+            mediaLoadData.trackType == C.TRACK_TYPE_TEXT -> "text"
+            mediaLoadData.dataType == C.DATA_TYPE_DRM ||
+                mediaLoadData.dataType == C.DATA_TYPE_MEDIA_INITIALIZATION -> "key_or_init"
+            else -> "other"
+        }
+    }
+
+    private fun mediaLoadErrorBucket(error: IOException, wasCanceled: Boolean): String {
+        if (wasCanceled) return "canceled"
+        var cause: Throwable? = error
+        repeat(6) {
+            when (cause) {
+                is HttpDataSource.InvalidResponseCodeException -> {
+                    val responseCode =
+                        (cause as HttpDataSource.InvalidResponseCodeException).responseCode
+                    return when (responseCode) {
+                        in 400..499 -> "http_4xx"
+                        in 500..599 -> "http_5xx"
+                        else -> "http_other"
+                    }
+                }
+                is SocketTimeoutException -> return "timeout"
+                is UnknownHostException -> return "dns"
+                is ConnectException -> return "connect"
+                is SSLException -> return "tls"
+            }
+            cause = cause?.cause
+        }
+        return "io"
+    }
+
+    private fun incrementLoadCount(counts: MutableMap<String, Int>, kind: String) {
+        counts[kind] = (counts[kind] ?: 0) + 1
+    }
+
+    private fun loadCompletedSummary(): String = loadSummary(loadCompletedCounts)
+
+    private fun loadErrorSummary(): String = loadSummary(loadErrorCounts)
+
+    private fun loadSummary(counts: Map<String, Int>): String {
+        val order = listOf("manifest", "video", "audio", "text", "key_or_init", "other")
+        val populated = order.mapNotNull { kind ->
+            val count = counts[kind] ?: 0
+            if (count > 0) "$kind:$count" else null
+        }
+        return if (populated.isEmpty()) "none" else populated.joinToString(",")
     }
 
     private fun audioTrackSummaryFor(tracks: androidx.media3.common.Tracks): String {

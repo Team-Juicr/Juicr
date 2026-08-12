@@ -990,6 +990,22 @@ class _SettingsPageState extends State<SettingsPage> {
     };
   }
 
+  String _normalizedAdvancedQualityLabel(String quality) {
+    final normalized = quality.trim().toUpperCase();
+    if (normalized == '4K') return '2160P';
+    final match = RegExp(r'^(\d+)\s*P$').firstMatch(normalized);
+    if (match == null) return '1080P';
+    final height = int.tryParse(match.group(1) ?? '') ?? 1080;
+    if (height >= 3900) return '4320P';
+    if (height >= 1900) return '2160P';
+    if (height >= 1320) return '1440P';
+    if (height >= 1000) return '1080P';
+    if (height >= 640) return '720P';
+    if (height >= 430) return '480P';
+    if (height >= 320) return '360P';
+    return '240P';
+  }
+
   String _startBehaviorLabel(String value) {
     return switch (value) {
       'resume' => 'Resume automatically',
@@ -1398,6 +1414,9 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _showAdvancedQualitySheet(
     NativePlaybackOverrides overrides,
   ) async {
+    final selectedQuality = _normalizedAdvancedQualityLabel(
+      overrides.advancedQuality,
+    );
     final selected = await showJuicrBottomSheet<String>(
       context: context,
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
@@ -1409,20 +1428,12 @@ class _SettingsPageState extends State<SettingsPage> {
           _OptionItem(value: '2160P', label: '2160P (4K)'),
           _OptionItem(value: '1440P', label: '1440P (QHD)'),
           _OptionItem(value: '1080P', label: '1080P (Full HD)'),
-          _OptionItem(value: '800P', label: '800P'),
           _OptionItem(value: '720P', label: '720P (HD)'),
-          _OptionItem(value: '674P', label: '674P'),
-          _OptionItem(value: '534P', label: '534P'),
           _OptionItem(value: '480P', label: '480P'),
-          _OptionItem(value: '452P', label: '452P'),
           _OptionItem(value: '360P', label: '360P'),
-          _OptionItem(value: '336P', label: '336P'),
-          _OptionItem(value: '266P', label: '266P'),
           _OptionItem(value: '240P', label: '240P'),
         ],
-        selected: overrides.advancedQuality == '4K'
-            ? '2160P'
-            : overrides.advancedQuality,
+        selected: selectedQuality,
       ),
     );
     if (selected == null) return;
@@ -2388,7 +2399,9 @@ class _SettingsPageState extends State<SettingsPage> {
                                     _SettingsValueTile(
                                       icon: Icons.tune_rounded,
                                       title: 'Advanced quality',
-                                      value: overrides.advancedQuality,
+                                      value: _normalizedAdvancedQualityLabel(
+                                        overrides.advancedQuality,
+                                      ),
                                       showValue: false,
                                       onTap: () =>
                                           _showAdvancedQualitySheet(overrides),
@@ -10854,6 +10867,11 @@ class _GeneralHelpSheet extends StatelessWidget {
         Icons.color_lens_outlined,
         'Accent color',
         'Available when device accent is off. It changes highlights, icons, buttons, card tint, and subtle borders.',
+      ),
+      (
+        Icons.translate_rounded,
+        'Language',
+        'Reserved for the upcoming app-language selector. It sits with display and readability settings because it changes how the app reads.',
       ),
       (
         Icons.format_size_rounded,

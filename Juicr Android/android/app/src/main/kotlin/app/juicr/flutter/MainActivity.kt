@@ -2,6 +2,7 @@ package app.juicr.flutter
 
 import android.Manifest
 import android.app.ActivityManager
+import android.app.ApplicationExitInfo
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -36,8 +37,8 @@ import com.google.android.play.core.integrity.StandardIntegrityManager.StandardI
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import java.io.File
 import java.security.MessageDigest
+import java.io.File
 
 class MainActivity : FlutterActivity() {
     private val pipChannelName = "app.juicr.flutter/pip"
@@ -700,9 +701,15 @@ class MainActivity : FlutterActivity() {
         return try {
             val manager = getSystemService(ActivityManager::class.java)
             manager.getHistoricalProcessExitReasons(packageName, 0, 5).map { info ->
+                val ownership = processExitOwnership(info)
                 mapOf(
                     "reason" to exitReasonName(info.reason),
                     "reasonCode" to info.reason,
+                    "processOwnership" to ownership,
+                    "eventFingerprint" to processExitEventFingerprint(
+                        info,
+                        ownership
+                    ),
                     "description" to (info.description ?: ""),
                     "importance" to info.importance,
                     "timestamp" to info.timestamp,
@@ -713,6 +720,34 @@ class MainActivity : FlutterActivity() {
         } catch (_: Exception) {
             emptyList()
         }
+    }
+
+    private fun processExitOwnership(info: ApplicationExitInfo): String {
+        val processName = info.processName?.trim().orEmpty()
+        return when {
+            processName == packageName -> "main_app"
+            info.realUid != info.packageUid -> "isolated_child"
+            processName.startsWith("$packageName:") -> "child"
+            else -> "unknown"
+        }
+    }
+
+    private fun processExitEventFingerprint(
+        info: ApplicationExitInfo,
+        ownership: String
+    ): String {
+        if (ownership != "main_app") return ""
+        val material = listOf(
+            "v1",
+            ownership,
+            exitReasonName(info.reason),
+            info.status.toString(),
+            info.importance.toString(),
+            info.timestamp.toString()
+        ).joinToString("|")
+        return MessageDigest.getInstance("SHA-256")
+            .digest(material.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
     }
 
     private fun batterySnapshot(): Map<String, Any> {

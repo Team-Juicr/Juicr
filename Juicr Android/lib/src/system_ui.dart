@@ -40,12 +40,7 @@ Future<void> applyJuicrShellOrientation({required bool forcePortrait}) {
             DeviceOrientation.portraitUp,
             DeviceOrientation.portraitDown,
           ]
-        : const <DeviceOrientation>[
-            DeviceOrientation.portraitUp,
-            DeviceOrientation.portraitDown,
-            DeviceOrientation.landscapeLeft,
-            DeviceOrientation.landscapeRight,
-          ],
+        : const <DeviceOrientation>[],
   );
 }
 
