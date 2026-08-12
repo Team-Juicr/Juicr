@@ -15,6 +15,17 @@ import 'motion.dart';
 import 'stream_api.dart';
 import 'visual_style.dart';
 
+@visibleForTesting
+bool shouldChainCatalogAutoLoad({
+  required double pixels,
+  required double maxScrollExtent,
+  required double threshold,
+}) {
+  if (maxScrollExtent <= 0) return false;
+  if (pixels <= 24 && maxScrollExtent <= threshold) return false;
+  return pixels >= maxScrollExtent - threshold;
+}
+
 class CatalogPage extends StatefulWidget {
   const CatalogPage({super.key});
 
@@ -1895,7 +1906,11 @@ class _CatalogPageState extends State<CatalogPage>
     }
 
     final prefetchThreshold = max(720.0, position.viewportDimension * 1.15);
-    final nearEnd = pixels >= position.maxScrollExtent - prefetchThreshold;
+    final nearEnd = shouldChainCatalogAutoLoad(
+      pixels: pixels,
+      maxScrollExtent: position.maxScrollExtent,
+      threshold: prefetchThreshold,
+    );
     final rearmBoundary = position.maxScrollExtent - (prefetchThreshold * 1.35);
     if (!nearEnd && pixels < rearmBoundary) {
       _nearEndArmed = true;
@@ -1924,6 +1939,13 @@ class _CatalogPageState extends State<CatalogPage>
       if (_searchActive || _loading || !_hasMore) return;
       final position = _scrollController.position;
       final threshold = max(720.0, position.viewportDimension * 1.15);
+      if (!shouldChainCatalogAutoLoad(
+        pixels: position.pixels,
+        maxScrollExtent: position.maxScrollExtent,
+        threshold: threshold,
+      )) {
+        return;
+      }
       final nearEnd = position.pixels >= position.maxScrollExtent - threshold;
       if (!nearEnd) return;
       _nearEndArmed = true;

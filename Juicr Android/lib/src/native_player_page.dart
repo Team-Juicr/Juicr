@@ -15,12 +15,18 @@ import 'ad_policy.dart';
 import 'app_state.dart';
 import 'catalog_item.dart';
 import 'diagnostic_log.dart';
+import 'native_hud_mount_signal.dart';
 import 'libvlc_hls_relay.dart';
+import 'mobile_libvlc_coordinator.dart';
+import 'mobile_libvlc_models.dart';
+import 'mobile_libvlc_relay_transport.dart';
+import 'mobile_playback_route_startup.dart';
 import 'motion.dart';
 import 'native_media_bridge.dart';
 import 'p2p_indexer_connectors.dart';
 import 'p2p_stream_bridge.dart';
 import 'playback_provider.dart';
+import 'playback_request_transport.dart';
 import 'skip_segments.dart';
 import 'source_ranking.dart';
 import 'stream_api.dart';
@@ -40,6 +46,90 @@ const int _advancedP2pAvoidRiskSoftFallbackMinimum = 3;
 const int _p2pSubstantialStartupBufferBytes = 6 * 1024 * 1024;
 const String _liveTvUnavailableMessage =
     'Channel is offline or unavailable right now. Please try again later.';
+
+typedef NativePlaybackSourceResolver = Future<List<PlaybackSource>> Function(
+  String providerId,
+  PlaybackRequestCancellation cancellation,
+);
+typedef NativePlaybackRequestResolver = Future<List<NativePlaybackRequest>>
+    Function(PlaybackRequestCancellation cancellation);
+
+/// Test-only observation hook for lifecycle ownership races.
+///
+/// It intentionally exposes only neutral counts and labels; production leaves
+/// this unset and follows the normal native-controller path unchanged.
+@visibleForTesting
+class NativePlayerPageLifecycleHarness {
+  int attached = 0;
+  int detached = 0;
+  int acceptedCallbacks = 0;
+  int rejectedCallbacks = 0;
+  int switchSuccessPublications = 0;
+  int staleSwitchRejections = 0;
+
+  void recordAttach() => attached += 1;
+  void recordDetach() => detached += 1;
+  void recordCallback({required bool accepted}) {
+    if (accepted) {
+      acceptedCallbacks += 1;
+    } else {
+      rejectedCallbacks += 1;
+    }
+  }
+
+  void recordSwitch({required bool accepted}) {
+    if (accepted) {
+      switchSuccessPublications += 1;
+    } else {
+      staleSwitchRejections += 1;
+    }
+  }
+}
+
+@visibleForTesting
+List<String> mobileFreshRecoveryProviderIds({
+  required Iterable<String> orderedProviderIds,
+  required Iterable<String> exhaustedProviderIds,
+  int? maxCandidates,
+}) {
+  final exhausted = exhaustedProviderIds
+      .map((providerId) => providerId.trim())
+      .where((providerId) => providerId.isNotEmpty)
+      .toSet();
+  final candidates = orderedProviderIds
+      .map((providerId) => providerId.trim())
+      .where((providerId) => providerId.isNotEmpty)
+      .where((providerId) => !exhausted.contains(providerId))
+      .toList(growable: false);
+  final limit = maxCandidates;
+  if (limit == null || limit <= 0 || candidates.length <= limit) {
+    return candidates;
+  }
+  return candidates.take(limit).toList(growable: false);
+}
+
+@visibleForTesting
+bool mobileHasResolvedFallbackAfter({
+  required int currentIndex,
+  required Iterable<int> requestSourceCounts,
+}) {
+  if (currentIndex < 0) return false;
+  return requestSourceCounts
+      .skip(currentIndex + 1)
+      .any((sourceCount) => sourceCount > 0);
+}
+
+@visibleForTesting
+bool mobileShouldSkipFailedLibVlcHlsSession({
+  required String engineId,
+  required bool isHls,
+  required String candidateKey,
+  required Set<String> failedCandidateKeys,
+}) {
+  return engineId == 'libvlc' &&
+      isHls &&
+      failedCandidateKeys.contains(candidateKey);
+}
 
 String _safeDiagnosticError(Object error) {
   final type = error.runtimeType.toString();
@@ -109,6 +199,9 @@ Color _playerAccent(BuildContext context) =>
 Color _playerAccentOverlay(BuildContext context, double alpha) =>
     _playerAccent(context).withValues(alpha: alpha);
 
+const _playerBufferedTrackColor = Color(0xFF9E9E9E);
+const _playerUnbufferedTrackColor = Color(0xFF3A3A3A);
+
 BoxConstraints _playerSheetConstraints(
   BuildContext context, {
   double maxPortrait = 0.72,
@@ -132,6 +225,8 @@ class NativePlayerPage extends StatefulWidget {
     required this.title,
     required this.sources,
     required this.resolveProvider,
+    this.resolveRecoveryProvider,
+    this.resolveFreshRequests,
     this.resolveSubtitles,
     this.logoUrl,
     this.progressItem,
@@ -144,12 +239,16 @@ class NativePlayerPage extends StatefulWidget {
     this.enableProviderWarmup = true,
     this.limitToFirstQualityPass = false,
     this.liveMode = false,
+    this.preferSavedResume = false,
+    this.startupStartedAt,
+    this.lifecycleHarness,
   });
 
   final String title;
   final List<NativePlaybackRequest> sources;
-  final Future<List<PlaybackSource>> Function(String providerId)
-      resolveProvider;
+  final NativePlaybackSourceResolver resolveProvider;
+  final NativePlaybackSourceResolver? resolveRecoveryProvider;
+  final NativePlaybackRequestResolver? resolveFreshRequests;
   final Future<List<PlaybackSubtitle>> Function()? resolveSubtitles;
   final String? logoUrl;
   final CatalogItem? progressItem;
@@ -158,10 +257,16 @@ class NativePlayerPage extends StatefulWidget {
   final int? skipSegmentSeason;
   final int? skipSegmentEpisode;
   final String? nextEpisodeLabel;
-  final Future<NativePlayerNextEpisode?> Function()? onNextEpisode;
+  final Future<NativePlayerNextEpisode?> Function(
+    PlaybackRequestCancellation cancellation,
+  )? onNextEpisode;
   final bool enableProviderWarmup;
   final bool limitToFirstQualityPass;
   final bool liveMode;
+  final bool preferSavedResume;
+  final DateTime? startupStartedAt;
+  @visibleForTesting
+  final NativePlayerPageLifecycleHarness? lifecycleHarness;
 
   static bool hasVerifiedSourceFor(String? playbackKey) {
     return _NativePlayerPageState.hasVerifiedSourceFor(playbackKey);
@@ -188,11 +293,108 @@ class NativePlaybackRequest {
   final List<PlaybackSource> sources;
 }
 
+List<NativePlaybackRequest> mobilePrioritizeExplicitLibVlcRequestsByTransport(
+  List<NativePlaybackRequest> requests, {
+  required bool explicitLibVlc,
+}) {
+  if (!explicitLibVlc || requests.length < 2) return requests;
+  final directMp4 = <NativePlaybackRequest>[];
+  final unresolved = <NativePlaybackRequest>[];
+  final otherResolved = <NativePlaybackRequest>[];
+  final hlsOnly = <NativePlaybackRequest>[];
+  for (final request in requests) {
+    final sources = request.sources;
+    if (sources.any(mobileIsKnownDirectMp4Source)) {
+      directMp4.add(request);
+    } else if (sources.isEmpty) {
+      unresolved.add(request);
+    } else if (sources.every(mobileIsHlsSourceDescriptor)) {
+      hlsOnly.add(request);
+    } else {
+      otherResolved.add(request);
+    }
+  }
+  return <NativePlaybackRequest>[
+    ...directMp4,
+    ...unresolved,
+    ...otherResolved,
+    ...hlsOnly,
+  ];
+}
+
+List<PlaybackSource> mobilePrioritizeExplicitLibVlcSourcesByTransport(
+  List<PlaybackSource> sources, {
+  required bool explicitLibVlc,
+}) {
+  if (!explicitLibVlc || sources.length < 2) return sources;
+  final directMp4 = <PlaybackSource>[];
+  final other = <PlaybackSource>[];
+  final hls = <PlaybackSource>[];
+  for (final source in sources) {
+    if (mobileIsKnownDirectMp4Source(source)) {
+      directMp4.add(source);
+    } else if (mobileIsHlsSourceDescriptor(source)) {
+      hls.add(source);
+    } else {
+      other.add(source);
+    }
+  }
+  return <PlaybackSource>[...directMp4, ...other, ...hls];
+}
+
+bool mobileIsKnownDirectMp4Source(PlaybackSource source) {
+  final nativeMp4Class = source.sourceClass == PlaybackSourceClass.direct ||
+      source.sourceClass == PlaybackSourceClass.debrid;
+  if (!nativeMp4Class) return false;
+  final type = (source.type ?? '').trim().toLowerCase();
+  final url = source.url.trim().toLowerCase();
+  return type == 'mp4' ||
+      type == 'video/mp4' ||
+      type == 'application/mp4' ||
+      url.contains('.mp4');
+}
+
+bool mobileIsHlsSourceDescriptor(PlaybackSource source) {
+  final type = (source.type ?? '').trim().toLowerCase();
+  final url = source.url.trim().toLowerCase();
+  return type == 'hls' ||
+      type == 'application/vnd.apple.mpegurl' ||
+      type == 'application/x-mpegurl' ||
+      url.contains('.m3u8');
+}
+
+bool mobileVerifiedLibVlcMp4CanUseEarlyFallback({
+  required bool strictLibVlc,
+  required String cachedEngineId,
+  required PlaybackSource source,
+  required Duration cacheAge,
+  required bool stale,
+  required bool nativeSupported,
+  required bool descriptorOpenable,
+  required bool providerOffline,
+  required int failureCount,
+  required int confidence,
+  Duration maxEarlyAge = const Duration(minutes: 90),
+}) {
+  return strictLibVlc &&
+      cachedEngineId == 'libvlc' &&
+      mobileIsKnownDirectMp4Source(source) &&
+      cacheAge <= maxEarlyAge &&
+      !stale &&
+      nativeSupported &&
+      descriptorOpenable &&
+      !providerOffline &&
+      failureCount <= 0 &&
+      confidence >= 12;
+}
+
 class NativePlayerNextEpisode {
   const NativePlayerNextEpisode({
     required this.title,
     required this.sources,
     required this.resolveProvider,
+    this.resolveRecoveryProvider,
+    this.resolveFreshRequests,
     this.resolveSubtitles,
     this.logoUrl,
     this.progressItem,
@@ -207,8 +409,9 @@ class NativePlayerNextEpisode {
 
   final String title;
   final List<NativePlaybackRequest> sources;
-  final Future<List<PlaybackSource>> Function(String providerId)
-      resolveProvider;
+  final NativePlaybackSourceResolver resolveProvider;
+  final NativePlaybackSourceResolver? resolveRecoveryProvider;
+  final NativePlaybackRequestResolver? resolveFreshRequests;
   final Future<List<PlaybackSubtitle>> Function()? resolveSubtitles;
   final String? logoUrl;
   final CatalogItem? progressItem;
@@ -217,7 +420,9 @@ class NativePlayerNextEpisode {
   final int? skipSegmentSeason;
   final int? skipSegmentEpisode;
   final String? nextEpisodeLabel;
-  final Future<NativePlayerNextEpisode?> Function()? onNextEpisode;
+  final Future<NativePlayerNextEpisode?> Function(
+    PlaybackRequestCancellation cancellation,
+  )? onNextEpisode;
   final bool limitToFirstQualityPass;
 }
 
@@ -275,10 +480,15 @@ enum _NativePlaybackEngine {
 enum _ResumeSeekProofResult { proved, timeout, rejected }
 
 class _Media3NativePlayerController {
-  _Media3NativePlayerController(this.source, {required this.liveMode});
+  _Media3NativePlayerController(
+    this.source, {
+    required this.liveMode,
+    this.initialPosition = Duration.zero,
+  });
 
   final PlaybackSource source;
   final bool liveMode;
+  final Duration initialPosition;
   final Completer<void> _viewReady = Completer<void>();
   final Set<VoidCallback> _listeners = <VoidCallback>{};
   Timer? _pollTimer;
@@ -291,6 +501,8 @@ class _Media3NativePlayerController {
   bool isEnded = false;
   Duration duration = Duration.zero;
   Duration position = Duration.zero;
+  Duration bufferedPosition = Duration.zero;
+  Duration totalBufferedDuration = Duration.zero;
   double playbackSpeed = 1;
   Size size = Size.zero;
   String errorDescription = '';
@@ -299,6 +511,9 @@ class _Media3NativePlayerController {
   int bandwidthKbps = 0;
   String trackSummary = 'unknown';
   String audioTrackSummary = 'unknown';
+  String loadCompletedSummary = 'none';
+  String loadErrorSummary = 'none';
+  String lastLoadErrorBucket = 'none';
   String sourceType = 'unknown';
   String mimeType = 'unknown';
   String headerCountBucket = 'none';
@@ -325,6 +540,7 @@ class _Media3NativePlayerController {
       'type': source.type,
       'sourceClass': source.sourceClass.wireName,
       'liveMode': liveMode,
+      'initialPositionMs': initialPosition.inMilliseconds,
       'preferredAudioLanguage': settings.preferredAudioLanguage,
       'subtitleAutoSelect': settings.subtitleAutoSelect,
       'subtitleLanguage': settings.subtitleLanguage,
@@ -349,6 +565,8 @@ class _Media3NativePlayerController {
     if (!_viewReady.isCompleted) _viewReady.complete();
     _startPolling();
   }
+
+  int? get attachedViewId => _viewId;
 
   Future<void> initialize({Duration? timeout}) {
     final future = _initialize();
@@ -423,6 +641,9 @@ class _Media3NativePlayerController {
     bandwidthKbps = (raw['bandwidthKbps'] as num?)?.round() ?? 0;
     trackSummary = (raw['trackSummary'] as String?) ?? 'unknown';
     audioTrackSummary = (raw['audioTrackSummary'] as String?) ?? 'unknown';
+    loadCompletedSummary = (raw['loadCompletedSummary'] as String?) ?? 'none';
+    loadErrorSummary = (raw['loadErrorSummary'] as String?) ?? 'none';
+    lastLoadErrorBucket = (raw['lastLoadErrorBucket'] as String?) ?? 'none';
     sourceType = (raw['sourceType'] as String?) ?? 'unknown';
     mimeType = (raw['mimeType'] as String?) ?? 'unknown';
     headerCountBucket = (raw['headerCountBucket'] as String?) ?? 'none';
@@ -431,6 +652,12 @@ class _Media3NativePlayerController {
     );
     position = Duration(
       milliseconds: (raw['positionMs'] as num?)?.round() ?? 0,
+    );
+    bufferedPosition = Duration(
+      milliseconds: (raw['bufferedPositionMs'] as num?)?.round() ?? 0,
+    );
+    totalBufferedDuration = Duration(
+      milliseconds: (raw['totalBufferedDurationMs'] as num?)?.round() ?? 0,
     );
     playbackSpeed = (raw['playbackSpeed'] as num?)?.toDouble() ?? 1;
     final width = (raw['width'] as num?)?.toDouble() ?? 0;
@@ -472,7 +699,9 @@ class _NativePlaybackController {
     required bool liveMode,
     VideoViewType? exoViewType,
     _LibVlcProfile? libVlcProfile,
+    bool libVlcContinuousTsMode = false,
     bool media3NativeEnabled = true,
+    Duration initialPosition = Duration.zero,
   }) {
     return switch (engine) {
       _NativePlaybackEngine.exoplayer => () {
@@ -483,7 +712,11 @@ class _NativePlaybackController {
           )) {
             return _NativePlaybackController._(
               engine: engine,
-              media3: _Media3NativePlayerController(source, liveMode: liveMode),
+              media3: _Media3NativePlayerController(
+                source,
+                liveMode: liveMode,
+                initialPosition: initialPosition,
+              ),
             );
           }
           return _NativePlaybackController._(
@@ -499,15 +732,17 @@ class _NativePlaybackController {
         }(),
       _NativePlaybackEngine.libvlc => _NativePlaybackController._(
           engine: engine,
-          libVlcProfile: libVlcProfile ?? _libVlcProfiles.first,
+          libVlcProfile: libVlcProfile ?? _mobileLibVlcDriverProfile,
           vlc: VlcPlayerController.network(
             source.url,
-            hwAcc: (libVlcProfile ?? _libVlcProfiles.first).hwAcc,
+            hwAcc: (libVlcProfile ?? _mobileLibVlcDriverProfile).hwAcc,
             autoPlay: false,
             autoInitialize: false,
             options: _vlcPlayerOptions(
               source.headers,
-              libVlcProfile ?? _libVlcProfiles.first,
+              libVlcProfile ?? _mobileLibVlcDriverProfile,
+              liveMode: liveMode,
+              continuousTsMode: libVlcContinuousTsMode,
             ),
           ),
         ),
@@ -520,6 +755,7 @@ class _NativePlaybackController {
   final _Media3NativePlayerController? media3;
   final VideoViewType? videoViewType;
   final _LibVlcProfile? libVlcProfile;
+  bool _platformSurfaceBuildLogged = false;
 
   bool get isInitialized =>
       video?.value.isInitialized ??
@@ -553,10 +789,21 @@ class _NativePlaybackController {
       vlc?.value.position ??
       media3?.position ??
       Duration.zero;
+  Duration get bufferedPosition =>
+      video?.value.buffered.fold<Duration>(
+        Duration.zero,
+        (latest, range) => range.end > latest ? range.end : latest,
+      ) ??
+      media3?.bufferedPosition ??
+      Duration.zero;
+  bool get hasTrustedBufferedTimeline => video != null || media3 != null;
+  Duration get totalBufferedDuration =>
+      media3?.totalBufferedDuration ?? Duration.zero;
   double get playbackSpeed =>
       media3?.playbackSpeed ?? vlc?.value.playbackSpeed ?? 1;
   Size get size =>
       video?.value.size ?? vlc?.value.size ?? media3?.size ?? Size.zero;
+  bool get hasRenderedVideoFrame => media3?.firstFrameRendered ?? true;
   double get aspectRatio =>
       video?.value.aspectRatio ??
       vlc?.value.aspectRatio ??
@@ -574,8 +821,12 @@ class _NativePlaybackController {
           'speed=${media3Controller.playbackSpeed.toStringAsFixed(2)} '
           'dropped=${media3Controller.droppedVideoFrames} '
           'bandwidthKbps=${media3Controller.bandwidthKbps} '
+          'bufferAhead=${media3Controller.totalBufferedDuration.inSeconds}s '
           'tracks=${media3Controller.trackSummary} '
           'audioTrack=${media3Controller.audioTrackSummary} '
+          'loads=${media3Controller.loadCompletedSummary} '
+          'loadErrors=${media3Controller.loadErrorSummary} '
+          'lastLoadError=${media3Controller.lastLoadErrorBucket} '
           'sourceType=${media3Controller.sourceType} '
           'mime=${media3Controller.mimeType} '
           'headers=${media3Controller.headerCountBucket} '
@@ -592,6 +843,14 @@ class _NativePlaybackController {
 
   bool get requiresPlatformViewWarmup => media3 != null || vlc != null;
 
+  void markPlatformSurfaceBuilt() {
+    if (vlc == null || _platformSurfaceBuildLogged) return;
+    _platformSurfaceBuildLogged = true;
+    DiagnosticLog.add(
+      'native libvlc lifecycle stage=surface_build',
+    );
+  }
+
   void addListener(VoidCallback listener) {
     video?.addListener(listener);
     vlc?.addListener(listener);
@@ -604,7 +863,7 @@ class _NativePlaybackController {
     media3?.removeListener(listener);
   }
 
-  Future<void> initialize({Duration? timeout}) {
+  Future<void> initialize({Duration? timeout}) async {
     final videoController = video;
     if (videoController != null) {
       final future = videoController.initialize();
@@ -616,6 +875,18 @@ class _NativePlaybackController {
     }
     final vlcController = vlc!;
     if (vlcController.value.isInitialized) return Future<void>.value();
+    final initializeBudget = timeout ?? const Duration(seconds: 22);
+    final deadline = DateTime.now().add(initializeBudget);
+    while (DateTime.now().isBefore(deadline)) {
+      if (_libVlcViewAttached(vlcController)) break;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    if (!_libVlcViewAttached(vlcController)) {
+      throw TimeoutException('VLC view attach timed out', initializeBudget);
+    }
+    DiagnosticLog.add(
+      'native libvlc lifecycle stage=view_attached',
+    );
     final completer = Completer<void>();
     late VoidCallback listener;
     var listenerAttached = false;
@@ -637,38 +908,56 @@ class _NativePlaybackController {
     };
     vlcController.addListener(listener);
     listenerAttached = true;
-    Future<void> beginInitialize() async {
-      for (var attempt = 0; attempt < 12; attempt += 1) {
-        if (vlcController.value.isInitialized ||
-            vlcController.viewId != null ||
-            completer.isCompleted) {
-          break;
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 16));
-      }
-      if (vlcController.value.isInitialized || completer.isCompleted) return;
-      if (vlcController.viewId == null) {
-        throw StateError('VLC view is not attached');
-      }
-      await vlcController.initialize();
+    var remaining = deadline.difference(DateTime.now());
+    if (remaining <= Duration.zero) {
+      detachListener();
+      throw TimeoutException('VLC initialize timed out', initializeBudget);
     }
-
-    unawaited(
-      beginInitialize().catchError((Object error, StackTrace stackTrace) {
-        detachListener();
-        if (!completer.isCompleted) {
-          completer.completeError(error, stackTrace);
-        }
-      }),
+    DiagnosticLog.add(
+      'native libvlc lifecycle stage=create_started',
     );
-    if (timeout == null) return completer.future;
+    try {
+      await vlcController.initialize().timeout(
+            remaining,
+            onTimeout: () => throw TimeoutException(
+              'VLC native create timed out',
+              initializeBudget,
+            ),
+          );
+      DiagnosticLog.add(
+        'native libvlc lifecycle stage=create_completed',
+      );
+    } catch (error) {
+      final message = error.toString().toLowerCase();
+      if (!message.contains('already initialized')) {
+        detachListener();
+        rethrow;
+      }
+    }
+    if (vlcController.value.isInitialized && !completer.isCompleted) {
+      completer.complete();
+    }
+    remaining = deadline.difference(DateTime.now());
+    if (remaining <= Duration.zero) {
+      detachListener();
+      throw TimeoutException('VLC initialize timed out', initializeBudget);
+    }
     return completer.future.timeout(
-      timeout,
+      remaining,
       onTimeout: () {
         detachListener();
-        throw TimeoutException('VLC initialize timed out', timeout);
+        throw TimeoutException('VLC initialize timed out', initializeBudget);
       },
     );
+  }
+
+  bool _libVlcViewAttached(VlcPlayerController controller) {
+    try {
+      final dynamic candidate = controller;
+      return candidate.viewId is int;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> play() => video?.play() ?? vlc?.play() ?? media3!.play();
@@ -713,28 +1002,221 @@ class _NativePlaybackController {
   }
 }
 
+class _MobileLibVlcDriverAdapter implements MobileLibVlcDriver {
+  _MobileLibVlcDriverAdapter({
+    required PlaybackSource source,
+    required bool liveMode,
+    required double volume,
+    required double playbackSpeed,
+    required VideoFitMode fitMode,
+    required MobileLibVlcSessionTimeline? timeline,
+    required void Function(_NativePlaybackController controller)
+        onControllerReady,
+  })  : _volume = volume,
+        _playbackSpeed = playbackSpeed,
+        _fitMode = fitMode,
+        _source = source,
+        _timeline = timeline,
+        _controller = _NativePlaybackController.network(
+          engine: _NativePlaybackEngine.libvlc,
+          source: source,
+          liveMode: liveMode,
+          libVlcProfile: _mobileLibVlcDriverProfile,
+          libVlcContinuousTsMode: false,
+        ) {
+    _controller.addListener(_handleControllerChanged);
+    _handleControllerChanged();
+    onControllerReady(_controller);
+  }
+
+  final _NativePlaybackController _controller;
+  final double _volume;
+  final double _playbackSpeed;
+  final VideoFitMode _fitMode;
+  final PlaybackSource _source;
+  final MobileLibVlcSessionTimeline? _timeline;
+  final StreamController<MobileLibVlcDriverSnapshot> _snapshots =
+      StreamController<MobileLibVlcDriverSnapshot>.broadcast(sync: true);
+
+  MobileLibVlcDriverSnapshot _snapshot =
+      const MobileLibVlcDriverSnapshot.idle();
+  Duration _lastObservedPosition = Duration.zero;
+  bool _hasObservedAdvancingVisualFrame = false;
+  DateTime? _lastDecodedFrameProbeAt;
+  bool _decodedFrameProbeInFlight = false;
+  int? _lastDecodedFrameFingerprint;
+  int _unchangedDecodedFrameSamples = 0;
+  bool _disposed = false;
+
+  _NativePlaybackController get controller => _controller;
+
+  PlaybackSource get source => _source;
+
+  MobileLibVlcSessionTimeline? get timeline => _timeline;
+
+  @override
+  MobileLibVlcDriverSnapshot get snapshot => _snapshot;
+
+  @override
+  Stream<MobileLibVlcDriverSnapshot> get snapshots => _snapshots.stream;
+
+  void _handleControllerChanged() {
+    if (_disposed) return;
+    final controller = _controller;
+    final hasInitializedVideoGeometry = controller.isInitialized &&
+        controller.size.width > 0 &&
+        controller.size.height > 0;
+    if (controller.isPlaying &&
+        hasInitializedVideoGeometry &&
+        controller.position > _lastObservedPosition) {
+      _hasObservedAdvancingVisualFrame = true;
+    }
+    _lastObservedPosition = controller.position;
+    _timeline?.recordDriverPosition(
+      controller.position,
+      isInitialized: controller.isInitialized,
+    );
+    _snapshot = MobileLibVlcDriverSnapshot(
+      position: controller.position,
+      duration: controller.duration,
+      isPlaying: controller.isPlaying,
+      isBuffering: controller.isBuffering,
+      hasError: controller.hasError,
+      videoWidth: controller.size.width,
+      videoHeight: controller.size.height,
+      isInitialized: controller.isInitialized,
+      isEnded: controller.isEnded,
+      hasUsableVideoFrame: _hasObservedAdvancingVisualFrame,
+      errorMessage: controller.hasError ? 'libVLC playback failed.' : null,
+    );
+    if (!_snapshots.isClosed) {
+      _snapshots.add(_snapshot);
+    }
+    _maybeProbeDecodedFrame(controller);
+  }
+
+  void _maybeProbeDecodedFrame(_NativePlaybackController controller) {
+    if (!_libVlcDecodedFrameProbeEnabled || _disposed) return;
+    if (_decodedFrameProbeInFlight ||
+        !controller.isInitialized ||
+        !controller.isPlaying ||
+        controller.isBuffering) {
+      return;
+    }
+    final now = DateTime.now();
+    final lastProbeAt = _lastDecodedFrameProbeAt;
+    if (lastProbeAt != null &&
+        now.difference(lastProbeAt) < const Duration(seconds: 5)) {
+      return;
+    }
+    _lastDecodedFrameProbeAt = now;
+    _decodedFrameProbeInFlight = true;
+    unawaited(_probeDecodedFrame(controller));
+  }
+
+  Future<void> _probeDecodedFrame(
+    _NativePlaybackController controller,
+  ) async {
+    try {
+      final vlcController = controller.vlc;
+      if (vlcController == null) return;
+      final bytes = await vlcController.takeSnapshot();
+      if (_disposed) return;
+      if (bytes == null || bytes.isEmpty) {
+        DiagnosticLog.add(
+          'native libvlc decoded frame probe state=empty '
+          'position=${controller.position.inSeconds}s',
+        );
+        return;
+      }
+      var fingerprint = 0x811c9dc5;
+      for (final byte in bytes) {
+        fingerprint ^= byte;
+        fingerprint = (fingerprint * 0x01000193) & 0xffffffff;
+      }
+      final previousFingerprint = _lastDecodedFrameFingerprint;
+      final state = previousFingerprint == null
+          ? 'baseline'
+          : previousFingerprint == fingerprint
+              ? 'unchanged'
+              : 'changed';
+      if (state == 'unchanged') {
+        _unchangedDecodedFrameSamples += 1;
+      } else {
+        _unchangedDecodedFrameSamples = 0;
+      }
+      _lastDecodedFrameFingerprint = fingerprint;
+      final bytesBucket = bytes.length < 64 * 1024
+          ? 'small'
+          : bytes.length < 512 * 1024
+              ? 'medium'
+              : 'large';
+      DiagnosticLog.add(
+        'native libvlc decoded frame probe state=$state '
+        'bytes=$bytesBucket '
+        'unchangedSamples=$_unchangedDecodedFrameSamples '
+        'position=${controller.position.inSeconds}s',
+      );
+    } catch (_) {
+      if (_disposed) return;
+      DiagnosticLog.add(
+        'native libvlc decoded frame probe state=unavailable '
+        'position=${controller.position.inSeconds}s',
+      );
+    } finally {
+      _decodedFrameProbeInFlight = false;
+    }
+  }
+
+  @override
+  Future<void> initialize() async {
+    if (_disposed) return;
+    await _controller.initialize();
+    if (_disposed) return;
+    await _controller.setVolume(_volume);
+    await _controller.setPlaybackSpeed(_playbackSpeed);
+    await _controller.setVideoSizeMode(_nativeVideoSizeModeFor(_fitMode));
+    _handleControllerChanged();
+  }
+
+  @override
+  Future<void> play() => _disposed ? Future<void>.value() : _controller.play();
+
+  @override
+  Future<void> pause() =>
+      _disposed ? Future<void>.value() : _controller.pause();
+
+  @override
+  Future<void> seekTo(Duration position) {
+    if (_disposed) return Future<void>.value();
+    final driverPosition = _timeline?.localSeekPosition(position) ?? position;
+    return _controller.seekTo(driverPosition);
+  }
+
+  @override
+  Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    _controller.removeListener(_handleControllerChanged);
+    try {
+      await _controller.dispose();
+    } finally {
+      await _snapshots.close();
+    }
+  }
+}
+
 bool _shouldUseNativeMedia3SurfaceForSource(
   bool media3NativeEnabled,
-  PlaybackSource source,
+  PlaybackSource _,
 ) {
   if (!media3NativeEnabled) return false;
   if (defaultTargetPlatform != TargetPlatform.android) return false;
-  return !_shouldPreferTextureExoplayerForMobile(source);
+  return true;
 }
 
-bool _shouldPreferTextureExoplayerForMobile(PlaybackSource source) {
-  if (source.sourceClass != PlaybackSourceClass.direct) return false;
-  final type = (source.type ?? '').trim().toLowerCase();
-  final url = source.url.toLowerCase();
-  final isHls = type == 'hls' || url.contains('.m3u8');
-  if (isHls) return true;
-  if (type == 'mp4') return true;
-  if (url.endsWith('.mp4')) return true;
-  return false;
-}
-
-VideoViewType _exoVideoViewTypeFor(PlaybackSource _) {
-  return VideoViewType.textureView;
+VideoViewType _exoVideoViewTypeFor(PlaybackSource source) {
+  return VideoViewType.platformView;
 }
 
 VideoFormat? _videoFormatHintFor(PlaybackSource source) {
@@ -787,45 +1269,87 @@ class _LibVlcProfile {
   const _LibVlcProfile({
     required this.id,
     required this.hwAcc,
-    required this.networkCachingMs,
+    required this.liveNetworkCachingMs,
+    required this.vodNetworkCachingMs,
     this.extras = const <String>[],
   });
 
   final String id;
   final HwAcc hwAcc;
-  final int networkCachingMs;
+  final int liveNetworkCachingMs;
+  final int vodNetworkCachingMs;
   final List<String> extras;
 }
 
-const List<_LibVlcProfile> _libVlcProfiles = <_LibVlcProfile>[
-  _LibVlcProfile(id: 'auto_hw', hwAcc: HwAcc.auto, networkCachingMs: 1800),
-  _LibVlcProfile(
-    id: 'software_decode',
-    hwAcc: HwAcc.disabled,
-    networkCachingMs: 2500,
-  ),
-];
+const int _libVlcContinuousTsNetworkCachingMs = 1800;
+const int _libVlcContinuousTsTargetHeight = 720;
+const Duration _libVlcHlsStartupProbeTimeout = Duration(seconds: 18);
+const bool _libVlcContinuousTsRelayEnabled = bool.fromEnvironment(
+  'JUICR_LIBVLC_CONTINUOUS_TS',
+  defaultValue: true,
+);
+const bool _libVlcDecodedFrameProbeEnabled = bool.fromEnvironment(
+  'JUICR_LIBVLC_FRAME_PROBE',
+  defaultValue: false,
+);
+
+const _LibVlcProfile _mobileLibVlcDriverProfile = _LibVlcProfile(
+  id: 'mobile_tv_style',
+  hwAcc: HwAcc.auto,
+  liveNetworkCachingMs: 1800,
+  vodNetworkCachingMs: 1800,
+);
+
+int _libVlcNetworkCachingMs(
+  _LibVlcProfile profile, {
+  required bool liveMode,
+  bool continuousTsMode = false,
+}) {
+  if (continuousTsMode) return _libVlcContinuousTsNetworkCachingMs;
+  return liveMode ? profile.liveNetworkCachingMs : profile.vodNetworkCachingMs;
+}
 
 VlcPlayerOptions _vlcPlayerOptions(
   Map<String, String> headers,
-  _LibVlcProfile profile,
-) {
+  _LibVlcProfile profile, {
+  required bool liveMode,
+  required bool continuousTsMode,
+}) {
+  final effectiveNetworkCachingMs = _libVlcNetworkCachingMs(
+    profile,
+    liveMode: liveMode,
+    continuousTsMode: continuousTsMode,
+  );
   return VlcPlayerOptions(
     advanced: VlcAdvancedOptions([
-      VlcAdvancedOptions.networkCaching(profile.networkCachingMs),
+      VlcAdvancedOptions.networkCaching(effectiveNetworkCachingMs),
     ]),
     http: _vlcHttpOptions(headers),
     extras: <String>[
-      ':network-caching=${profile.networkCachingMs}',
+      ':network-caching=$effectiveNetworkCachingMs',
       ..._vlcPerMediaHttpOptions(headers),
       ...profile.extras,
     ],
   );
 }
 
+final class _StagedMobileLibVlcTransportMetadata {
+  Duration? duration;
+  int? selectedHeight;
+  final Set<int> failedHeights = <int>{};
+  Duration? timelineOffset;
+  bool committed = false;
+}
+
 class _NativePlayerPageState extends State<NativePlayerPage>
     with WidgetsBindingObserver {
   static const Duration _verifiedPlaybackSourceTtl = Duration(hours: 6);
+  static const int _libVlcContinuousTsMediaProofBytes = 512 * 1024;
+  static const Duration _hlsVariantManifestTimeout = Duration(seconds: 4);
+  static const Duration _hlsVariantManifestRetryDelay = Duration(
+    milliseconds: 250,
+  );
+  static const Duration _hlsVariantExpansionBudget = Duration(seconds: 8);
   static const Duration _shortVodPlaceholderDurationLimit = Duration(
     seconds: 75,
   );
@@ -861,8 +1385,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
   late String _title;
   late List<NativePlaybackRequest> _requests;
-  late Future<List<PlaybackSource>> Function(String providerId)
-      _resolveProvider;
+  late NativePlaybackSourceResolver _resolveProvider;
+  late NativePlaybackSourceResolver _resolveRecoveryProvider;
+  NativePlaybackRequestResolver? _resolveFreshRequests;
   Future<List<PlaybackSubtitle>> Function()? _resolveSubtitles;
   late bool _enableProviderWarmup;
   late bool _limitToFirstQualityPass;
@@ -873,7 +1398,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   int? _skipSegmentSeason;
   int? _skipSegmentEpisode;
   String? _nextEpisodeLabel;
-  Future<NativePlayerNextEpisode?> Function()? _nextEpisodeResolver;
+  Future<NativePlayerNextEpisode?> Function(
+    PlaybackRequestCancellation cancellation,
+  )? _nextEpisodeResolver;
   final StreamApi _feedbackApi = StreamApi();
   final PlaybackSkipSegmentClient _skipSegmentClient =
       PlaybackSkipSegmentClient();
@@ -883,8 +1410,33 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   final Set<String> _autoSkippedSegmentKeys = <String>{};
 
   _NativePlaybackController? _controller;
+  MobileLibVlcCoordinator? _mobileLibVlcCoordinator;
+  Map<MobileLibVlcSourceCandidate, PlaybackSource>?
+      _mobileLibVlcCandidateSources;
+  final Map<(MobileLibVlcSourceCandidate, int),
+          _StagedMobileLibVlcTransportMetadata>
+      _stagedMobileLibVlcTransportMetadata = <(
+    MobileLibVlcSourceCandidate,
+    int
+  ),
+          _StagedMobileLibVlcTransportMetadata>{};
+  final Map<int, _NativePlaybackController> _stagedMobileLibVlcControllers =
+      <int, _NativePlaybackController>{};
+  Duration _mobileLibVlcSeekAbsoluteFloor = Duration.zero;
+  int _mobileLibVlcSeekOwnerGeneration = -1;
+  MobileLibVlcSessionTimeline? _activeMobileLibVlcSessionTimeline;
+  StreamSubscription<MobileLibVlcTransportSnapshot>?
+      _mobileLibVlcTransportSubscription;
+  bool _mobileLibVlcRelayActive = false;
   bool _loading = true;
+  bool _mobileLibVlcSeekPreparing = false;
+  bool _mobileLibVlcSeekNeedsVisibleFallback = false;
   bool _controlsVisible = true;
+  int _hudRevealGeneration = 0;
+  final NativeHudMountSignalGate _hudMountSignalGate =
+      NativeHudMountSignalGate();
+  NativeHudTransportMountOwner _hudTransportMountOwner =
+      NativeHudTransportMountOwner(0);
   bool _locked = false;
   String? _statusMessage;
   String? _playbackWaitMessage;
@@ -904,25 +1456,42 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   Timer? _openingGuardTimer;
   Timer? _deferredResumeSeekTimer;
   Timer? _playbackCadenceTimer;
+  PlaybackSource? _pendingSourceSelectionPreviousSource;
+  String? _pendingSourceSelectionSelectedUrl;
+  DateTime? _pendingSourceSelectionRollbackUntil;
+  int _pendingSourceSelectionPreviousSourceIndex = 0;
+  String? _pendingSourceSelectionPreviousPreferredQuality;
+  String _pendingSourceSelectionPreviousQualityPreferenceMode = 'recommended';
+  bool _pendingSourceSelectionWasPlaying = true;
   Duration _lastWatchdogPosition = Duration.zero;
   Duration _lastCadencePosition = Duration.zero;
   Duration _lastKnownPlaybackPosition = Duration.zero;
   Duration _lastKnownPlaybackDuration = Duration.zero;
   Duration _lastCrediblePlaybackPosition = Duration.zero;
   DateTime? _lastCrediblePlaybackPositionAt;
+  final MobileLibVlcSeekSettlementBarrier _libVlcSeekSettlementBarrier =
+      MobileLibVlcSeekSettlementBarrier();
+  int _libVlcSeekSettlementLoggedGeneration = -1;
   Duration _resumeProgressAnchorPosition = Duration.zero;
   Duration _rendererRecoveryAnchorPosition = Duration.zero;
   DateTime? _rendererRecoveryAnchorUntil;
+  Duration _media3ResumeSeekSettleAnchor = Duration.zero;
+  DateTime? _media3ResumeSeekSettleUntil;
+  int _media3ResumeSeekSettleDrifts = 0;
   int _resumeProgressAnchorLogSecond = -1;
   int _unstableClockProgressSkipLogSecond = -1;
   int _untrustedClockProgressSkipLogSecond = -1;
+  DateTime? _lastProgressSaveSkipLogAt;
+  String? _lastProgressSaveSkipLogReason;
+  bool _media3RendererClockProofWasPending = false;
   DateTime? _lastCadenceSampleAt;
   int _playbackCadenceSamples = 0;
   int _playbackCadenceJumpEvents = 0;
   int _playbackCadenceConsecutiveJumpEvents = 0;
   int _playbackCadenceHealthySamples = 0;
   int _playbackCadenceUnstableEvents = 0;
-  int _libVlcFrozenClockSamples = 0;
+  static const Duration _libVlcContinuousTsTransportFreshness =
+      Duration(seconds: 12);
   bool _playbackCadenceClockUnstable = false;
   DateTime? _lastPlaybackCadenceDriftHoldAt;
   DateTime? _lastPlaybackCadenceDriftObservationLogAt;
@@ -930,11 +1499,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   DateTime? _lastMedia3RendererDriftEscalationAt;
   String? _media3RendererDriftRepairSourceKey;
   int _media3RendererDriftRepairCountForSource = 0;
+  String? _media3RendererDriftHoldSourceKey;
+  int _media3RendererDriftHoldCountForSource = 0;
+  int _media3DirectHlsRendererDriftHoldCount = 0;
   DateTime? _playbackCadenceUnstableWindowStartedAt;
+  DateTime? _lastRuntimeSourceFailureAt;
+  String? _lastRuntimeSourceFailureProviderId;
+  Duration _lastRuntimeSourceFailurePosition = Duration.zero;
+  DateTime? _lastDirectHlsRouteRiskAt;
+  Duration _lastDirectHlsRouteRiskAnchor = Duration.zero;
   Duration? _deferredResumeSeekPosition;
   String? _deferredResumeSeekProviderId;
   int _deferredResumeSeekAttempts = 0;
   bool _deferredResumeSeekInFlight = false;
+  bool _deferredResumeSeekRequiresVisualProof = false;
   int _stallWatchdogTicks = 0;
   int _deadPauseTicks = 0;
   int _blackVideoWatchdogTicks = 0;
@@ -943,13 +1521,16 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   bool _persistentBufferingRecoveryEscapeArmed = false;
   int _media3PersistentBufferingStreakTicks = 0;
   int _media3PersistentBufferingHealthySamples = 0;
+  Duration _media3PersistentBufferingLastHealthyPosition = Duration.zero;
   String? _media3PersistentBufferingSourceKey;
   String? _lastMedia3PersistentBufferingSourceKey;
   DateTime? _lastMedia3PersistentBufferingSeenAt;
   int _lastMedia3PersistentBufferingTicks = 0;
   String? _media3PersistentBufferingNudgeSourceKey;
   int _media3PersistentBufferingNudgeAnchorSecond = -1;
+  int _media3PersistentBufferingNudgeCountForSource = 0;
   bool _media3PersistentBufferingNudgeInFlight = false;
+  String? _lastMedia3ChildLoadTelemetrySignature;
   int? _media3RecoveryQualityCeilingRank;
   DateTime? _media3RecoveryQualityCeilingSetAt;
   String? _media3RecoveryQualityCeilingReason;
@@ -960,12 +1541,18 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   bool _recoveringFromMedia3RendererDrift = false;
   bool _escalatingMedia3RendererDrift = false;
   bool _openingSource = false;
+  bool _manualLibVlcSelectionProofPending = false;
+  bool _manualLibVlcSelectionRetainedClockRecoveryPending = false;
+  Duration _manualLibVlcSelectionProgressAnchor = Duration.zero;
+  bool _media3DirectHlsStartupProofPending = false;
   bool _userPaused = false;
   bool _playerClosing = false;
   bool _playerPopIssued = false;
   bool _allowPop = false;
   bool _nativeProvidersExhausted = false;
+  int? _verifiedCacheFallbackStartIndex;
   int _failureCloseGeneration = 0;
+  int _libVlcHlsRelayGeneration = 0;
   bool _libvlcUnavailableForSession = false;
   LibVlcHlsRelay? _libVlcHlsRelay;
   bool _temporaryAutoEngineRecovery = false;
@@ -981,36 +1568,66 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   bool _p2pRuntimeUnavailableForRoute = false;
   bool _p2pBridgeBufferingForRoute = false;
   bool _libVlcContinuousTsDurationAccepted = false;
+  bool _libVlcContinuousTsStartupLeadReady = false;
   int _libVlcContinuousTsStreamedSegments = 0;
+  int _libVlcContinuousTsStreamedBytes = 0;
+  Duration _libVlcContinuousTsBufferedPosition = Duration.zero;
+  DateTime? _libVlcContinuousTsLastTransportActivityAt;
+  int _libVlcContinuousTsUpstreamErrors = 0;
+  String _libVlcContinuousTsLastStatusBucket = 'none';
   Duration _libVlcContinuousTsTimelineOffset = Duration.zero;
   final Map<String, PlaybackSource> _p2pLocalStreamSourcesByKey =
       <String, PlaybackSource>{};
   final Map<String, int> _p2pLocalStreamTotalBytesByUrl = <String, int>{};
   final Set<String> _coldP2pSourceKeysForRoute = <String>{};
-  final Set<String> _media3NativeFallbackUrls = <String>{};
   bool _subtitlesLoadStarted = false;
   bool _skipUnsupportedHighEfficiencyForSession = false;
   int _sameSourceRecoveryAttempts = 0;
   int _media3AnchorRepairSourceErrorCount = 0;
   DateTime? _media3AnchorRepairSourceErrorWindowStartedAt;
   String? _media3AnchorRepairSourceErrorProviderId;
+  bool _media3ResumeAnchorHadStartupVisualProof = false;
   final Set<String> _media3TerminalFailedUrlsForSession = <String>{};
   int _hardPlaybackErrors = 0;
   DateTime? _firstControllerErrorAt;
   String? _lastControllerErrorDescription;
   int _controllerErrorGraceLogs = 0;
+  String? _lastControllerErrorRecoveryKey;
+  DateTime? _lastControllerErrorRecoveryAt;
   final Map<String, int> _hardRecoveryAttemptsByProvider = <String, int>{};
   final Set<String> _blackVideoRecoveredUrls = <String>{};
-  final Set<String> _libVlcAdaptiveUnsafeUrls = <String>{};
   final Map<String, int> _failedSourceAttempts = <String, int>{};
+  final Set<String> _failedLibVlcHlsSourceAttemptsForRoute = <String>{};
+  final MobileLibVlcLaunchRejectionCircuit _libVlcLaunchRejectionCircuit =
+      MobileLibVlcLaunchRejectionCircuit();
+  late int _libVlcLaunchGeneration;
+  late DateTime _libVlcLaunchStartupDeadline;
+  late MobilePlaybackRouteStartupOwner _routeStartupOwner;
+  MobilePlaybackRouteStartupOwner? _libVlcSourceSwitchOwner;
+  MobilePlaybackRouteStartupOwner? _libVlcSeekOwner;
+  final MobilePlaybackTerminalCallbackGate _terminalCallbackGate =
+      MobilePlaybackTerminalCallbackGate();
+  int _controllerCallbackGeneration = 0;
+  final Map<_NativePlaybackController, VoidCallback>
+      _controllerUpdateListeners = <_NativePlaybackController, VoidCallback>{};
+  int _routeStartupGeneration = 0;
+  bool _routeStartupTerminalStarted = false;
+  bool _terminalOpeningCallbackQuarantined = false;
+  final Set<int> _resumeRecoveryExcludedQualityRanks = <int>{};
+  int _resumeRecoveryUnrankedDirectHlsFailures = 0;
+  final Map<String, int> _routeHlsProviderAccessFailures = <String, int>{};
+  final Map<String, int> _routeHlsQualityAccessFailures = <String, int>{};
   final Map<String, int> _routeHlsProviderOpenTimeouts = <String, int>{};
   final Map<String, int> _routeHlsQualityOpenTimeouts = <String, int>{};
-  final Map<String, int> _libVlcProfileIndexByUrl = <String, int>{};
+  final Map<String, int> _routeHlsProviderRendererDrifts = <String, int>{};
+  final Map<String, int> _routeHlsQualityRendererDrifts = <String, int>{};
+  final Set<String> _deferredFixedHlsAutoProviders = <String>{};
   final Set<String> _libVlcSoftVerifiedCacheUrls = <String>{};
   final Map<String, int> _pendingLibVlcOpenSuccessStartupMsByUrl =
       <String, int>{};
   final Map<String, int> _nativeSourceClassSkipCounts = <String, int>{};
   final Map<String, int> _manualLibVlcNoProofOpensByUrl = <String, int>{};
+  final Set<String> _failedMidplayRecoverySourceAttempts = <String>{};
   int _manualLibVlcOpensWithoutProof = 0;
   int _lastSavedSecond = -1;
   DateTime? _nativeWallClockStartedAt;
@@ -1027,10 +1644,16 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   int _qualityPassIndex = 0;
   int _providerRunId = 0;
   int _openingSourceToken = 0;
+  int _emptyProviderResolveResultsForRoute = 0;
+  int _routeRiskProviderResolveTimeouts = 0;
+  bool _ignoreSavedQualityForResumeRecovery = false;
+  final Set<String> _freshRecoverySkippedProviderIds = <String>{};
+  final Set<String> _routeProviderResolveTimeoutIds = <String>{};
   List<PlaybackSource> _activeSources = const <PlaybackSource>[];
   PlaybackSource? _activeSource;
   final Map<String, Future<List<PlaybackSource>>> _providerResolveFutures =
       <String, Future<List<PlaybackSource>>>{};
+  Future<bool>? _freshProviderResolveInFlight;
   double _playbackSpeed = 1;
   double _seekStepSeconds = 15;
   List<PlaybackSubtitle> _subtitles = const <PlaybackSubtitle>[];
@@ -1065,6 +1688,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   Duration _restoreResumePosition = Duration.zero;
   bool _resumePromptHandled = false;
   bool _resumePromptAccepted = false;
+  bool _preferSavedResumeOnInitialOpen = false;
   bool _autoNextEpisodeStarted = false;
   int _playerModeGeneration = 0;
   bool _completionCloseStarted = false;
@@ -1072,25 +1696,60 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   bool _nextEpisodeOpening = false;
   DateTime? _lastNextEpisodeTapAt;
   DateTime? _resolverBackoffUntil;
+  bool _routeWideFreshRecoveryAttempted = false;
   late final int _progressGeneration;
 
   @override
   void initState() {
     super.initState();
+    _routeStartupOwner = MobilePlaybackRouteStartupOwner(
+      generation: ++_routeStartupGeneration,
+      startedAt: widget.startupStartedAt ?? DateTime.now(),
+    );
+    _libVlcLaunchGeneration = _libVlcLaunchRejectionCircuit.beginLaunch();
+    _libVlcLaunchStartupDeadline = _routeStartupOwner.workCutoff;
     _title = widget.title;
     _resolveProvider = widget.resolveProvider;
+    _resolveRecoveryProvider =
+        widget.resolveRecoveryProvider ?? widget.resolveProvider;
+    _resolveFreshRequests = widget.resolveFreshRequests;
     _resolveSubtitles = widget.resolveSubtitles;
     _enableProviderWarmup = widget.enableProviderWarmup;
     _limitToFirstQualityPass = widget.limitToFirstQualityPass;
     _logoUrl = widget.logoUrl;
     _progressItem = widget.progressItem;
     _playbackKey = widget.playbackKey;
-    _requests = _requestsWithVerifiedSource(widget.sources);
+    _preferSavedResumeOnInitialOpen = widget.preferSavedResume;
+    _requests = _requestsWithVerifiedSource(
+      mobilePrioritizeExplicitLibVlcRequestsByTransport(
+        _prioritizeResolvedFreshRequests(widget.sources),
+        explicitLibVlc: _manualLibVlcConfigured,
+      ),
+    );
     _progressSubtitle = widget.progressSubtitle;
     _skipSegmentSeason = widget.skipSegmentSeason;
     _skipSegmentEpisode = widget.skipSegmentEpisode;
     _nextEpisodeLabel = widget.nextEpisodeLabel;
     _nextEpisodeResolver = widget.onNextEpisode;
+    final progressItem = _progressItem;
+    if (progressItem != null) {
+      final lookup = AppState.progressLookupDiagnostics(
+        progressItem,
+        playbackKey: _playbackKey,
+      );
+      DiagnosticLog.add(
+        'native initial progress lookup '
+        'entries=${lookup['entryCount']} '
+        'keyPresent=${lookup['playbackKeyPresent']} '
+        'keyEqualsItem=${lookup['playbackKeyEqualsItem']} '
+        'exact=${lookup['exactSeconds']}s '
+        'canonical=${lookup['canonicalSeconds']}s '
+        'direct=${lookup['directSeconds']}s '
+        'routeMatches=${lookup['routeMatches']} '
+        'externalMatches=${lookup['externalMatches']} '
+        'selected=${lookup['selectedSeconds']}s',
+      );
+    }
     WidgetsBinding.instance.addObserver(this);
     _progressGeneration = AppState.continueWatchingGeneration;
     _guardManualLibVlcAfterInterruptedSessionIfNeeded();
@@ -1098,26 +1757,36 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _restoreNativeSurfaceLevels();
     unawaited(_enterPlayerMode());
     _pipChannel.setMethodCallHandler(_handlePipChannelCall);
+    _media3PlayerChannel.setMethodCallHandler(_handleMedia3PlayerChannelCall);
     _loadPipSupport();
     unawaited(NativeMediaBridge.loadCapabilities());
     unawaited(_loadSkipSegments());
-    _openNextAvailableSource();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _playerClosing) return;
+      unawaited(_openNextAvailableSource());
+    });
   }
 
   void _guardManualLibVlcAfterInterruptedSessionIfNeeded() {
     final settings = AppState.playerBehaviorSettings.value;
-    if (settings.playbackEngine != 'libvlc' ||
-        !_libVlcCrashGuardActiveForManualRoute) {
+    if (settings.playbackEngine != 'libvlc' || !_libVlcCrashGuardActive) {
       return;
     }
     DiagnosticLog.add(
-      'native libvlc selection guarded reason=previous_native_engine_interrupted saved=preserved effective=exoplayer',
+      'native libvlc previous interruption noted reason=previous_native_engine_interrupted saved=preserved effective=libvlc',
     );
   }
 
   @override
   void dispose() {
     _playerClosing = true;
+    _libVlcSourceSwitchOwner?.dispose();
+    _libVlcSourceSwitchOwner = null;
+    _libVlcSeekOwner?.dispose();
+    _libVlcSeekOwner = null;
+    _routeStartupOwner.dispose();
+    _emitHudMountSignal(_hudMountSignalGate.dispose());
+    _libVlcLaunchRejectionCircuit.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _hideControlsTimer?.cancel();
     _gestureHintTimer?.cancel();
@@ -1125,15 +1794,24 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _openingGuardTimer?.cancel();
     _cancelDeferredResumeSeek();
     _pipChannel.setMethodCallHandler(null);
+    _media3PlayerChannel.setMethodCallHandler(null);
     final controller = _controller;
     if (controller != null) {
       _trackLastKnownPlaybackPosition();
       _saveNativeProgress(force: true);
     }
+    final coordinatorSessionActive = _mobileLibVlcCoordinator != null;
+    final coordinatorOwnsController = coordinatorSessionActive &&
+        (controller == null ||
+            controller.engine == _NativePlaybackEngine.libvlc);
     _controller = null;
-    controller?.removeListener(_handleControllerUpdate);
+    _media3DirectHlsStartupProofPending = false;
+    if (controller != null) _detachControllerUpdateListener(controller);
     unawaited(_stopLibVlcHlsRelay('dispose'));
-    if (controller?.isInitialized == true) {
+    if (coordinatorSessionActive) {
+      unawaited(_closeMobileLibVlcCoordinatorSession('dispose'));
+    }
+    if (!coordinatorOwnsController && controller?.isInitialized == true) {
       final activeController = controller!;
       if (activeController.engine == _NativePlaybackEngine.libvlc) {
         unawaited(
@@ -1145,12 +1823,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       } else {
         unawaited(activeController.pause().catchError((_) {}));
       }
-    } else if (controller != null) {
+    } else if (!coordinatorOwnsController && controller != null) {
       DiagnosticLog.add(
         'native dispose skipped pause engine=${controller.engine.id} reason=controller_not_initialized',
       );
     }
-    unawaited(controller?.dispose() ?? Future<void>.value());
+    if (!coordinatorOwnsController) {
+      unawaited(controller?.dispose() ?? Future<void>.value());
+    }
     unawaited(_stopP2pBridgeForPolicy('dispose'));
     unawaited(_setKeepScreenOn(false));
     unawaited(_setAndroidAutoPipOnUserLeave(false));
@@ -1166,6 +1846,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     List<NativePlaybackRequest> requests, {
     String? playbackKey,
   }) {
+    _verifiedCacheFallbackStartIndex = null;
     final key = playbackKey ?? _playbackKey;
     if (key == null || key.isEmpty) return requests;
 
@@ -1177,17 +1858,27 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         .map((request) => request.providerId)
         .where((providerId) => providerId.isNotEmpty)
         .toSet();
-    final promoted = <NativePlaybackRequest>[];
-    final fallback = <NativePlaybackRequest>[];
+    final earlyFallback = <NativePlaybackRequest>[];
+    final lastResortFallback = <NativePlaybackRequest>[];
     for (final cached in cachedSources) {
+      final acceptedBySavedResumeFallbackRoute =
+          _hasSavedResumeProgressForRoute &&
+              !requestProviderIds.contains(AppState.autoNativeProviderId);
       if (!_requestAcceptsVerifiedSourceProvider(
-        requestProviderIds,
-        cached.source.providerId,
-      )) {
+            requestProviderIds,
+            cached.source.providerId,
+          ) &&
+          !acceptedBySavedResumeFallbackRoute) {
         DiagnosticLog.add(
           'native verified source cache skipped key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} reason=provider_not_in_current_route url=[hidden]',
         );
         continue;
+      }
+      if (acceptedBySavedResumeFallbackRoute &&
+          !requestProviderIds.contains(cached.source.providerId)) {
+        DiagnosticLog.add(
+          'native verified source cache accepted key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} reason=saved_resume_cross_provider_verified_cache url=[hidden]',
+        );
       }
       final acceptedByAutoRoute =
           requestProviderIds.contains(AppState.autoNativeProviderId) &&
@@ -1211,10 +1902,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       final hasOpenableDescriptor = _verifiedSourceHasOpenableDescriptor(
         cached.source,
       );
+      final staleSavedResumeLastResortCache = stale &&
+          _hasSavedResumeProgressForRoute &&
+          nativeSupportedSourceClass &&
+          hasOpenableDescriptor &&
+          !providerOffline &&
+          cached.successCount >= 2 &&
+          cached.confidence >= 12;
       DiagnosticLog.add(
         'native verified source cache candidate key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} quality=${_qualityLabel(cached.source)} engine=${cached.engineId} confidence=${cached.confidence} success=${cached.successCount} failures=${cached.failureCount} stale=$stale sourceClassNative=$nativeSupportedSourceClass descriptorOpenable=$hasOpenableDescriptor providerStatus=${status.name} age=${_verifiedSourceAgeMinutes(cached)}m',
       );
-      if (stale ||
+      if ((stale && !staleSavedResumeLastResortCache) ||
           !nativeSupportedSourceClass ||
           !hasOpenableDescriptor ||
           providerOffline) {
@@ -1237,31 +1935,243 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         }
         continue;
       }
-      if (strictLibVlc && cached.engineId != _NativePlaybackEngine.libvlc.id) {
-        _libVlcSoftVerifiedCacheUrls.add(cached.source.url);
+      if (staleSavedResumeLastResortCache) {
         DiagnosticLog.add(
-          'native verified source cache soft-promoted key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} reason=engine_mismatch_manual_libvlc_soft_try cachedEngine=${cached.engineId} url=[hidden]',
+          'native verified source cache fallback queued key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} quality=${_qualityLabel(cached.source)} engine=${cached.engineId} reason=stale_saved_resume_last_resort_after_fresh url=[hidden]',
         );
-        promoted.add(request);
+        lastResortFallback.add(request);
         continue;
       }
+      if (strictLibVlc && cached.engineId != _NativePlaybackEngine.libvlc.id) {
+        _libVlcSoftVerifiedCacheUrls.add(cached.source.url);
+        final libVlcDirectHlsBlocked = _shouldRejectLibVlcDirectHlsStartup(
+          cached.source,
+          _NativePlaybackEngine.libvlc,
+        );
+        if (libVlcDirectHlsBlocked) {
+          DiagnosticLog.add(
+            'native verified source cache fallback queued key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} quality=${_qualityLabel(cached.source)} reason=engine_mismatch_manual_libvlc_media3_direct_hls_deferred_fallback cachedEngine=${cached.engineId} url=[hidden]',
+          );
+          lastResortFallback.add(request);
+        } else {
+          DiagnosticLog.add(
+            'native verified source cache fallback queued key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} reason=engine_mismatch_manual_libvlc_soft_try cachedEngine=${cached.engineId} url=[hidden]',
+          );
+          lastResortFallback.add(request);
+        }
+        continue;
+      }
+      final libVlcVerifiedMp4EarlyFallback =
+          mobileVerifiedLibVlcMp4CanUseEarlyFallback(
+        strictLibVlc: strictLibVlc,
+        cachedEngineId: cached.engineId,
+        source: cached.source,
+        cacheAge: DateTime.now().difference(cached.cachedAt),
+        stale: stale,
+        nativeSupported: nativeSupportedSourceClass,
+        descriptorOpenable: hasOpenableDescriptor,
+        providerOffline: providerOffline,
+        failureCount: cached.failureCount,
+        confidence: cached.confidence,
+      );
+      if (libVlcVerifiedMp4EarlyFallback) {
+        DiagnosticLog.add(
+          'native verified source cache fallback queued key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} quality=${_qualityLabel(cached.source)} engine=${cached.engineId} reason=libvlc_verified_mp4_after_fresh_sample url=[hidden]',
+        );
+        earlyFallback.add(request);
+        continue;
+      }
+      final cleanCacheSource = cached.failureCount <= 0;
+      final boundedResumeCacheSource = _hasSavedResumeProgressForRoute &&
+          cached.failureCount <= 1 &&
+          cached.successCount >= 2 &&
+          cached.confidence >= 12;
       final p2pWarmCache =
           cached.source.sourceClass == PlaybackSourceClass.p2p &&
               cached.successCount >= 1 &&
               cached.confidence >= 8 &&
-              cached.engineId != _NativePlaybackEngine.libvlc.id;
+              cached.engineId != _NativePlaybackEngine.libvlc.id &&
+              cleanCacheSource;
+      final qualityRank = _qualityRank(_qualityLabel(cached.source));
+      final earlyQualitySource = qualityRank <= 0 || qualityRank >= 480;
+      final media3DirectHlsResumeCacheMustStayBehindFresh =
+          _verifiedCacheShouldStayBehindFreshResume(cached);
       if (!stale &&
           nativeSupportedSourceClass &&
           !providerOffline &&
           (cached.confidence >= 12 || p2pWarmCache) &&
-          cached.engineId != _NativePlaybackEngine.libvlc.id) {
-        promoted.add(request);
+          cached.engineId != _NativePlaybackEngine.libvlc.id &&
+          cleanCacheSource &&
+          earlyQualitySource &&
+          !media3DirectHlsResumeCacheMustStayBehindFresh) {
+        DiagnosticLog.add(
+          'native verified source cache fallback queued key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} quality=${_qualityLabel(cached.source)} engine=${cached.engineId} reason=fresh_resolver_primary url=[hidden]',
+        );
+        earlyFallback.add(request);
       } else {
-        fallback.add(request);
+        DiagnosticLog.add(
+          'native verified source cache fallback queued key=[redacted] provider=${cached.source.providerId} sourceClass=${cached.source.sourceClass.wireName} quality=${_qualityLabel(cached.source)} engine=${cached.engineId} failures=${cached.failureCount} reason=${boundedResumeCacheSource && !cleanCacheSource ? 'bounded_resume_cache_last_resort' : media3DirectHlsResumeCacheMustStayBehindFresh ? 'media3_direct_hls_resume_fresh_primary' : 'last_resort_cache_after_fresh'} url=[hidden]',
+        );
+        lastResortFallback.add(request);
       }
     }
-    if (promoted.isEmpty && fallback.isEmpty) return requests;
-    return <NativePlaybackRequest>[...promoted, ...requests, ...fallback];
+    if (earlyFallback.isEmpty && lastResortFallback.isEmpty) return requests;
+    _prioritizeVerifiedCacheFallbacks(earlyFallback);
+    _prioritizeVerifiedCacheFallbacks(lastResortFallback);
+    final savedResumeRoute = _hasSavedResumeProgressForRoute;
+    final savedResumeCacheBeforeBroadAuto =
+        _savedResumeCacheShouldPrecedeBroadAuto(
+      requests,
+      hasEarlyFallback: earlyFallback.isNotEmpty,
+    );
+    final insertIndex = earlyFallback.isEmpty
+        ? requests.length
+        : _verifiedCacheFallbackInsertIndex(
+            requests,
+            savedResumeRoute: savedResumeRoute,
+            savedResumeCacheBeforeBroadAuto: savedResumeCacheBeforeBroadAuto,
+          );
+    _verifiedCacheFallbackStartIndex = insertIndex;
+    if (savedResumeRoute &&
+        earlyFallback.isEmpty &&
+        lastResortFallback.isNotEmpty) {
+      final freshBeforeFallback = <NativePlaybackRequest>[];
+      final deferredKnownBadFresh = <NativePlaybackRequest>[];
+      for (final request in requests) {
+        if (_shouldDeferKnownBadFreshRequestBehindVerifiedFallback(request)) {
+          deferredKnownBadFresh.add(request);
+        } else {
+          freshBeforeFallback.add(request);
+        }
+      }
+      final savedResumeFreshLimit = _verifiedCacheFallbackInsertIndex(
+        freshBeforeFallback,
+        savedResumeRoute: true,
+        savedResumeCacheBeforeBroadAuto: savedResumeCacheBeforeBroadAuto,
+      );
+      final limitedFreshBeforeFallback =
+          freshBeforeFallback.take(savedResumeFreshLimit).toList(
+                growable: false,
+              );
+      final deferredFreshAfterFallback =
+          freshBeforeFallback.skip(savedResumeFreshLimit).toList(
+                growable: false,
+              );
+      if (deferredKnownBadFresh.isNotEmpty ||
+          deferredFreshAfterFallback.isNotEmpty) {
+        _verifiedCacheFallbackStartIndex = limitedFreshBeforeFallback.length;
+        DiagnosticLog.add(
+          'native verified source cache fallback inserted key=[redacted] index=${limitedFreshBeforeFallback.length} freshRequests=${requests.length} earlyFallbackRequests=0 lastResortFallbackRequests=${lastResortFallback.length} deferredFreshAfterFallback=${deferredFreshAfterFallback.length} deferredKnownBadFresh=${deferredKnownBadFresh.length} savedResumeRoute=$savedResumeRoute savedResumeCacheBeforeBroadAuto=$savedResumeCacheBeforeBroadAuto reason=saved_resume_fast_verified_fallback_after_fresh_sample',
+        );
+        return <NativePlaybackRequest>[
+          ...limitedFreshBeforeFallback,
+          ...lastResortFallback,
+          ...deferredFreshAfterFallback,
+          ...deferredKnownBadFresh,
+        ];
+      }
+    }
+    DiagnosticLog.add(
+      'native verified source cache fallback inserted key=[redacted] index=$insertIndex freshRequests=${requests.length} earlyFallbackRequests=${earlyFallback.length} lastResortFallbackRequests=${lastResortFallback.length} savedResumeRoute=$savedResumeRoute savedResumeCacheBeforeBroadAuto=$savedResumeCacheBeforeBroadAuto reason=fresh_first_cache_partition',
+    );
+    return <NativePlaybackRequest>[
+      ...requests.take(insertIndex),
+      ...earlyFallback,
+      ...requests.skip(insertIndex),
+      ...lastResortFallback,
+    ];
+  }
+
+  List<NativePlaybackRequest> _prioritizeResolvedFreshRequests(
+    List<NativePlaybackRequest> requests,
+  ) {
+    if (requests.length < 2) return requests;
+    final resolved = <NativePlaybackRequest>[];
+    final unresolved = <NativePlaybackRequest>[];
+    for (final request in requests) {
+      if (request.sources.isEmpty) {
+        unresolved.add(request);
+      } else {
+        resolved.add(request);
+      }
+    }
+    if (resolved.isEmpty ||
+        unresolved.isEmpty ||
+        requests.first.sources.isNotEmpty) {
+      return requests;
+    }
+    DiagnosticLog.add(
+      'native fresh request order resolved=${resolved.length} '
+      'unresolved=${unresolved.length} '
+      'reason=resolved_fresh_requests_before_unresolved',
+    );
+    return <NativePlaybackRequest>[...resolved, ...unresolved];
+  }
+
+  bool _shouldDeferKnownBadFreshRequestBehindVerifiedFallback(
+    NativePlaybackRequest request,
+  ) {
+    if (request.sources.isNotEmpty) return false;
+    final status = AppState.nativeProviderHealthFor(request.providerId);
+    return status == NativeProviderHealthStatus.failing ||
+        status == NativeProviderHealthStatus.noSource;
+  }
+
+  void _prioritizeVerifiedCacheFallbacks(
+    List<NativePlaybackRequest> requests,
+  ) {
+    if (requests.length < 2) return;
+    requests.sort((left, right) {
+      final leftRank = _verifiedCacheRequestQualityRank(left);
+      final rightRank = _verifiedCacheRequestQualityRank(right);
+      if (leftRank != rightRank) return rightRank.compareTo(leftRank);
+      return left.providerId.compareTo(right.providerId);
+    });
+    DiagnosticLog.add(
+      'native verified source cache fallback ranked count=${requests.length} reason=known_quality_before_auto',
+    );
+  }
+
+  int _verifiedCacheRequestQualityRank(NativePlaybackRequest request) {
+    if (request.sources.isEmpty) return -1;
+    final rank = _qualityRank(_qualityLabel(request.sources.first));
+    return rank > 0 ? rank : -1;
+  }
+
+  bool _verifiedCacheShouldStayBehindFreshResume(
+    VerifiedPlaybackSource cached,
+  ) {
+    if (!_hasSavedResumeProgressForRoute) return false;
+    if (cached.engineId != _NativePlaybackEngine.exoplayer.id) return false;
+    final source = cached.source;
+    if (source.sourceClass != PlaybackSourceClass.direct) return false;
+    if (!_isHlsSource(source)) return false;
+    if (_isPublicIptvSource(source)) return false;
+    return true;
+  }
+
+  bool _savedResumeCacheShouldPrecedeBroadAuto(
+    List<NativePlaybackRequest> requests, {
+    required bool hasEarlyFallback,
+  }) {
+    if (!_hasSavedResumeProgressForRoute || !hasEarlyFallback) return false;
+    if (requests.isEmpty) return false;
+    return requests.first.providerId == AppState.autoNativeProviderId;
+  }
+
+  int _verifiedCacheFallbackInsertIndex(
+    List<NativePlaybackRequest> requests, {
+    required bool savedResumeRoute,
+    required bool savedResumeCacheBeforeBroadAuto,
+  }) {
+    final requestCount = requests.length;
+    if (requestCount <= 0) return 0;
+    if (savedResumeCacheBeforeBroadAuto) return 0;
+    if (savedResumeRoute) {
+      const savedResumeFreshFirstCount = 2;
+      return math.min(requestCount, savedResumeFreshFirstCount);
+    }
+    return math.min(requestCount, 3);
   }
 
   bool _requestAcceptsVerifiedSourceProvider(
@@ -1285,6 +2195,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (key == null || key.isEmpty || source == null || source.url.isEmpty) {
       return;
     }
+    if ((_openingSource || _media3DirectHlsStartupProofPending) &&
+        _requiresSustainedMedia3DirectHlsOpenProof(source, controller.engine)) {
+      DiagnosticLog.add(
+        'native verified source skipped key=[redacted] provider=${source.providerId} sourceClass=${source.sourceClass.wireName} quality=${_qualityLabel(source)} reason=startup_proof_pending engine=${controller.engine.id} url=[hidden]',
+      );
+      return;
+    }
     final publicIptvSource = _isPublicIptvSource(source);
     final minimumPosition = publicIptvSource
         ? const Duration(seconds: 6)
@@ -1299,12 +2216,26 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     final sustainedLibVlcContinuousTsProof =
         _hasSustainedLibVlcContinuousTsPlaybackProof(controller);
+    if (_libVlcContinuousTsActive && _libVlcContinuousTsUpstreamErrors > 0) {
+      DiagnosticLog.add(
+        'native verified source skipped key=[redacted] provider=${source.providerId} sourceClass=${source.sourceClass.wireName} quality=${_qualityLabel(source)} reason=libvlc_continuous_ts_upstream_error upstreamErrors=$_libVlcContinuousTsUpstreamErrors lastStatus=$_libVlcContinuousTsLastStatusBucket engine=${controller.engine.id} url=[hidden]',
+      );
+      _forgetVerifiedSource(source, 'libvlc_continuous_ts_upstream_error');
+      return;
+    }
     if (!controller.isInitialized ||
         controller.hasError ||
         (!sustainedLibVlcContinuousTsProof &&
             (controller.duration <= Duration.zero ||
                 controller.size == Size.zero ||
                 _activeSourceHasZeroClockMetadata))) {
+      return;
+    }
+    if (!sustainedLibVlcContinuousTsProof &&
+        (!controller.isPlaying || controller.isBuffering)) {
+      DiagnosticLog.add(
+        'native verified source skipped key=[redacted] provider=${source.providerId} sourceClass=${source.sourceClass.wireName} quality=${_qualityLabel(source)} reason=controller_not_actively_playing playing=${controller.isPlaying} buffering=${controller.isBuffering} engine=${controller.engine.id} url=[hidden]',
+      );
       return;
     }
     if (!sustainedLibVlcContinuousTsProof &&
@@ -1322,6 +2253,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final effectiveSourceWatchSeconds = _effectiveSourceProofWatchSeconds(
       controller,
     );
+    if (_media3ResumeAnchorIsVisiblyWrong(controller)) {
+      DiagnosticLog.add(
+        'native verified source skipped key=[redacted] provider=${source.providerId} sourceClass=${source.sourceClass.wireName} quality=${_qualityLabel(source)} reason=resume_anchor_clock_mismatch sourceWatch=${effectiveSourceWatchSeconds}s position=${position.inSeconds}s engine=${controller.engine.id} url=[hidden]',
+      );
+      return;
+    }
     if (effectiveSourceWatchSeconds < proofMinimum.inSeconds) {
       DiagnosticLog.add(
         'native verified source skipped key=[redacted] provider=${source.providerId} sourceClass=${source.sourceClass.wireName} quality=${_qualityLabel(source)} reason=insufficient_playback_proof sourceWatch=${effectiveSourceWatchSeconds}s required=${proofMinimum.inSeconds}s position=${position.inSeconds}s engine=${controller.engine.id} url=[hidden]',
@@ -1333,6 +2270,32 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         'native verified source skipped key=[redacted] provider=${source.providerId} sourceClass=${source.sourceClass.wireName} quality=${_qualityLabel(source)} reason=media3_renderer_unproven_clock sourceWatch=${effectiveSourceWatchSeconds}s position=${position.inSeconds}s engine=${controller.engine.id} url=[hidden]',
       );
       return;
+    }
+    if (controller.engine == _NativePlaybackEngine.exoplayer &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        _hadRecentMedia3PersistentBufferingForSource(source, minimumTicks: 1)) {
+      DiagnosticLog.add(
+        'native verified source skipped key=[redacted] provider=${source.providerId} sourceClass=${source.sourceClass.wireName} quality=${_qualityLabel(source)} reason=recent_media3_persistent_buffering engine=${controller.engine.id} url=[hidden]',
+      );
+      _forgetVerifiedSource(source, 'recent_media3_persistent_buffering');
+      return;
+    }
+    if (controller.engine == _NativePlaybackEngine.exoplayer &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        !_isLiveTvMode &&
+        !_isPublicIptvSource(source)) {
+      final startedAt = _nativeWallClockStartedAt;
+      final postProofWatch = startedAt == null
+          ? Duration.zero
+          : DateTime.now().difference(startedAt);
+      if (postProofWatch < const Duration(seconds: 60)) {
+        DiagnosticLog.add(
+          'native verified source skipped key=[redacted] provider=${source.providerId} sourceClass=${source.sourceClass.wireName} quality=${_qualityLabel(source)} reason=media3_direct_hls_extended_proof_pending postProof=${postProofWatch.inSeconds}s required=60s engine=${controller.engine.id} url=[hidden]',
+        );
+        return;
+      }
     }
     if (sustainedLibVlcContinuousTsProof &&
         _activeSourceHasZeroClockMetadata &&
@@ -1421,7 +2384,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         !controller.hasError &&
         controller.duration > Duration.zero &&
         controller.size != Size.zero;
-    if (!visuallyPlayingClockUnstable) return sourceWatchSeconds;
+    final visuallyPlayingWhileBuffering =
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+            controller.isInitialized &&
+            controller.isPlaying &&
+            controller.isBuffering &&
+            !controller.hasError &&
+            controller.duration > Duration.zero &&
+            controller.size != Size.zero &&
+            !_activeSourceHasZeroClockMetadata &&
+            controller.hasRenderedVideoFrame;
+    if (!visuallyPlayingClockUnstable && !visuallyPlayingWhileBuffering) {
+      return sourceWatchSeconds;
+    }
+    if (_media3ResumeAnchorIsVisiblyWrong(controller)) {
+      return sourceWatchSeconds;
+    }
     return math.max(sourceWatchSeconds, wallWatchSeconds);
   }
 
@@ -1430,10 +2408,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (source == null) return false;
     if (!controller.isInitialized || controller.hasError) return false;
     if (!_nativePlaybackSupportsSourceClass(source)) return false;
+    if (_media3DirectHlsVisualProofIsUntrusted(controller, source)) {
+      return false;
+    }
     final sustainedLibVlcContinuousTsProof =
         _hasSustainedLibVlcContinuousTsPlaybackProof(controller);
     final publicIptvSource = _isPublicIptvSource(source);
     if (publicIptvSource) return true;
+    if (!controller.hasRenderedVideoFrame) return false;
     if (!sustainedLibVlcContinuousTsProof &&
         (controller.duration <= Duration.zero ||
             controller.size == Size.zero ||
@@ -1458,17 +2440,86 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _activeSource == null) {
       return false;
     }
+    if (_media3DirectHlsStartupProofIsPending(controller, _activeSource!)) {
+      return true;
+    }
     if (controller.duration <= Duration.zero ||
         controller.size == Size.zero ||
+        !controller.hasRenderedVideoFrame ||
         _activeSourceHasZeroClockMetadata) {
+      return true;
+    }
+    if (_media3ResumeAnchorIsVisiblyWrong(controller)) {
       return true;
     }
     if (_playbackCadenceClockUnstable ||
         _recoveringFromMedia3RendererDrift ||
         _escalatingMedia3RendererDrift) {
-      return !_sourceHasRawVisualPlaybackProof(controller);
+      final source = _activeSource;
+      if (_activeSourceVerifiedForSession &&
+          source != null &&
+          !_requiresSustainedMedia3DirectHlsOpenProof(
+            source,
+            controller.engine,
+          )) {
+        return false;
+      }
+      if (_media3HasSustainedVisualCadenceProof(controller)) {
+        return false;
+      }
+      if (source == null || !_nativePlaybackSupportsSourceClass(source)) {
+        return true;
+      }
+      final proofMinimum = _verifiedSourcePlaybackProofMinimum(
+        source,
+        publicIptvSource: _isPublicIptvSource(source),
+      );
+      return _sourceCredibleWatchSeconds < proofMinimum.inSeconds;
     }
     return false;
+  }
+
+  bool _media3HasSustainedVisualCadenceProof(
+    _NativePlaybackController controller,
+  ) {
+    final source = _activeSource;
+    if (source == null ||
+        controller.engine != _NativePlaybackEngine.exoplayer ||
+        !controller.isInitialized ||
+        !controller.isPlaying ||
+        controller.isBuffering ||
+        controller.hasError ||
+        controller.duration <= Duration.zero ||
+        controller.size == Size.zero ||
+        _activeSourceHasZeroClockMetadata ||
+        !controller.hasRenderedVideoFrame ||
+        !_nativePlaybackSupportsSourceClass(source) ||
+        _playbackCadenceConsecutiveJumpEvents > 0 ||
+        _playbackCadenceHealthySamples < 4) {
+      return false;
+    }
+    final startedAt = _nativeWallClockStartedAt;
+    if (startedAt == null) return false;
+    return DateTime.now().difference(startedAt) >= const Duration(seconds: 5);
+  }
+
+  bool _media3ResumeAnchorIsVisiblyWrong(
+    _NativePlaybackController controller,
+  ) {
+    if (controller.engine != _NativePlaybackEngine.exoplayer ||
+        !controller.isInitialized ||
+        !controller.isPlaying ||
+        controller.hasError ||
+        controller.duration <= Duration.zero ||
+        controller.size == Size.zero ||
+        _activeSourceHasZeroClockMetadata ||
+        _resumeProgressAnchorPosition < const Duration(seconds: 30)) {
+      return false;
+    }
+    final rawPosition = controller.position;
+    if (rawPosition < const Duration(seconds: 5)) return false;
+    return rawPosition <
+        _resumeProgressAnchorPosition - const Duration(seconds: 10);
   }
 
   bool _sourceHasVisualPlaybackProof(_NativePlaybackController? controller) {
@@ -1476,8 +2527,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (source == null || controller == null) return false;
     if (!controller.isInitialized || controller.hasError) return false;
     if (!_nativePlaybackSupportsSourceClass(source)) return false;
+    if (_media3DirectHlsVisualProofIsUntrusted(controller, source)) {
+      return false;
+    }
     final sustainedLibVlcContinuousTsProof =
         _hasSustainedLibVlcContinuousTsPlaybackProof(controller);
+    if (!controller.hasRenderedVideoFrame) return false;
     if (!sustainedLibVlcContinuousTsProof &&
         (controller.duration <= Duration.zero ||
             controller.size == Size.zero ||
@@ -1493,6 +2548,80 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         proofMinimum.inSeconds;
   }
 
+  bool _shouldProtectVisiblyPlayingSource(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    final controller = _controller;
+    final activeSource = _activeSource;
+    if (controller == null ||
+        activeSource == null ||
+        _playerClosing ||
+        !mounted ||
+        controller.engine != engine ||
+        activeSource.providerId != source.providerId ||
+        activeSource.url != source.url ||
+        !controller.isInitialized ||
+        controller.hasError ||
+        !controller.isPlaying ||
+        !_nativePlaybackSupportsSourceClass(source) ||
+        !controller.hasRenderedVideoFrame) {
+      return false;
+    }
+    if (_sourceHasVisualPlaybackProof(controller)) return true;
+    if (controller.engine == _NativePlaybackEngine.exoplayer &&
+        controller.duration > Duration.zero &&
+        controller.size != Size.zero &&
+        !_activeSourceHasZeroClockMetadata &&
+        !_media3DirectHlsVisualProofIsUntrusted(controller, source) &&
+        _effectiveSourceProofWatchSeconds(controller) >= 3) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _media3DirectHlsVisualProofIsUntrusted(
+    _NativePlaybackController controller,
+    PlaybackSource source,
+  ) {
+    if (_media3DirectHlsStartupProofIsPending(controller, source)) return true;
+    if (controller.engine != _NativePlaybackEngine.exoplayer) return false;
+    if (!_shouldAvoidLibVlcRendererDriftEscalation(source)) return false;
+    return _playbackCadenceClockUnstable ||
+        _playbackCadenceConsecutiveJumpEvents > 0 ||
+        _media3RendererDriftRepairSourceKey ==
+            _playbackSourceRuntimeKey(source);
+  }
+
+  bool _media3DirectHlsStartupProofIsPending(
+    _NativePlaybackController controller,
+    PlaybackSource source,
+  ) {
+    if (!_media3DirectHlsStartupProofPending) return false;
+    return _requiresSustainedMedia3DirectHlsOpenProof(
+      source,
+      controller.engine,
+    );
+  }
+
+  bool _media3DirectHlsExtendedProgressProofIsPending(
+    _NativePlaybackController? controller,
+  ) {
+    final source = _activeSource;
+    if (controller == null ||
+        source == null ||
+        controller.engine != _NativePlaybackEngine.exoplayer ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source) ||
+        _isLiveTvMode ||
+        _isPublicIptvSource(source)) {
+      return false;
+    }
+    final startedAt = _nativeWallClockStartedAt;
+    if (startedAt == null) return true;
+    return DateTime.now().difference(startedAt) < const Duration(seconds: 60);
+  }
+
   Duration _verifiedSourcePlaybackProofMinimum(
     PlaybackSource source, {
     required bool publicIptvSource,
@@ -1501,22 +2630,233 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (source.sourceClass == PlaybackSourceClass.p2p) {
       return const Duration(seconds: 12);
     }
+    if (source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        (_hasSavedResumeProgressForRoute ||
+            _resumeProgressAnchorPosition >= const Duration(seconds: 30))) {
+      return const Duration(seconds: 18);
+    }
     return const Duration(seconds: 6);
   }
 
   void _markRuntimeSourceFailure(PlaybackSource source, String reason) {
     if (source.url.isEmpty) return;
+    _lastRuntimeSourceFailureAt = DateTime.now();
+    _lastRuntimeSourceFailureProviderId = source.providerId;
+    _lastRuntimeSourceFailurePosition = _heldPlaybackAnchor(
+      fallback: _lastKnownPlaybackPosition,
+    );
     _pendingLibVlcOpenSuccessStartupMsByUrl.remove(source.url);
-    _failedSourceAttempts[source.url] =
-        (_failedSourceAttempts[source.url] ?? 0) + 1;
-    final attempts = _failedSourceAttempts[source.url] ?? 0;
+    final attempts = _incrementFailedSourceAttempt(source);
+    if (source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        (reason == 'media3_persistent_buffering_source_escape' ||
+            reason == 'media3_runtime_error' ||
+            reason == 'media3_direct_hls_startup_proof_unavailable' ||
+            reason == 'media3_resume_seek_proof_unavailable' ||
+            reason == 'media3_resume_barrier_rejected' ||
+            reason == 'media3_source_switch_startup_proof_unavailable')) {
+      _failedMidplayRecoverySourceAttempts.add(
+        _recoverySourceAttemptKey(source),
+      );
+      DiagnosticLog.add(
+        'native media3 hls rendition quarantined provider=${source.providerId} '
+        'quality=${_qualityLabel(source)} reason=$reason',
+      );
+    }
     if (!_isLibVlcSoftVerifiedCacheSource(source, _controller?.engine)) {
       _forgetVerifiedSource(source, reason);
     }
     DiagnosticLog.add(
       'native source runtime failed provider=${source.providerId} '
-      'quality=${_qualityLabel(source)} attempts=$attempts reason=$reason',
+      'quality=${_qualityLabel(source)} attempts=$attempts '
+      'position=${_lastRuntimeSourceFailurePosition.inSeconds}s reason=$reason',
     );
+  }
+
+  void _quarantineFailedMedia3ResumeCandidate(
+    PlaybackSource source, {
+    required Duration anchor,
+    required String reason,
+  }) {
+    if (source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source) ||
+        source.url.isEmpty) {
+      return;
+    }
+    _markDirectHlsRouteRiskRecovery(
+      source,
+      anchor: anchor,
+      reason: reason,
+    );
+    _markRuntimeSourceFailure(source, reason);
+    _media3TerminalFailedUrlsForSession.add(source.url);
+    DiagnosticLog.add(
+      'native media3 resume candidate quarantined provider=${source.providerId} '
+      'quality=${_qualityLabel(source)} position=${anchor.inSeconds}s '
+      'reason=$reason',
+    );
+  }
+
+  void _markRuntimeSourceRecovered({
+    required _NativePlaybackEngine engine,
+    required Duration position,
+    required String reason,
+  }) {
+    final failedAt = _lastRuntimeSourceFailureAt;
+    if (failedAt == null) return;
+    if (position.inSeconds < 3) return;
+    final failedProvider = _lastRuntimeSourceFailureProviderId;
+    final activeProvider = _activeSource?.providerId ?? failedProvider;
+    final controller = _controller;
+    final source = _activeSource;
+    final media3DirectHlsRecoveryStillUnproved =
+        engine == _NativePlaybackEngine.exoplayer &&
+            source != null &&
+            source.sourceClass == PlaybackSourceClass.direct &&
+            _isHlsSource(source) &&
+            (controller == null ||
+                controller.hasError ||
+                controller.duration <= Duration.zero ||
+                controller.size == Size.zero ||
+                !controller.hasRenderedVideoFrame ||
+                _activeSourceHasZeroClockMetadata ||
+                _media3DirectHlsStartupProofIsPending(controller, source));
+    if (media3DirectHlsRecoveryStillUnproved) {
+      DiagnosticLog.add(
+        'native source runtime recovery deferred engine=${engine.id} '
+        'provider=$activeProvider failedProvider=$failedProvider '
+        'position=${position.inSeconds}s '
+        'failedAgoMs=${DateTime.now().difference(failedAt).inMilliseconds} '
+        'reason=$reason guard=media3_direct_hls_unproved',
+      );
+      return;
+    }
+    DiagnosticLog.add(
+      'native source runtime recovered engine=${engine.id} '
+      'provider=$activeProvider failedProvider=$failedProvider '
+      'position=${position.inSeconds}s '
+      'failedAgoMs=${DateTime.now().difference(failedAt).inMilliseconds} '
+      'reason=$reason',
+    );
+    _lastRuntimeSourceFailureAt = null;
+    _lastRuntimeSourceFailureProviderId = null;
+    _lastRuntimeSourceFailurePosition = Duration.zero;
+  }
+
+  String _sourceAttemptKey(PlaybackSource source) {
+    final mirrorGroupId = (source.mirrorGroupId ?? '').trim();
+    final sourceId = (source.sourceId ?? '').trim();
+    final identity = sourceId.isNotEmpty
+        ? 'source:$sourceId'
+        : mirrorGroupId.isNotEmpty
+            ? 'mirror:${source.sourcePoolVersion ?? 'v1'}|$mirrorGroupId'
+            : 'url:${source.url}';
+    return [
+      source.providerId,
+      source.sourceClass.wireName,
+      _qualityLabel(source),
+      source.type ?? '',
+      source.language ?? '',
+      source.mirrorRank?.toString() ?? '',
+      identity,
+    ].join('|');
+  }
+
+  String _recoverySourceAttemptKey(PlaybackSource source) {
+    return [
+      source.providerId,
+      source.sourceClass.wireName,
+      _qualityLabel(source),
+      source.type ?? '',
+      source.language ?? '',
+      source.mirrorRank?.toString() ?? '',
+      source.url,
+    ].join('|');
+  }
+
+  int _failedSourceAttemptCount(PlaybackSource source) =>
+      _failedSourceAttempts[_sourceAttemptKey(source)] ?? 0;
+
+  int _incrementFailedSourceAttempt(PlaybackSource source) {
+    final key = _sourceAttemptKey(source);
+    final attempts = (_failedSourceAttempts[key] ?? 0) + 1;
+    _failedSourceAttempts[key] = attempts;
+    return attempts;
+  }
+
+  void _clearFailedSourceAttempt(PlaybackSource source) {
+    _failedSourceAttempts.remove(_sourceAttemptKey(source));
+  }
+
+  bool _isFailedLibVlcHlsSourceForRoute(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    return mobileShouldSkipFailedLibVlcHlsSession(
+      engineId: engine.id,
+      isHls: _isHlsSource(source),
+      candidateKey: _recoverySourceAttemptKey(source),
+      failedCandidateKeys: _failedLibVlcHlsSourceAttemptsForRoute,
+    );
+  }
+
+  void _markFailedLibVlcHlsSourceForRoute(
+    PlaybackSource source, {
+    required String reason,
+  }) {
+    if (!_isHlsSource(source)) return;
+    final added = _failedLibVlcHlsSourceAttemptsForRoute.add(
+      _recoverySourceAttemptKey(source),
+    );
+    if (added) {
+      DiagnosticLog.add(
+        'native libvlc hls session quarantined '
+        'provider=${source.providerId} quality=${_qualityLabel(source)} '
+        'reason=$reason',
+      );
+    }
+  }
+
+  void _clearFailedLibVlcHlsSourceForRoute(
+    PlaybackSource source, {
+    required String reason,
+  }) {
+    final removed = _failedLibVlcHlsSourceAttemptsForRoute.remove(
+      _recoverySourceAttemptKey(source),
+    );
+    if (removed) {
+      DiagnosticLog.add(
+        'native libvlc hls session retry allowed '
+        'provider=${source.providerId} quality=${_qualityLabel(source)} '
+        'reason=$reason',
+      );
+    }
+  }
+
+  bool _isFailedMidplayRecoverySource(PlaybackSource source) {
+    return _failedMidplayRecoverySourceAttempts.contains(
+      _recoverySourceAttemptKey(source),
+    );
+  }
+
+  List<PlaybackSource> _excludeFailedMidplayRecoverySources(
+    List<PlaybackSource> sources,
+  ) {
+    if (sources.isEmpty || _failedMidplayRecoverySourceAttempts.isEmpty) {
+      return sources;
+    }
+    final eligible = [
+      for (final source in sources)
+        if (!_isFailedMidplayRecoverySource(source)) source,
+    ];
+    if (eligible.length != sources.length) {
+      DiagnosticLog.add(
+        'native media3 hls recovery excluded failed renditions '
+        'excluded=${sources.length - eligible.length} kept=${eligible.length}',
+      );
+    }
+    return eligible;
   }
 
   void _recordNativeOpenSuccess(
@@ -1564,80 +2904,114 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
   bool _hasLibVlcVisualPlaybackProof(_NativePlaybackController controller) {
     if (controller.engine != _NativePlaybackEngine.libvlc) return false;
-    if (!controller.isInitialized || controller.hasError) return false;
-    if (_hasLibVlcContinuousTsPlaybackProof(controller)) {
-      return true;
-    }
-    if (controller.size == Size.zero) return false;
-    if (_activeSourceHasZeroClockMetadata) return false;
-    return controller.position >= const Duration(seconds: 1);
-  }
-
-  bool _hasLibVlcContinuousTsPlaybackProof(
-    _NativePlaybackController controller, {
-    bool allowZeroVisualMetadataProof = false,
-  }) {
-    if (controller.engine != _NativePlaybackEngine.libvlc) return false;
-    if (!_libVlcContinuousTsActive) return false;
-    if (!controller.isInitialized || controller.hasError) return false;
-    if (!controller.isPlaying) return false;
-    final relayPlaybackProofReady = _libVlcContinuousTsRelayProofReady ||
-        controller.duration > Duration.zero;
-    if (_activeSourceHasZeroClockMetadata && controller.size == Size.zero) {
-      final proofSeconds = _libVlcContinuousTsPlaybackProofSeconds(controller);
-      if (allowZeroVisualMetadataProof &&
-          relayPlaybackProofReady &&
-          proofSeconds >= 2) {
-        return true;
-      }
-      if (proofSeconds >= 8 && proofSeconds % 15 == 0) {
-        DiagnosticLog.add(
-          'native libvlc continuous-ts proof waiting reason=zero_visual_metadata watched=${proofSeconds}s streamed=${_countDiagnosticBucket(_libVlcContinuousTsStreamedSegments)}',
-        );
-      }
-      return false;
-    }
-    return _libVlcContinuousTsPlaybackProofSeconds(controller) >= 8;
+    final coordinator = _mobileLibVlcCoordinator;
+    final snapshot = coordinator?.currentDriver?.snapshot;
+    return coordinator?.state == MobileLibVlcState.playing &&
+        snapshot != null &&
+        snapshot.isPlaying &&
+        !snapshot.isBuffering &&
+        !snapshot.hasError &&
+        snapshot.hasVisualProof;
   }
 
   bool _hasSustainedLibVlcContinuousTsPlaybackProof(
     _NativePlaybackController controller,
   ) {
-    if (!_hasLibVlcContinuousTsPlaybackProof(
-      controller,
-      allowZeroVisualMetadataProof: true,
-    )) {
-      return false;
-    }
-    if (_libVlcFrozenClockSamples >= 8) return false;
-    if (!_libVlcContinuousTsRelayProofReady &&
-        controller.duration <= Duration.zero) {
-      return false;
-    }
-    return _libVlcContinuousTsPlaybackProofSeconds(controller) >= 8;
+    return _hasLibVlcVisualPlaybackProof(controller) &&
+        _libVlcContinuousTsPlaybackProofSeconds(controller) >= 8;
   }
 
   int _libVlcContinuousTsPlaybackProofSeconds(
     _NativePlaybackController controller,
   ) {
-    var seconds = math.max(_lastSavedSecond, controller.position.inSeconds);
-    final startedAt = _nativeWallClockStartedAt;
-    if (controller.isPlaying && startedAt != null) {
-      seconds = math.max(
-        seconds,
-        DateTime.now().difference(startedAt).inSeconds,
-      );
+    final snapshot = _mobileLibVlcCoordinator?.currentDriver?.snapshot;
+    if (snapshot == null || snapshot.hasError) {
+      return _sourceCredibleWatchSeconds;
     }
-    return seconds;
+    final openedAt = _nativeWallClockStartedAt;
+    final wallWatchSeconds = openedAt == null
+        ? 0
+        : math.max(0, DateTime.now().difference(openedAt).inSeconds);
+    return math.max(_sourceCredibleWatchSeconds, wallWatchSeconds);
   }
 
-  bool _libVlcContinuousTsPlaybackActive(
-    _NativePlaybackController? controller,
-  ) {
-    if (controller == null) return false;
-    return _hasLibVlcContinuousTsPlaybackProof(
-      controller,
-      allowZeroVisualMetadataProof: true,
+  void _armSourceSelectionRollback({
+    required PlaybackSource? previousSource,
+    required PlaybackSource selectedSource,
+    required bool wasPlaying,
+    required int previousSourceIndex,
+    required String? previousPreferredQuality,
+    required String previousQualityPreferenceMode,
+  }) {
+    if (previousSource == null || previousSource.url == selectedSource.url) {
+      _clearSourceSelectionRollback(reason: 'same_or_missing_previous');
+      return;
+    }
+    _pendingSourceSelectionPreviousSource = previousSource;
+    _pendingSourceSelectionSelectedUrl = selectedSource.url;
+    _pendingSourceSelectionPreviousSourceIndex = previousSourceIndex;
+    _pendingSourceSelectionPreviousPreferredQuality = previousPreferredQuality;
+    _pendingSourceSelectionPreviousQualityPreferenceMode =
+        previousQualityPreferenceMode;
+    _pendingSourceSelectionWasPlaying = wasPlaying;
+    _pendingSourceSelectionRollbackUntil =
+        DateTime.now().add(const Duration(seconds: 90));
+    DiagnosticLog.add(
+      'native source selection rollback armed selected=${selectedSource.providerId} previous=${previousSource.providerId} window=90s',
+    );
+  }
+
+  void _clearSourceSelectionRollback({required String reason}) {
+    if (_pendingSourceSelectionSelectedUrl != null) {
+      DiagnosticLog.add(
+        'native source selection rollback cleared reason=$reason',
+      );
+    }
+    _pendingSourceSelectionPreviousSource = null;
+    _pendingSourceSelectionSelectedUrl = null;
+    _pendingSourceSelectionRollbackUntil = null;
+    _pendingSourceSelectionPreviousSourceIndex = 0;
+    _pendingSourceSelectionPreviousPreferredQuality = null;
+    _pendingSourceSelectionPreviousQualityPreferenceMode = 'recommended';
+    _pendingSourceSelectionWasPlaying = true;
+  }
+
+  Future<bool> _restorePendingSourceSelectionRollback({
+    required PlaybackSource? failedSource,
+    required Duration recoveryPosition,
+    required String reason,
+  }) async {
+    final selectedUrl = _pendingSourceSelectionSelectedUrl;
+    final previousSource = _pendingSourceSelectionPreviousSource;
+    final until = _pendingSourceSelectionRollbackUntil;
+    if (selectedUrl == null || previousSource == null || until == null) {
+      return false;
+    }
+    if (DateTime.now().isAfter(until)) {
+      _clearSourceSelectionRollback(reason: 'expired_$reason');
+      return false;
+    }
+    if (failedSource == null || failedSource.url != selectedUrl) {
+      return false;
+    }
+    final wasPlaying = _pendingSourceSelectionWasPlaying;
+    final previousSourceIndex = _pendingSourceSelectionPreviousSourceIndex;
+    final previousPreferredQuality =
+        _pendingSourceSelectionPreviousPreferredQuality;
+    final previousQualityPreferenceMode =
+        _pendingSourceSelectionPreviousQualityPreferenceMode;
+    _clearSourceSelectionRollback(reason: 'restore_$reason');
+    DiagnosticLog.add(
+      'native source selection rollback restoring previous source reason=$reason failed=${failedSource.providerId} previous=${previousSource.providerId}',
+    );
+    return _restorePreviousSourceAfterSelectionFailure(
+      previousSource: previousSource,
+      resumePosition: recoveryPosition,
+      wasPlaying: wasPlaying,
+      previousSourceIndex: previousSourceIndex,
+      previousPreferredQuality: previousPreferredQuality,
+      previousQualityPreferenceMode: previousQualityPreferenceMode,
+      reason: reason,
     );
   }
 
@@ -1882,15 +3256,64 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     );
   }
 
+  bool get _routeStartupWorkAvailable =>
+      _routeStartupOwner.isCompletedSuccessfully ||
+      (!_routeStartupOwner.isExpired && !_routeStartupOwner.isCancelled);
+
+  void _recordLibVlcStartupStage(String stage) {
+    DiagnosticLog.add('native libvlc startup stage=$stage');
+  }
+
+  Duration _routeStartupTimeout(Duration requested) {
+    if (_routeStartupOwner.isCompletedSuccessfully) return requested;
+    final remaining = _routeStartupOwner.remainingWorkBudget;
+    return remaining < requested ? remaining : requested;
+  }
+
+  Future<T> _runRouteStartupWork<T>(Future<T> Function() operation) {
+    if (_routeStartupOwner.isCompletedSuccessfully) return operation();
+    return _routeStartupOwner.runWork<T>((_) => operation());
+  }
+
+  Future<T> _runCancelableProviderWork<T>({
+    required Duration timeout,
+    required Future<T> Function(PlaybackRequestCancellation cancellation)
+        operation,
+  }) {
+    return runCancelablePlaybackAttempt<T>(
+      timeout: _routeStartupTimeout(timeout),
+      parentCancellation: _routeStartupOwner.isCompletedSuccessfully
+          ? null
+          : _routeStartupOwner.cancellation,
+      operation: operation,
+    );
+  }
+
+  Future<bool> _finishExpiredRouteStartup() async {
+    if (_routeStartupOwner.isCompletedSuccessfully ||
+        _routeStartupWorkAvailable) {
+      return false;
+    }
+    if (_playerClosing || !mounted) return true;
+    _lastOpenFailureMessage = 'Playback took too long. Please try again.';
+    await _finishWithNoWorkingSource(routeDeadlineExpired: true);
+    return true;
+  }
+
   Future<void> _openNextAvailableSource({
     Duration? resumePositionOverride,
   }) async {
+    if (await _finishExpiredRouteStartup()) return;
     final runId = ++_providerRunId;
-    final recoveryResumePosition =
-        resumePositionOverride != null && resumePositionOverride > Duration.zero
-            ? resumePositionOverride
-            : null;
+    var recoveryResumePosition = resumePositionOverride;
     final enginePasses = _enginePassesForCurrentSettings();
+    final requestedVariantDeadline =
+        DateTime.now().add(_hlsVariantExpansionBudget);
+    final hlsVariantExpansionDeadline =
+        !_routeStartupOwner.isCompletedSuccessfully &&
+                _routeStartupOwner.workCutoff.isBefore(requestedVariantDeadline)
+            ? _routeStartupOwner.workCutoff
+            : requestedVariantDeadline;
     DiagnosticLog.add(
       'native engine ladder configured=${AppState.playerBehaviorSettings.value.playbackEngine} '
       'effective=$_effectivePlaybackEngine passes=${enginePasses.map((engine) => engine.id).join('>')} '
@@ -1909,8 +3332,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _p2pRuntimeUnavailableForRoute = false;
     _p2pBridgeBufferingForRoute = false;
     _coldP2pSourceKeysForRoute.clear();
+    _deferredFixedHlsAutoProviders.clear();
+    _routeProviderResolveTimeoutIds.clear();
+    _routeRiskProviderResolveTimeouts = 0;
+    _emptyProviderResolveResultsForRoute = 0;
     while (mounted &&
         runId == _providerRunId &&
+        _routeStartupWorkAvailable &&
         _enginePassIndex < enginePasses.length) {
       final engine = enginePasses[_enginePassIndex];
       if (engine == _NativePlaybackEngine.libvlc &&
@@ -1941,6 +3369,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       }
       while (mounted &&
           runId == _providerRunId &&
+          _routeStartupWorkAvailable &&
           _qualityPassIndex < qualityPasses.length) {
         final qualityPass = qualityPasses[_qualityPassIndex];
         var foundAnyProviderSourcesForPass = false;
@@ -1951,12 +3380,40 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         }
         while (mounted &&
             runId == _providerRunId &&
+            _routeStartupWorkAvailable &&
             _providerIndex < _requests.length) {
           final request = _requests[_providerIndex];
-          var providerSources = await _expandQualitySources(request.sources);
+          if (_temporaryAutoProviderRecovery &&
+              _freshRecoverySkippedProviderIds.contains(request.providerId)) {
+            DiagnosticLog.add(
+              'native page provider skipped provider=${request.providerId} reason=fresh_recovery_previous_empty_or_blocked',
+            );
+            _providerIndex += 1;
+            _sourceIndex = 0;
+            continue;
+          }
+          if (_routeProviderResolveTimeoutIds.contains(request.providerId)) {
+            DiagnosticLog.add(
+              'native page provider skipped provider=${request.providerId} reason=route_resolve_timeout_seen',
+            );
+            _providerIndex += 1;
+            _sourceIndex = 0;
+            continue;
+          }
+          var providerSources = await _expandQualitySources(
+            request.sources,
+            deadline: hlsVariantExpansionDeadline,
+          );
           if (!mounted || runId != _providerRunId) return;
+          if (await _finishExpiredRouteStartup()) return;
 
           if (_sourceIndex == 0 && providerSources.isEmpty) {
+            if (_recentDirectHlsRouteRiskRecoveryWindow() &&
+                _routeRiskProviderResolveTimeouts >= 2) {
+              DiagnosticLog.add(
+                'native page provider fresh resolve continuing provider=${request.providerId} reason=direct_hls_route_risk_continue_bounded_scan timeouts=$_routeRiskProviderResolveTimeouts',
+              );
+            }
             final status = _resolveStatusFor(request.providerId);
             _logPlaybackStatus(status, reason: 'resolve_provider');
             setState(() {
@@ -1970,11 +3427,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             try {
               providerSources = await _expandQualitySources(
                 await _resolveProviderSources(request.providerId),
+                deadline: hlsVariantExpansionDeadline,
               );
             } catch (error) {
+              if (await _finishExpiredRouteStartup()) return;
               DiagnosticLog.add(
                 'native page provider resolve failed provider=${request.providerId} error=${_safeDiagnosticError(error)}',
               );
+              if (error is TimeoutException) {
+                _routeProviderResolveTimeoutIds.add(request.providerId);
+                if (_recentDirectHlsRouteRiskRecoveryWindow()) {
+                  _routeRiskProviderResolveTimeouts += 1;
+                  DiagnosticLog.add(
+                    'native page provider resolve timeout held reason=direct_hls_route_risk_provider_skip timeouts=$_routeRiskProviderResolveTimeouts provider=${request.providerId}',
+                  );
+                }
+              }
               if (_isTemporaryResolverBlock(error)) {
                 DiagnosticLog.add(
                   'native page stopping provider scan reason=playback_service_temporary_block provider=${request.providerId}',
@@ -1986,7 +3454,29 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                   sourceCount: request.sources.length,
                   updateHealth: _shouldUpdateProviderHealthFromPlaybackFailure,
                 );
-                if (await _pauseProviderScanForResolverBlock()) {
+                final hasQueuedResolvedFallback =
+                    mobileHasResolvedFallbackAfter(
+                  currentIndex: _providerIndex,
+                  requestSourceCounts:
+                      _requests.map((request) => request.sources.length),
+                );
+                if (hasQueuedResolvedFallback) {
+                  _providerIndex += 1;
+                  while (_providerIndex < _requests.length &&
+                      _requests[_providerIndex].sources.isEmpty) {
+                    _providerIndex += 1;
+                  }
+                  _sourceIndex = 0;
+                  DiagnosticLog.add(
+                    'native page provider scan continued reason=resolved_fallback_after_temporary_block providerIndex=$_providerIndex',
+                  );
+                  continue;
+                }
+                final hasActivePlaybackToProtect = _controller != null &&
+                    _activeSource != null &&
+                    (_controller?.isInitialized ?? false);
+                if (hasActivePlaybackToProtect &&
+                    await _pauseProviderScanForResolverBlock()) {
                   return;
                 }
                 _resolverTemporarilyBlocked = true;
@@ -2003,11 +3493,16 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               continue;
             }
             if (!mounted || runId != _providerRunId) return;
+            if (await _finishExpiredRouteStartup()) return;
           }
 
           if (providerSources.isEmpty) {
+            _emptyProviderResolveResultsForRoute += 1;
+            if (_temporaryAutoProviderRecovery) {
+              _freshRecoverySkippedProviderIds.add(request.providerId);
+            }
             DiagnosticLog.add(
-              'native page provider=${request.providerId} has no sources providerIndex=$_providerIndex',
+              'native page provider=${request.providerId} has no sources providerIndex=$_providerIndex emptyRouteResults=$_emptyProviderResolveResultsForRoute',
             );
             AppState.recordNativeProviderFailure(
               mediaKey: _playbackKey,
@@ -2022,16 +3517,23 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           }
 
           foundAnyProviderSourcesForPass = true;
-          final sourceIndexRemapCandidate = _sourceIndex > 0 &&
+          final sourceIndexRemapCandidate = _activeSource != null &&
+                  _sourceIndex > 0 &&
                   _sourceIndex < _activeSources.length &&
-                  _activeSources[_sourceIndex].providerId == request.providerId
+                  _activeSources[_sourceIndex].providerId ==
+                      request.providerId &&
+                  _activeSources[_sourceIndex].url == _activeSource!.url
               ? _activeSources[_sourceIndex]
               : null;
+          final providerSourcesBeforeQualityPass = providerSources;
+          final bypassQualityPassForVerifiedCache =
+              _isVerifiedCacheFallbackRequest(request);
           providerSources = _prepareProviderSourcesForPlaybackPass(
             providerSources,
             qualityPass: qualityPass,
             engine: engine,
             enginePasses: enginePasses,
+            bypassQualityPass: bypassQualityPassForVerifiedCache,
           );
           if (providerSources.isEmpty) {
             DiagnosticLog.add(
@@ -2039,6 +3541,24 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             );
             _providerIndex += 1;
             _sourceIndex = 0;
+            continue;
+          }
+          if (_deferFixedHlsAutoProviderIfNeeded(
+            request,
+            providerSources,
+            qualityPass,
+            bypassQualityPassForVerifiedCache,
+            engine,
+          )) {
+            continue;
+          }
+          if (_deferAdaptiveHlsAutoProviderIfNeeded(
+            request,
+            providerSources,
+            qualityPass,
+            bypassQualityPassForVerifiedCache,
+            engine,
+          )) {
             continue;
           }
           if (sourceIndexRemapCandidate != null &&
@@ -2109,9 +3629,55 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               _sourceIndex += 1;
               continue;
             }
+            if (_isFailedLibVlcHlsSourceForRoute(source, engine)) {
+              DiagnosticLog.add(
+                'native source skipped provider=${source.providerId} '
+                'providerIndex=$_providerIndex sourceIndex=$_sourceIndex '
+                'engine=${engine.id} '
+                'reason=libvlc_hls_route_transport_quarantine '
+                'quality=${_qualityLabel(source)}',
+              );
+              _sourceIndex += 1;
+              continue;
+            }
             if (_shouldSkipSourceAfterRouteOpenTimeouts(source, engine)) {
               _sourceIndex += 1;
               continue;
+            }
+            if (_shouldSkipLibVlcAfterMedia3RouteRisk(source, engine)) {
+              _sourceIndex += 1;
+              continue;
+            }
+            if (_shouldDeferLowQualityMedia3DirectHlsResume(source, engine)) {
+              _sourceIndex += 1;
+              continue;
+            }
+            if (_shouldRejectLibVlcDirectHlsStartup(source, engine)) {
+              DiagnosticLog.add(
+                'native source skipped provider=${source.providerId} sourceClass=${source.sourceClass.wireName} providerIndex=$_providerIndex sourceIndex=$_sourceIndex engine=${engine.id} reason=libvlc_direct_hls_startup_crash_guard quality=${_qualityLabel(source)} action=try_next_engine_pass',
+              );
+              _sourceIndex += 1;
+              continue;
+            }
+            final resumePositionForLibVlcGuard = recoveryResumePosition ??
+                _preOpenLibVlcDirectHlsResumePosition(source, engine);
+            if (resumePositionForLibVlcGuard != null &&
+                _shouldRejectLibVlcDirectHlsResume(
+                  source,
+                  engine,
+                  resumePositionForLibVlcGuard,
+                )) {
+              if (_effectivePlaybackEngine == 'auto') {
+                _libvlcUnavailableForSession = true;
+              }
+              DiagnosticLog.add(
+                'native source skipped provider=${source.providerId} sourceClass=${source.sourceClass.wireName} providerIndex=$_providerIndex sourceIndex=$_sourceIndex engine=${engine.id} reason=libvlc_direct_hls_resume_guard position=${resumePositionForLibVlcGuard.inSeconds}s quality=${_qualityLabel(source)} autoRouteUnavailable=$_libvlcUnavailableForSession',
+              );
+              _sourceIndex += 1;
+              continue;
+            }
+            if (engine == _NativePlaybackEngine.libvlc) {
+              _recordLibVlcStartupStage('candidate_selected');
             }
             DiagnosticLog.add(
               'native source attempt provider=${source.providerId} sourceClass=${source.sourceClass.wireName} providerIndex=$_providerIndex sourceIndex=$_sourceIndex quality=${_qualityLabel(source)} engine=${engine.id} ${_qualityDiagnosticContext(qualityPass)} profile=${_sourceDiagnosticProfile(source)}',
@@ -2121,6 +3687,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               engine: engine,
             );
             if (!mounted || runId != _providerRunId) return;
+            if (await _finishExpiredRouteStartup()) return;
             if (!nativeReadable) {
               DiagnosticLog.add(
                 'native source unreadable provider=${source.providerId} providerIndex=$_providerIndex sourceIndex=$_sourceIndex',
@@ -2133,16 +3700,69 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               _sourceIndex += 1;
               continue;
             }
+            if (engine == _NativePlaybackEngine.libvlc) {
+              _recordLibVlcStartupStage('preflight_succeeded');
+            }
             final status = _checkingSourceStatusFor(_sourceIndex);
             _logPlaybackStatus(status, reason: 'source_attempt');
-            final opened = await _openSource(
-              source,
-              resumePosition: recoveryResumePosition,
-              statusMessage: status,
-              engineOverride: engine,
-            );
+            late final bool opened;
+            try {
+              opened = await _runRouteStartupWork<bool>(
+                () => _openSource(
+                  source,
+                  resumePosition: recoveryResumePosition,
+                  statusMessage: status,
+                  engineOverride: engine,
+                  requireStartupPlaybackProof: true,
+                ),
+              );
+            } on MobilePlaybackRouteStartupExpired {
+              await _finishExpiredRouteStartup();
+              return;
+            }
             if (!mounted || runId != _providerRunId) return;
-            if (opened) return;
+            if (opened) {
+              _routeStartupOwner.completeSuccessfully();
+              return;
+            }
+            if (await _finishExpiredRouteStartup()) return;
+            final candidateResumePosition = _currentPlaybackResumeAnchor();
+            if (candidateResumePosition >
+                (recoveryResumePosition ?? Duration.zero)) {
+              recoveryResumePosition = candidateResumePosition;
+              DiagnosticLog.add(
+                'native recovery progress promoted '
+                'provider=${source.providerId} '
+                'position=${candidateResumePosition.inSeconds}s '
+                'reason=source_candidate_failed_preserve_anchor',
+              );
+            }
+            if (_shouldProtectVisiblyPlayingSource(source, engine)) {
+              DiagnosticLog.add(
+                'native source open treated as active playback provider=${source.providerId} providerIndex=$_providerIndex sourceIndex=$_sourceIndex engine=${engine.id} reason=visual_playback_after_unproven_open',
+              );
+              _clearTransientBufferingWaitMessage(
+                reason: 'visual_playback_after_unproven_open',
+              );
+              if (mounted) {
+                setState(() {
+                  _loading = false;
+                  _controlsVisible = true;
+                  _statusMessage = null;
+                });
+              }
+              return;
+            }
+            if (await _restartWithOrderedQualityAfterResumeOpenFailure(
+              source: source,
+              providerSourcesBeforeQualityPass:
+                  providerSourcesBeforeQualityPass,
+              engine: engine,
+              recoveryResumePosition: recoveryResumePosition,
+              runId: runId,
+            )) {
+              return;
+            }
             DiagnosticLog.add(
               'native source failed provider=${source.providerId} providerIndex=$_providerIndex sourceIndex=$_sourceIndex',
             );
@@ -2178,8 +3798,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                   _statusMessage = status;
                 });
               }
-              await Future<void>.delayed(const Duration(milliseconds: 900));
+              const transitionDelay = Duration(milliseconds: 900);
+              if (!_routeStartupOwner.canChargeOptionalDelay(transitionDelay)) {
+                _routeStartupOwner.expireNow();
+                await _finishExpiredRouteStartup();
+                return;
+              }
+              await Future<void>.delayed(transitionDelay);
               if (!mounted || runId != _providerRunId) return;
+              if (await _finishExpiredRouteStartup()) return;
               _enginePassIndex = 0;
               _qualityPassIndex = 0;
               _providerIndex = 0;
@@ -2273,6 +3900,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
 
     if (!mounted || runId != _providerRunId) return;
+    if (await _finishExpiredRouteStartup()) return;
     if (await _retryLiveTvOnceAfterTransientExhaustion(runId)) return;
     if (await _switchProviderToAutoTemporarilyIfNeeded(runId)) return;
     if (await _maybeSearchP2pIndexers(runId)) return;
@@ -2418,6 +4046,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (mounted) {
       setState(() {
         _loading = true;
+        _mobileLibVlcSeekPreparing = true;
         _controlsVisible = true;
         _nativeProvidersExhausted = false;
         _statusMessage = status;
@@ -2430,49 +4059,69 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }
 
   Future<bool> _switchProviderToAutoTemporarilyIfNeeded(int runId) async {
-    if (_limitToFirstQualityPass) {
-      DiagnosticLog.add(
-        'native provider temporary auto skipped reason=resolved_only_route',
-      );
-      return false;
-    }
     if (_temporaryAutoProviderRecovery) {
       DiagnosticLog.add(
         'native provider temporary auto skipped reason=already_recovered',
       );
       return false;
     }
-    if (_requests.length != 1) {
+    if (!_limitToFirstQualityPass && _requests.length != 1) {
       DiagnosticLog.add(
         'native provider temporary auto skipped reason=request_count count=${_requests.length}',
       );
       return false;
     }
-    final exhaustedProviderId = _requests.single.providerId;
-    if (!AppState.nativeProviderOrder.contains(exhaustedProviderId)) {
+    final exhaustedProviderIds = <String>{
+      for (final request in _requests) request.providerId,
+      for (final request in _requests)
+        for (final source in request.sources) source.providerId,
+    }..removeWhere(
+        (providerId) =>
+            providerId.trim().isEmpty ||
+            providerId == AppState.autoNativeProviderId,
+      );
+    final exhaustedProviderId = exhaustedProviderIds.isNotEmpty
+        ? exhaustedProviderIds.first
+        : _requests.isNotEmpty
+            ? _requests.first.providerId
+            : '';
+    if (!_limitToFirstQualityPass &&
+        !AppState.nativeProviderOrder.contains(exhaustedProviderId)) {
       DiagnosticLog.add(
         'native provider temporary auto skipped provider=$exhaustedProviderId reason=not_user_selectable',
       );
       return false;
     }
-    final autoProviderIds = AppState.orderedNativeProviderIds(
-      selected: AppState.autoNativeProviderId,
-      mediaKey: _playbackKey ?? _progressItem?.id,
-    ).where((providerId) => providerId != exhaustedProviderId).toList();
+    final autoProviderIds = mobileFreshRecoveryProviderIds(
+      orderedProviderIds: AppState.orderedNativeProviderIds(
+        selected: AppState.autoNativeProviderId,
+        mediaKey: _playbackKey ?? _progressItem?.id,
+      ),
+      exhaustedProviderIds: exhaustedProviderIds,
+      maxCandidates: _limitToFirstQualityPass ? 8 : null,
+    );
     if (autoProviderIds.isEmpty) {
       DiagnosticLog.add(
-        'native provider temporary auto skipped provider=$exhaustedProviderId reason=no_auto_alternatives',
+        'native provider temporary auto skipped provider=$exhaustedProviderId reason=no_auto_alternatives resolvedOnly=$_limitToFirstQualityPass',
       );
       return false;
     }
 
     _temporaryAutoProviderRecovery = true;
-    final status =
-        '${_providerLabel(exhaustedProviderId)} exhausted. Switching to Auto temporarily...';
+    final status = _limitToFirstQualityPass
+        ? 'Checking fresh playback options...'
+        : '${_providerLabel(exhaustedProviderId)} exhausted. Switching to Auto temporarily...';
     DiagnosticLog.add(
-      'native provider exhausted; switching to auto temporarily provider=$exhaustedProviderId',
+      _limitToFirstQualityPass
+          ? 'native fresh recovery start reason=resolved_only_exhausted exhausted=${exhaustedProviderIds.length} candidates=${autoProviderIds.length}'
+          : 'native provider exhausted; switching to auto temporarily provider=$exhaustedProviderId candidates=${autoProviderIds.length}',
     );
-    _logPlaybackStatus(status, reason: 'provider_temporary_auto');
+    _logPlaybackStatus(
+      status,
+      reason: _limitToFirstQualityPass
+          ? 'fresh_recovery'
+          : 'provider_temporary_auto',
+    );
     if (mounted) {
       setState(() {
         _loading = true;
@@ -2480,8 +4129,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _statusMessage = status;
       });
     }
-    await Future<void>.delayed(const Duration(milliseconds: 900));
+    const transitionDelay = Duration(milliseconds: 900);
+    if (!_routeStartupOwner.canChargeOptionalDelay(transitionDelay)) {
+      _routeStartupOwner.expireNow();
+      await _finishExpiredRouteStartup();
+      return true;
+    }
+    await Future<void>.delayed(transitionDelay);
     if (!mounted || runId != _providerRunId) return true;
+    if (await _finishExpiredRouteStartup()) return true;
 
     _requests = [
       for (final providerId in autoProviderIds)
@@ -2496,10 +4152,118 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _activeSource = null;
     _failedSourceAttempts.clear();
     _media3TerminalFailedUrlsForSession.clear();
+    _freshRecoverySkippedProviderIds.clear();
+    if (_limitToFirstQualityPass && !_ignoreSavedQualityForResumeRecovery) {
+      _ignoreSavedQualityForResumeRecovery = true;
+      DiagnosticLog.add(
+        'native fresh recovery ignoring saved quality reason=resolved_only_exhausted',
+      );
+    }
     DiagnosticLog.add(
-      'native temporary auto provider order=${_requests.map((request) => _providerLabel(request.providerId)).join('>')}',
+      _limitToFirstQualityPass
+          ? 'native fresh recovery provider order=${_requests.map((request) => _providerLabel(request.providerId)).join('>')}'
+          : 'native temporary auto provider order=${_requests.map((request) => _providerLabel(request.providerId)).join('>')}',
     );
     final resumePosition = _currentPlaybackResumeAnchor();
+    await _openNextAvailableSource(resumePositionOverride: resumePosition);
+    return true;
+  }
+
+  Future<bool> _restartWithOrderedQualityAfterResumeOpenFailure({
+    required PlaybackSource source,
+    required List<PlaybackSource> providerSourcesBeforeQualityPass,
+    required _NativePlaybackEngine engine,
+    required Duration? recoveryResumePosition,
+    required int runId,
+  }) async {
+    if (!mounted ||
+        runId != _providerRunId ||
+        _usingGlobalOverrides ||
+        engine != _NativePlaybackEngine.exoplayer ||
+        source.sourceClass != PlaybackSourceClass.direct) {
+      return false;
+    }
+    final resumePosition =
+        recoveryResumePosition ?? _currentPlaybackResumeAnchor();
+    if (resumePosition <= Duration.zero) return false;
+    final sourceRank = _qualityRank(_qualityLabel(source));
+    final hasSiblingQuality = providerSourcesBeforeQualityPass.any(
+      (candidate) =>
+          candidate.url != source.url &&
+          candidate.providerId == source.providerId &&
+          candidate.sourceClass == PlaybackSourceClass.direct &&
+          _nativePlaybackSupportsSourceClass(candidate),
+    );
+
+    if (_isHlsSource(source) && _isFailedMidplayRecoverySource(source)) {
+      DiagnosticLog.add(
+        'native resume source failed; checking distinct route before hls '
+        'family provider=${source.providerId} '
+        'quality=${_qualityLabel(source)} '
+        'resume=${resumePosition.inSeconds}s '
+        'reason=resume_startup_distinct_route_before_hls_family',
+      );
+      final routeRefreshed = await _tryFreshRouteResolve(resumePosition);
+      if (routeRefreshed || !mounted || runId != _providerRunId) {
+        return true;
+      }
+      DiagnosticLog.add(
+        'native resume distinct route unavailable '
+        'provider=${source.providerId} '
+        'action=refresh_provider_before_sibling_qualities',
+      );
+      final refreshed = await _tryFreshProviderResolve(
+        resumePosition,
+        recoverySourceOverride: source,
+      );
+      if (refreshed || !mounted || runId != _providerRunId) {
+        return true;
+      }
+      DiagnosticLog.add(
+        'native resume fresh provider session unavailable '
+        'provider=${source.providerId} '
+        'action=try_unfailed_sibling_qualities',
+      );
+    }
+    if (!hasSiblingQuality) return false;
+
+    _ignoreSavedQualityForResumeRecovery = true;
+    if (sourceRank > 0) {
+      _resumeRecoveryExcludedQualityRanks.add(sourceRank);
+    }
+    final currentEnginePassIndex =
+        _enginePassesForCurrentSettings().indexOf(engine);
+    if (currentEnginePassIndex >= 0) {
+      _enginePassIndex = currentEnginePassIndex;
+    }
+    _qualityPassIndex = 0;
+    _providerIndex = 0;
+    _sourceIndex = 0;
+    _activeSource = null;
+    _activeSources = const <PlaybackSource>[];
+    _lastOpenFailureMessage = null;
+    final previousRequests = _requests;
+    _requests = <NativePlaybackRequest>[
+      NativePlaybackRequest(
+        providerId: source.providerId,
+        sources: providerSourcesBeforeQualityPass,
+      ),
+      ...previousRequests.where(
+        (request) => request.providerId != source.providerId,
+      ),
+    ];
+    DiagnosticLog.add(
+      'native resume source failed; widening saved quality for route provider=${source.providerId} failedQuality=${_qualityLabel(source)} siblingSources=${providerSourcesBeforeQualityPass.length} resume=${resumePosition.inSeconds}s reason=resume_seek_source_error',
+    );
+    if (mounted) {
+      const status = 'Trying another video quality...';
+      _logPlaybackStatus(status, reason: 'resume_quality_recovery');
+      setState(() {
+        _loading = true;
+        _controlsVisible = true;
+        _statusMessage = status;
+      });
+    }
     await _openNextAvailableSource(resumePositionOverride: resumePosition);
     return true;
   }
@@ -2524,15 +4288,26 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
   Future<List<PlaybackSource>> _resolveProviderSources(String providerId) {
     return _providerResolveFutures.putIfAbsent(providerId, () async {
+      if (!_routeStartupWorkAvailable) {
+        throw const MobilePlaybackRouteStartupExpired();
+      }
       final stopwatch = Stopwatch()..start();
-      final timeout = _providerResolveTimeoutFor(providerId);
+      final timeout = _routeStartupTimeout(
+        _providerResolveTimeoutFor(providerId),
+      );
       final health = AppState.nativeProviderHealthFor(providerId);
       DiagnosticLog.add(
         'native provider resolve start provider=$providerId health=${health.name} timeout=${timeout.inSeconds}s',
       );
       late final List<PlaybackSource> sources;
       try {
-        sources = await _resolveProvider(providerId).timeout(timeout);
+        sources = await _runRouteStartupWork<List<PlaybackSource>>(
+          () => _runCancelableProviderWork<List<PlaybackSource>>(
+            timeout: timeout,
+            operation: (cancellation) =>
+                _resolveProvider(providerId, cancellation),
+          ),
+        );
       } on TimeoutException catch (error) {
         stopwatch.stop();
         _providerResolveFutures.remove(providerId);
@@ -2570,15 +4345,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return const <_NativePlaybackEngine>[_NativePlaybackEngine.exoplayer];
     }
-    if (_libVlcCrashGuardActiveForManualRoute && requested == 'libvlc') {
-      DiagnosticLog.add(
-        'native engine pass guarded engine=libvlc scope=manual reason=previous_native_engine_interrupted',
-      );
-      return const <_NativePlaybackEngine>[_NativePlaybackEngine.exoplayer];
-    }
     if (_libvlcUnavailableForAppSession) {
       return switch (configured) {
-        'libvlc' => const <_NativePlaybackEngine>[_NativePlaybackEngine.libvlc],
+        'libvlc' => const <_NativePlaybackEngine>[
+            _NativePlaybackEngine.libvlc,
+          ],
         'exoplayer' => const <_NativePlaybackEngine>[
             _NativePlaybackEngine.exoplayer,
           ],
@@ -2589,7 +4360,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       };
     }
     return switch (configured) {
-      'libvlc' => const <_NativePlaybackEngine>[_NativePlaybackEngine.libvlc],
+      'libvlc' => const <_NativePlaybackEngine>[
+          _NativePlaybackEngine.libvlc,
+        ],
       'exoplayer' => const <_NativePlaybackEngine>[
           _NativePlaybackEngine.exoplayer,
         ],
@@ -2615,15 +4388,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     if (_libvlcUnavailableForAppSession) {
       if (configured == 'libvlc') {
-        return 'manual_libvlc_app_session_retry';
+        return 'manual_libvlc_app_session_unavailable';
       }
       return 'libvlc_app_session_unavailable';
     }
     if (_temporaryAutoEngineRecovery) {
       return 'temporary_auto_engine_recovery';
-    }
-    if (_libVlcCrashGuardActiveForManualRoute && configured == 'libvlc') {
-      return 'manual_libvlc_guarded_after_native_engine_interrupted';
     }
     return switch (configured) {
       'libvlc' => 'manual_libvlc',
@@ -2659,22 +4429,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         DiagnosticLog.previousNativeEngineActiveEngine == 'libvlc';
   }
 
-  bool get _libVlcCrashGuardActiveForManualRoute {
-    return _libVlcCrashGuardActive && !_isP2pOnlySourceRoute;
-  }
-
-  bool _libVlcCrashGuardActiveForManualRequests(
-    List<NativePlaybackRequest> requests,
-  ) {
-    return _libVlcCrashGuardActive && !_requestsAreP2pOnly(requests);
-  }
-
   String get _effectivePlaybackEngine {
     final configured = AppState.playerBehaviorSettings.value.playbackEngine;
     if (_temporaryAutoEngineRecovery) return 'auto';
-    if (_libVlcCrashGuardActiveForManualRoute && configured == 'libvlc') {
-      return 'exoplayer';
-    }
     return configured;
   }
 
@@ -2683,10 +4440,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   ) {
     final configured = AppState.playerBehaviorSettings.value.playbackEngine;
     if (_temporaryAutoEngineRecovery) return 'auto';
-    if (_libVlcCrashGuardActiveForManualRequests(requests) &&
-        configured == 'libvlc') {
-      return 'exoplayer';
-    }
     return configured;
   }
 
@@ -2758,9 +4511,33 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (_isP2pOnlySourceRoute) {
       return _p2pQualityPassesForCurrentSettings();
     }
+    if (_shouldUseFreshAutoQualityForResumeRoute) {
+      DiagnosticLog.add(
+        'native resume quality strategy pass=auto-only reason=fresh_resume_primary',
+      );
+      return const <_QualityPass>[_QualityPass.autoPass];
+    }
     final target = _qualityPassTargetForCurrentSettings();
     if (target != null) {
       return <_QualityPass>[_QualityPass.target(target)];
+    }
+    if (_ignoreSavedQualityForResumeRecovery &&
+        _hasSavedResumeProgressForRoute &&
+        !_usingGlobalOverrides &&
+        !_batterySaverPlaybackActive) {
+      DiagnosticLog.add(
+        'native resume quality strategy pass=ordered-fixed reason=resume_recovery_ignore_saved_quality',
+      );
+      final preferredRank = _qualityRank(_preferredQuality ?? '');
+      return _dedupeQualityPasses(<_QualityPass>[
+        if (preferredRank > 0) _QualityPass.rank(preferredRank),
+        _QualityPass.rank(720),
+        _QualityPass.rank(480),
+        _QualityPass.rank(360),
+        _QualityPass.rank(1080),
+        _QualityPass.unknownPass,
+        _QualityPass.autoPass,
+      ]);
     }
     final preferred = _preferredQuality;
     if (!_usingGlobalOverrides &&
@@ -2940,12 +4717,28 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   bool get _qualityModeNeedsOrderedFallbackPasses {
     if (_isP2pOnlySourceRoute && _qualityPassTargetForCurrentSettings() != null)
       return true;
+    if (_hasSavedResumeProgressForRoute) return true;
+    if (_ignoreSavedQualityForResumeRecovery) return true;
     return _usingGlobalOverrides &&
         (_qualityPreferenceMode == 'higher' ||
             _qualityPreferenceMode == 'dataSaver');
   }
 
+  bool get _shouldUseFreshAutoQualityForResumeRoute {
+    return _limitToFirstQualityPass &&
+        _hasSavedResumeProgressForRoute &&
+        !_ignoreSavedQualityForResumeRecovery &&
+        _resumeRecoveryExcludedQualityRanks.isEmpty &&
+        _resumeRecoveryUnrankedDirectHlsFailures <= 0 &&
+        !_batterySaverPlaybackActive &&
+        !_isP2pOnlySourceRoute;
+  }
+
   _QualityPassTarget? _qualityPassTargetForCurrentSettings() {
+    if ((_ignoreSavedQualityForResumeRecovery ||
+        _shouldUseFreshAutoQualityForResumeRoute)) {
+      return null;
+    }
     if (_usingGlobalOverrides && _qualityPreferenceMode == 'higher')
       return null;
     if (_batterySaverPlaybackActive ||
@@ -2994,7 +4787,36 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           if (_qualityRank(_qualityLabel(source)) <= 0) source,
       ];
     }
-    if (target == null) return sources;
+    if (target == null) {
+      if (!_ignoreSavedQualityForResumeRecovery ||
+          _resumeRecoveryExcludedQualityRanks.isEmpty) {
+        return sources;
+      }
+      final filtered = <PlaybackSource>[];
+      for (final source in sources) {
+        final sourceRank = _qualityRank(_qualityLabel(source));
+        if (_resumeRecoveryExcludedQualityRanks.contains(sourceRank) ||
+            _shouldSkipUnknownResumeRecoveryQuality(source)) {
+          continue;
+        }
+        filtered.add(source);
+      }
+      if (filtered.length != sources.length) {
+        DiagnosticLog.add(
+          'native resume recovery auto pass filtered excluded qualities '
+          'skipped=${sources.length - filtered.length} '
+          'kept=${filtered.length}',
+        );
+      }
+      return filtered;
+    }
+    if (target.rank != null &&
+        _resumeRecoveryExcludedQualityRanks.contains(target.rank)) {
+      DiagnosticLog.add(
+        'native resume recovery quality pass skipped rank=${target.rank} reason=resume_source_error_excluded_quality',
+      );
+      return const <PlaybackSource>[];
+    }
     if (_usingHigherAvailableFirst &&
         target.rank != null &&
         _highestKnownQualityRank(sources) == target.rank) {
@@ -3012,7 +4834,37 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               (source) => _qualityRank(_qualityLabel(source)) == target.rank,
             )
             .toList();
-    return rankedMatches;
+    final adaptiveFallback = _adaptiveHlsFallbackForTargetPass(
+      sources,
+      target,
+      rankedMatches,
+    );
+    if (adaptiveFallback.isEmpty) return rankedMatches;
+    DiagnosticLog.add(
+      'native quality pass adaptive fallback appended target=${target.label ?? target.rank ?? 'unknown'} fixed=${rankedMatches.length} adaptive=${adaptiveFallback.length} reason=saved_fixed_hls_resilience',
+    );
+    return <PlaybackSource>[...rankedMatches, ...adaptiveFallback];
+  }
+
+  List<PlaybackSource> _adaptiveHlsFallbackForTargetPass(
+    List<PlaybackSource> sources,
+    _QualityPassTarget target,
+    List<PlaybackSource> rankedMatches,
+  ) {
+    final targetRank = target.rank ?? _qualityRank(target.label ?? '');
+    if (targetRank <= 0) return const <PlaybackSource>[];
+    final rankedKeys = {
+      for (final source in rankedMatches)
+        '${source.providerId}|${source.quality ?? 'auto'}|${source.url}',
+    };
+    return [
+      for (final source in sources)
+        if (_isAdaptiveHlsAutoSource(source) &&
+            !rankedKeys.contains(
+              '${source.providerId}|${source.quality ?? 'auto'}|${source.url}',
+            ))
+          source,
+    ];
   }
 
   bool get _usingHigherAvailableFirst {
@@ -3037,7 +4889,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return 'qualityMode=$mode preferred=$preferred qualityPass=$passLabel';
   }
 
-  Future<void> _finishWithNoWorkingSource() async {
+  Future<void> _finishWithNoWorkingSource({
+    bool routeDeadlineExpired = false,
+  }) async {
+    if (routeDeadlineExpired) {
+      if (_routeStartupTerminalStarted) return;
+      _routeStartupTerminalStarted = true;
+      _terminalOpeningCallbackQuarantined = true;
+      _terminalCallbackGate.invalidateTerminal();
+      ++_providerRunId;
+      _providerResolveFutures.clear();
+    }
     _pauseActivePlaybackForLoading('playback_failed');
     DiagnosticLog.add(
       'native playback failed title="$_title" engine=${AppState.playerBehaviorSettings.value.playbackEngine}',
@@ -3069,25 +4931,46 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _nativeProvidersExhausted = true;
       _statusMessage = status;
     });
+    if (routeDeadlineExpired) {
+      _invalidateOpeningSourceAttempt();
+      await _routeStartupOwner.cancelAndSettle();
+    }
     final failureCloseGeneration = ++_failureCloseGeneration;
-    await Future<void>.delayed(_failureReadDelayForRoute);
+    if (!routeDeadlineExpired &&
+        _routeStartupOwner.canChargeOptionalDelay(_failureReadDelayForRoute)) {
+      await Future<void>.delayed(_failureReadDelayForRoute);
+    }
     if (!mounted ||
         _playerClosing ||
         failureCloseGeneration != _failureCloseGeneration ||
         !_nativeProvidersExhausted) {
       return;
     }
-    await _close(
-      _resolverTemporarilyBlocked
-          ? 'native_error:playback_service_temporary_block'
-          : unsupportedSourceClasses
-              ? 'native_error:source_class_not_native'
-              : resolvedOnlyRoute
-                  ? 'native_error:no_playable_source'
-                  : _lastOpenFailureMessage == null
-                      ? 'native_error'
-                      : 'native_error:$_lastOpenFailureMessage',
-    );
+    final result = _resolverTemporarilyBlocked
+        ? 'native_error:playback_service_temporary_block'
+        : unsupportedSourceClasses
+            ? 'native_error:source_class_not_native'
+            : resolvedOnlyRoute
+                ? 'native_error:no_playable_source'
+                : _lastOpenFailureMessage == null
+                    ? 'native_error'
+                    : 'native_error:$_lastOpenFailureMessage';
+    if (routeDeadlineExpired) {
+      await _closeExpiredStartupRoute(result);
+      return;
+    }
+    await _close(result);
+  }
+
+  Future<void> _closeExpiredStartupRoute(String result) async {
+    _hideControlsTimer?.cancel();
+    _stopStallWatchdog();
+    _allowPop = true;
+    _playerClosing = true;
+    _controlsVisible = false;
+    _settingsExpanded = false;
+    _clearGestureHintState();
+    await _forcePopPlayerRoute(result);
   }
 
   Future<bool> _pauseProviderScanForResolverBlock() async {
@@ -3167,22 +5050,46 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     PlaybackSource source, {
     _NativePlaybackEngine? engine,
   }) async {
+    if (!_routeStartupWorkAvailable) return false;
     if (!_isHlsSource(source)) {
       if (engine == _NativePlaybackEngine.libvlc) {
         return _isLibVlcRemoteReadableSource(source);
       }
       return true;
     }
+    final libVlcRelayCandidate = engine == _NativePlaybackEngine.libvlc &&
+        _libVlcContinuousTsRelayEnabled &&
+        _canUseLibVlcHlsRelaySource(
+          source,
+          _NativePlaybackEngine.libvlc,
+        );
     try {
-      final timeout = _isPublicIptvSource(source)
-          ? const Duration(seconds: 4)
-          : const Duration(seconds: 3);
-      final response = await http
-          .get(Uri.parse(source.url), headers: source.headers)
-          .timeout(timeout);
+      final timeout = libVlcRelayCandidate
+          ? _libVlcHlsStartupProbeTimeout
+          : _isPublicIptvSource(source)
+              ? const Duration(seconds: 4)
+              : const Duration(seconds: 3);
+      DiagnosticLog.add(
+        'native hls preflight start provider=${source.providerId} engine=${engine?.id ?? 'auto'} timeout=${timeout.inSeconds}s quality=${_qualityLabel(source)}',
+      );
+      final client = http.Client();
+      void cancelProbe() => client.close();
+      _routeStartupOwner.cancellation.addListener(cancelProbe);
+      late final http.Response response;
+      try {
+        response = await client
+            .get(Uri.parse(source.url), headers: source.headers)
+            .timeout(_routeStartupTimeout(timeout));
+      } finally {
+        _routeStartupOwner.cancellation.removeListener(cancelProbe);
+        client.close();
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         if (_isPublicIptvSource(source)) {
           _lastOpenFailureMessage = _liveTvUnavailableMessage;
+        }
+        if (engine != null) {
+          _recordRouteHlsAccessFailure(source, engine);
         }
         DiagnosticLog.add(
           'native hls preflight failed provider=${source.providerId} status=${response.statusCode}',
@@ -3218,22 +5125,73 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         );
       }
       if (engine == _NativePlaybackEngine.libvlc) {
-        if (_manualLibVlcConfigured && source.headers.isNotEmpty) {
+        if (!_libVlcContinuousTsRelayEnabled) {
           DiagnosticLog.add(
-            'native libvlc hls preflight ok reason=relay_candidate headers=${_headerCountBucket(source.headers.length)}',
+            'native libvlc hls preflight ok reason=direct_candidate headers=${_headerCountBucket(source.headers.length)}',
           );
-        } else if (!await _libVlcHlsForwardingCompatible(
-          source,
-          Uri.parse(source.url),
-          body,
-        )) {
-          return false;
+        } else {
+          final relayCandidate = _canUseLibVlcHlsRelaySource(
+            source,
+            _NativePlaybackEngine.libvlc,
+          );
+          if (deferMobileLibVlcHlsMediaProofToRelay(
+            continuousTsRelayCandidate: relayCandidate,
+          )) {
+            DiagnosticLog.add(
+              'native libvlc hls preflight ok reason=manifest_validated startupProof=continuous_ts_relay provider=${source.providerId} quality=${_qualityLabel(source)}',
+            );
+          }
+          if (_manualLibVlcConfigured && source.headers.isNotEmpty) {
+            DiagnosticLog.add(
+              'native libvlc hls preflight ok reason=relay_candidate headers=${_headerCountBucket(source.headers.length)}',
+            );
+          } else if (!await _libVlcHlsForwardingCompatible(
+            source,
+            Uri.parse(source.url),
+            body,
+          )) {
+            return false;
+          }
         }
       }
       return true;
     } catch (error) {
+      if (!_routeStartupWorkAvailable) {
+        throw const MobilePlaybackRouteStartupExpired();
+      }
       if (_isPublicIptvSource(source)) {
         _lastOpenFailureMessage = _liveTvUnavailableMessage;
+      }
+      if (error is TimeoutException && libVlcRelayCandidate) {
+        _recordRouteHlsAccessFailure(
+          source,
+          _NativePlaybackEngine.libvlc,
+        );
+        DiagnosticLog.add(
+          'native libvlc hls preflight failed provider=${source.providerId} quality=${_qualityLabel(source)} reason=media_segment_probe_timeout',
+        );
+        return false;
+      }
+      if (error is TimeoutException &&
+          engine == _NativePlaybackEngine.exoplayer &&
+          source.sourceClass == PlaybackSourceClass.direct &&
+          !_isLiveTvMode &&
+          !widget.liveMode) {
+        DiagnosticLog.add(
+          'native hls preflight timeout bypassed provider=${source.providerId} engine=${engine?.id ?? 'auto'} quality=${_qualityLabel(source)} reason=vod_player_startup_proof_will_verify',
+        );
+        return true;
+      }
+      if (error is TimeoutException &&
+          engine == _NativePlaybackEngine.libvlc &&
+          !_libVlcContinuousTsRelayEnabled &&
+          source.sourceClass == PlaybackSourceClass.direct &&
+          !_isLiveTvMode &&
+          !widget.liveMode) {
+        DiagnosticLog.add(
+          'native hls preflight timeout bypassed provider=${source.providerId} engine=${engine?.id ?? 'auto'} quality=${_qualityLabel(source)} reason=libvlc_native_direct_hls_startup_proof_will_verify',
+        );
+        return true;
       }
       DiagnosticLog.add(
         'native hls preflight failed provider=${source.providerId} error=${_safeDiagnosticError(error)}',
@@ -3246,6 +5204,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final type = (source.type ?? '').toLowerCase();
     final url = source.url.toLowerCase();
     return type == 'hls' || url.contains('.m3u8');
+  }
+
+  bool _isUnknownDirectMp4AutoSource(PlaybackSource source) {
+    if (source.sourceClass != PlaybackSourceClass.direct) return false;
+    final descriptor = _sourceDiagnosticDescriptor(source);
+    final container = _containerHintFor(source, descriptor);
+    if (container != 'mp4') return false;
+    final quality = _qualityLabel(source).trim().toLowerCase();
+    return quality == 'auto' || _qualityRank(quality) <= 0;
   }
 
   bool _hasLibVlcHeaderForwardingGap(Map<String, String> headers) {
@@ -3312,6 +5279,31 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return null;
   }
 
+  Future<http.Response> _routeOwnedHttpGet(
+    Uri uri, {
+    required Map<String, String> headers,
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    if (!_routeStartupWorkAvailable) {
+      throw const MobilePlaybackRouteStartupExpired();
+    }
+    final client = http.Client();
+    void cancelRequest() => client.close();
+    _routeStartupOwner.cancellation.addListener(cancelRequest);
+    try {
+      final response = await client
+          .get(uri, headers: headers)
+          .timeout(_routeStartupTimeout(timeout));
+      if (!_routeStartupWorkAvailable) {
+        throw const MobilePlaybackRouteStartupExpired();
+      }
+      return response;
+    } finally {
+      _routeStartupOwner.cancellation.removeListener(cancelRequest);
+      client.close();
+    }
+  }
+
   Future<bool> _libVlcHlsForwardingCompatible(
     PlaybackSource source,
     Uri manifestUri,
@@ -3323,9 +5315,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final childUri = _firstHlsChildUri(manifestUri, manifestBody);
     if (childUri == null) return true;
     try {
-      final childResponse = await http
-          .get(childUri, headers: forwardedHeaders)
-          .timeout(const Duration(seconds: 3));
+      final childResponse = await _routeOwnedHttpGet(
+        childUri,
+        headers: forwardedHeaders,
+      );
       if (!_isReadableLibVlcHttpStatus(childResponse.statusCode)) {
         DiagnosticLog.add(
           'native libvlc hls preflight failed reason=header_forwarding_gap stage=child_manifest status=${childResponse.statusCode} headerBuckets=$buckets',
@@ -3344,9 +5337,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       if (segmentUri == null) return true;
       final segmentHeaders = <String, String>{...forwardedHeaders};
       segmentHeaders.putIfAbsent('Range', () => 'bytes=0-1');
-      final segmentResponse = await http
-          .get(segmentUri, headers: segmentHeaders)
-          .timeout(const Duration(seconds: 3));
+      final segmentResponse = await _routeOwnedHttpGet(
+        segmentUri,
+        headers: segmentHeaders,
+      );
       if (!_isReadableLibVlcHttpStatus(segmentResponse.statusCode)) {
         DiagnosticLog.add(
           'native libvlc hls preflight failed reason=header_forwarding_gap stage=media_segment status=${segmentResponse.statusCode} headerBuckets=$buckets',
@@ -3358,6 +5352,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return true;
     } catch (error) {
+      if (!_routeStartupWorkAvailable) {
+        throw const MobilePlaybackRouteStartupExpired();
+      }
       DiagnosticLog.add(
         'native libvlc hls preflight failed reason=header_forwarding_gap error=${_safeDiagnosticError(error)} headerBuckets=$buckets',
       );
@@ -3376,7 +5373,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     PlaybackSource source,
     _NativePlaybackEngine engine,
   ) {
-    return '${engine.id}|${source.providerId}|${_qualityLabel(source)}';
+    return '${engine.id}|${_sourceAttemptKey(source)}';
   }
 
   bool _shouldSkipSourceAfterRouteOpenTimeouts(
@@ -3409,11 +5406,135 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return false;
   }
 
+  bool _shouldSkipLibVlcAfterMedia3RouteRisk(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    if (!_directHlsRouteRiskGuardsEnabled ||
+        engine != _NativePlaybackEngine.libvlc ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source)) {
+      return false;
+    }
+
+    final media3ProviderKey = _routeHlsProviderTimeoutKey(
+      source,
+      _NativePlaybackEngine.exoplayer,
+    );
+    final media3QualityKey = _routeHlsQualityTimeoutKey(
+      source,
+      _NativePlaybackEngine.exoplayer,
+    );
+    final providerTimeouts =
+        _routeHlsProviderOpenTimeouts[media3ProviderKey] ?? 0;
+    final qualityTimeouts = _routeHlsQualityOpenTimeouts[media3QualityKey] ?? 0;
+    final providerAccessFailures =
+        _routeHlsProviderAccessFailures[media3ProviderKey] ?? 0;
+    final qualityAccessFailures =
+        _routeHlsQualityAccessFailures[media3QualityKey] ?? 0;
+    final providerRendererDrifts =
+        _routeHlsProviderRendererDrifts[media3ProviderKey] ?? 0;
+    final qualityRendererDrifts =
+        _routeHlsQualityRendererDrifts[media3QualityKey] ?? 0;
+    final rendererDrifts = providerRendererDrifts + qualityRendererDrifts;
+    if (rendererDrifts > 0 &&
+        providerTimeouts <= 0 &&
+        qualityTimeouts <= 0 &&
+        providerAccessFailures <= 0 &&
+        qualityAccessFailures <= 0) {
+      DiagnosticLog.add(
+        'native libvlc direct hls allowed provider=${source.providerId} sourceClass=${source.sourceClass.wireName} providerIndex=$_providerIndex sourceIndex=$_sourceIndex reason=media3_renderer_drift_route_risk quality=${_qualityLabel(source)} providerRendererDrifts=$providerRendererDrifts qualityRendererDrifts=$qualityRendererDrifts action=try_libvlc_relay',
+      );
+      return false;
+    }
+    if (providerTimeouts <= 0 &&
+        qualityTimeouts <= 0 &&
+        providerAccessFailures <= 0 &&
+        qualityAccessFailures <= 0 &&
+        rendererDrifts <= 0) {
+      return false;
+    }
+
+    DiagnosticLog.add(
+      'native libvlc direct hls skipped provider=${source.providerId} sourceClass=${source.sourceClass.wireName} providerIndex=$_providerIndex sourceIndex=$_sourceIndex reason=media3_direct_hls_route_risk providerTimeouts=$providerTimeouts qualityTimeouts=$qualityTimeouts providerAccessFailures=$providerAccessFailures qualityAccessFailures=$qualityAccessFailures providerRendererDrifts=$providerRendererDrifts qualityRendererDrifts=$qualityRendererDrifts rendererDrifts=$rendererDrifts quality=${_qualityLabel(source)} action=try_fresh_recovery',
+    );
+    return true;
+  }
+
+  bool _shouldDeferLowQualityMedia3DirectHlsResume(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    if (!_directHlsRouteRiskGuardsEnabled ||
+        engine != _NativePlaybackEngine.exoplayer ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source) ||
+        !_hasSavedResumeProgressForRoute ||
+        _isLiveTvMode) {
+      return false;
+    }
+    final rank = _qualityRank(_qualityLabel(source));
+    if (rank <= 0 || rank >= 480) return false;
+
+    if (_isVerifiedCacheFallbackRequest(
+      NativePlaybackRequest(
+        providerId: source.providerId,
+        sources: <PlaybackSource>[source],
+      ),
+    )) {
+      DiagnosticLog.add(
+        'native source low quality hls resume allowed provider=${source.providerId} sourceClass=${source.sourceClass.wireName} providerIndex=$_providerIndex sourceIndex=$_sourceIndex engine=${engine.id} reason=verified_cache_fallback quality=${_qualityLabel(source)}',
+      );
+      return false;
+    }
+
+    final providerKey = _routeHlsProviderTimeoutKey(source, engine);
+    final providerAccessFailures =
+        _routeHlsProviderAccessFailures[providerKey] ?? 0;
+    if (providerAccessFailures >= 2) {
+      DiagnosticLog.add(
+        'native source low quality hls resume allowed provider=${source.providerId} sourceClass=${source.sourceClass.wireName} providerIndex=$_providerIndex sourceIndex=$_sourceIndex engine=${engine.id} reason=higher_renditions_unreadable quality=${_qualityLabel(source)} providerAccessFailures=$providerAccessFailures',
+      );
+      return false;
+    }
+
+    final remainingProviders = _requests.length - _providerIndex - 1;
+    if (remainingProviders < 2) return false;
+
+    DiagnosticLog.add(
+      'native source skipped provider=${source.providerId} sourceClass=${source.sourceClass.wireName} providerIndex=$_providerIndex sourceIndex=$_sourceIndex engine=${engine.id} reason=media3_saved_resume_low_quality_hls_deferred quality=${_qualityLabel(source)} remainingProviders=$remainingProviders action=try_later_provider',
+    );
+    return true;
+  }
+
+  void _recordRouteHlsAccessFailure(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    if (!_directHlsRouteRiskGuardsEnabled ||
+        engine != _NativePlaybackEngine.exoplayer ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source)) {
+      return;
+    }
+    final providerKey = _routeHlsProviderTimeoutKey(source, engine);
+    final qualityKey = _routeHlsQualityTimeoutKey(source, engine);
+    final providerFailures =
+        (_routeHlsProviderAccessFailures[providerKey] ?? 0) + 1;
+    final qualityFailures =
+        (_routeHlsQualityAccessFailures[qualityKey] ?? 0) + 1;
+    _routeHlsProviderAccessFailures[providerKey] = providerFailures;
+    _routeHlsQualityAccessFailures[qualityKey] = qualityFailures;
+    DiagnosticLog.add(
+      'native route hls access failure recorded provider=${source.providerId} engine=${engine.id} quality=${_qualityLabel(source)} providerFailures=$providerFailures qualityFailures=$qualityFailures',
+    );
+  }
+
   void _recordRouteHlsOpenTimeout(
     PlaybackSource source,
     _NativePlaybackEngine engine,
   ) {
-    if (!_limitToFirstQualityPass ||
+    if (!_directHlsRouteRiskGuardsEnabled ||
         engine != _NativePlaybackEngine.exoplayer ||
         source.sourceClass != PlaybackSourceClass.direct ||
         !_isHlsSource(source)) {
@@ -3430,6 +5551,116 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       'native route hls timeout recorded provider=${source.providerId} engine=${engine.id} quality=${_qualityLabel(source)} providerTimeouts=$providerTimeouts qualityTimeouts=$qualityTimeouts',
     );
   }
+
+  void _recordMedia3DirectHlsRendererDriftRisk(PlaybackSource source) {
+    if (!_directHlsRouteRiskGuardsEnabled ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source)) {
+      return;
+    }
+    final providerKey = _routeHlsProviderTimeoutKey(
+      source,
+      _NativePlaybackEngine.exoplayer,
+    );
+    final qualityKey = _routeHlsQualityTimeoutKey(
+      source,
+      _NativePlaybackEngine.exoplayer,
+    );
+    final providerRendererDrifts =
+        (_routeHlsProviderRendererDrifts[providerKey] ?? 0) + 1;
+    final qualityRendererDrifts =
+        (_routeHlsQualityRendererDrifts[qualityKey] ?? 0) + 1;
+    _routeHlsProviderRendererDrifts[providerKey] = providerRendererDrifts;
+    _routeHlsQualityRendererDrifts[qualityKey] = qualityRendererDrifts;
+    _lastDirectHlsRouteRiskAt = DateTime.now();
+    _lastDirectHlsRouteRiskAnchor = _heldPlaybackAnchor(
+      fallback: _resumeProgressAnchorPosition,
+    );
+    DiagnosticLog.add(
+      'native route hls renderer drift risk recorded provider=${source.providerId} reason=media3_renderer_drift_route_risk quality=${_qualityLabel(source)} providerRendererDrifts=$providerRendererDrifts qualityRendererDrifts=$qualityRendererDrifts',
+    );
+  }
+
+  void _markDirectHlsRouteRiskRecovery(
+    PlaybackSource source, {
+    required Duration anchor,
+    required String reason,
+  }) {
+    if (source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source)) {
+      return;
+    }
+    final heldAnchor = _heldPlaybackAnchor(fallback: anchor);
+    if (heldAnchor < const Duration(seconds: 30)) return;
+    _lastDirectHlsRouteRiskAt = DateTime.now();
+    _lastDirectHlsRouteRiskAnchor = heldAnchor;
+    DiagnosticLog.add(
+      'native route hls recovery risk armed provider=${source.providerId} '
+      'quality=${_qualityLabel(source)} anchor=${_lastDirectHlsRouteRiskAnchor.inSeconds}s '
+      'reason=$reason',
+    );
+  }
+
+  bool _hasMedia3DirectHlsRendererDriftRisk(PlaybackSource source) {
+    if (!_directHlsRouteRiskGuardsEnabled ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source)) {
+      return false;
+    }
+    final providerKey = _routeHlsProviderTimeoutKey(
+      source,
+      _NativePlaybackEngine.exoplayer,
+    );
+    final qualityKey = _routeHlsQualityTimeoutKey(
+      source,
+      _NativePlaybackEngine.exoplayer,
+    );
+    return (_routeHlsProviderRendererDrifts[providerKey] ?? 0) > 0 ||
+        (_routeHlsQualityRendererDrifts[qualityKey] ?? 0) > 0;
+  }
+
+  bool _shouldSkipMedia3DirectHlsAfterRendererDrift(PlaybackSource source) {
+    if (!_directHlsRouteRiskGuardsEnabled ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source)) {
+      return false;
+    }
+    if (_sourceCredibleWatchSeconds >= 45) {
+      DiagnosticLog.add(
+        'native source retained provider=${source.providerId} sourceClass=${source.sourceClass.wireName} reason=sustained_media3_hls_playback_after_renderer_drift credibleWatch=${_sourceCredibleWatchSeconds}s quality=${_qualityLabel(source)}',
+      );
+      return false;
+    }
+    final providerKey = _routeHlsProviderTimeoutKey(
+      source,
+      _NativePlaybackEngine.exoplayer,
+    );
+    final qualityKey = _routeHlsQualityTimeoutKey(
+      source,
+      _NativePlaybackEngine.exoplayer,
+    );
+    final providerRendererDrifts =
+        _routeHlsProviderRendererDrifts[providerKey] ?? 0;
+    final qualityRendererDrifts =
+        _routeHlsQualityRendererDrifts[qualityKey] ?? 0;
+    final providerRendererDriftCap = 1;
+    if (providerRendererDrifts <= 0 && qualityRendererDrifts <= 0) {
+      return false;
+    }
+    if (providerRendererDrifts < providerRendererDriftCap) {
+      return false;
+    }
+    DiagnosticLog.add(
+      'native source skipped provider=${source.providerId} sourceClass=${source.sourceClass.wireName} reason=media3_direct_hls_renderer_drift_cap providerRendererDrifts=$providerRendererDrifts qualityRendererDrifts=$qualityRendererDrifts providerRendererDriftCap=$providerRendererDriftCap quality=${_qualityLabel(source)}',
+    );
+    return true;
+  }
+
+  bool get _directHlsRouteRiskGuardsEnabled =>
+      _limitToFirstQualityPass ||
+      _verifiedCacheFallbackStartIndex != null ||
+      _media3DirectHlsStartupProofPending ||
+      _resumeProgressAnchorPosition >= const Duration(seconds: 30);
 
   void _resetRouteHlsTimeoutsForQualitySwitch(PlaybackSource source) {
     if (!_isHlsSource(source)) return;
@@ -3461,9 +5692,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         (key) => key.toLowerCase() == 'range',
       );
       if (!hasRangeHeader) headers['Range'] = 'bytes=0-1';
-      final response = await http
-          .get(uri, headers: headers)
-          .timeout(const Duration(seconds: 3));
+      final response = await _routeOwnedHttpGet(uri, headers: headers);
       final readable = response.statusCode == 200 ||
           response.statusCode == 206 ||
           (response.statusCode >= 300 && response.statusCode < 400);
@@ -3479,6 +5708,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return true;
     } catch (error) {
+      if (!_routeStartupWorkAvailable) {
+        throw const MobilePlaybackRouteStartupExpired();
+      }
       DiagnosticLog.add(
         'native libvlc preflight failed provider=${source.providerId} error=${_safeDiagnosticError(error)}',
       );
@@ -3534,35 +5766,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return baseUri.resolve(child.trim()).scheme.toLowerCase() == 'http';
   }
 
-  _LibVlcProfile _libVlcProfileForSource(PlaybackSource source) {
-    final index = (_libVlcProfileIndexByUrl[source.url] ?? 0).clamp(
-      0,
-      _libVlcProfiles.length - 1,
-    );
-    return _libVlcProfiles[index];
-  }
-
-  bool _advanceLibVlcProfileForSource(
-    PlaybackSource source, {
-    required String reason,
-  }) {
-    final current = (_libVlcProfileIndexByUrl[source.url] ?? 0).clamp(
-      0,
-      _libVlcProfiles.length - 1,
-    );
-    final next = current + 1;
-    if (next >= _libVlcProfiles.length) {
-      DiagnosticLog.add(
-        'native libvlc profile exhausted provider=${source.providerId} current=${_libVlcProfiles[current].id} reason=$reason',
-      );
-      return false;
-    }
-    _libVlcProfileIndexByUrl[source.url] = next;
-    DiagnosticLog.add(
-      'native libvlc profile advance provider=${source.providerId} from=${_libVlcProfiles[current].id} to=${_libVlcProfiles[next].id} reason=$reason',
-    );
-    return true;
-  }
+  _LibVlcProfile _libVlcProfileForSource(PlaybackSource source) =>
+      _mobileLibVlcDriverProfile;
 
   bool _sourceLooksLikeShortVodPlaceholder(
     PlaybackSource source,
@@ -3622,8 +5827,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (!_sourceLooksLikeShortVodPlaceholder(source, controller)) return false;
     _lastOpenFailureMessage = 'This stream is currently unavailable.';
     _forgetVerifiedSource(source, 'short_vod_placeholder');
-    _failedSourceAttempts[source.url] =
-        (_failedSourceAttempts[source.url] ?? 0) + 1;
+    _incrementFailedSourceAttempt(source);
     DiagnosticLog.add(
       'native short placeholder source rejected provider=${source.providerId} sourceClass=${source.sourceClass.wireName} quality=${_qualityLabel(source)} engine=${engine.id} duration=${controller.duration.inSeconds}s expected=${_expectedVodDurationForSanity().inSeconds}s limit=${_shortVodPlaceholderDurationLimit.inSeconds}s startupMs=$startupMs action=try_next_source url=[hidden]',
     );
@@ -3642,6 +5846,990 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return true;
   }
 
+  Future<void> _adoptMobileLibVlcTransport(
+    MobileLibVlcTransport? transport, {
+    required Duration anchor,
+    required bool Function() isStale,
+    bool preserveSeekSettlement = false,
+  }) async {
+    await _mobileLibVlcTransportSubscription?.cancel();
+    _mobileLibVlcTransportSubscription = null;
+    _mobileLibVlcRelayActive = transport != null;
+    _resetLibVlcContinuousTsProof(
+      preserveSeekSettlement: preserveSeekSettlement,
+    );
+    _libVlcContinuousTsTimelineOffset = anchor;
+    if (transport == null) return;
+    _mobileLibVlcTransportSubscription = transport.snapshots.listen((snapshot) {
+      if (isStale()) return;
+      final bufferedPositionAdvanced = snapshot.estimatedBufferedPosition >
+          _libVlcContinuousTsBufferedPosition;
+      _libVlcContinuousTsStreamedBytes = snapshot.totalMediaBytes;
+      _libVlcContinuousTsStreamedSegments = snapshot.completedMediaSegments;
+      _libVlcContinuousTsLastTransportActivityAt =
+          snapshot.lastTransportActivityAt;
+      if (snapshot.terminalFailure != null) {
+        _libVlcContinuousTsUpstreamErrors = 1;
+      }
+      if (bufferedPositionAdvanced && mounted) {
+        setState(() {
+          _libVlcContinuousTsBufferedPosition =
+              snapshot.estimatedBufferedPosition;
+        });
+      }
+    });
+  }
+
+  Future<void> _handleMobileLibVlcCoordinatorRecovered(
+    MobileLibVlcCoordinator coordinator,
+    MobileLibVlcOpenResult result,
+  ) async {
+    if (!mounted ||
+        _playerClosing ||
+        !identical(_mobileLibVlcCoordinator, coordinator) ||
+        result.generation != coordinator.generation ||
+        coordinator.currentCandidate?.attemptIdentity !=
+            result.candidate.attemptIdentity) {
+      return;
+    }
+    final driver = coordinator.currentDriver;
+    if (driver is! _MobileLibVlcDriverAdapter) {
+      return;
+    }
+    final recoveredSource = _mobileLibVlcCandidateSources?[result.candidate];
+    if (recoveredSource == null) {
+      return;
+    }
+    final recoveredController = driver.controller;
+    final oldController = _controller;
+    if (oldController != null &&
+        !identical(oldController, recoveredController)) {
+      _detachControllerUpdateListener(oldController);
+    }
+    _detachControllerUpdateListener(recoveredController);
+    _activeMobileLibVlcSessionTimeline = driver.timeline;
+    _controller = recoveredController;
+    _attachControllerUpdateListener(recoveredController);
+    _activeSource = recoveredSource;
+    var recoveredIndex = _activeSources.indexWhere(
+      (candidate) =>
+          candidate.providerId == recoveredSource.providerId &&
+          candidate.url == recoveredSource.url,
+    );
+    if (recoveredIndex < 0) {
+      _activeSources = <PlaybackSource>[
+        ..._activeSources,
+        recoveredSource,
+      ];
+      recoveredIndex = _activeSources.length - 1;
+    }
+    _sourceIndex = recoveredIndex;
+    _activeSourceVerifiedForSession = true;
+    _activeSourceHasZeroClockMetadata =
+        recoveredController.duration.inMicroseconds <= 0 &&
+            recoveredController.size == Size.zero;
+    _rememberCrediblePlaybackAnchor(
+      result.anchor,
+      reason: 'libvlc_coordinator_runtime_recovery',
+    );
+    _applyStagedMobileLibVlcTransportMetadata(
+      result.candidate,
+      result.generation,
+      recoveredSource,
+    );
+    await _adoptMobileLibVlcTransport(
+      coordinator.currentTransport,
+      anchor: result.anchor,
+      isStale: () =>
+          _playerClosing ||
+          !mounted ||
+          !identical(_mobileLibVlcCoordinator, coordinator) ||
+          result.generation != coordinator.generation,
+    );
+    if (!mounted ||
+        _playerClosing ||
+        !identical(_mobileLibVlcCoordinator, coordinator) ||
+        result.generation != coordinator.generation) {
+      return;
+    }
+    DiagnosticLog.add(
+      'native libvlc coordinator recovery proved '
+      'anchor=${result.anchor.inSeconds}s',
+    );
+    _saveNativeProgress(force: true);
+    setState(() {
+      _loading = false;
+      _statusMessage = null;
+      _playbackWaitMessage = null;
+      _playbackWaitMessagePausedPlayback = false;
+    });
+    _ensureSubtitlesLoading();
+    _scheduleControlsHide();
+  }
+
+  Future<void> _handleMobileLibVlcCoordinatorFailure(
+    MobileLibVlcCoordinator coordinator,
+    MobileLibVlcTerminalFailure failure,
+  ) async {
+    if (!mounted ||
+        _playerClosing ||
+        !identical(_mobileLibVlcCoordinator, coordinator)) {
+      return;
+    }
+    _trackLastKnownPlaybackPosition();
+    _saveNativeProgress(force: true);
+    _lastOpenFailureMessage = 'libVLC could not continue this source.';
+    DiagnosticLog.add(
+      'native libvlc coordinator terminal failure '
+      'kind=${failure.kind.name} anchor=${failure.anchor.inSeconds}s',
+    );
+    await _finishWithNoWorkingSource();
+  }
+
+  String _mobileLibVlcRenditionScope(
+    MobileLibVlcSourceCandidate candidate,
+    PlaybackSource source,
+  ) {
+    final providerId = source.providerId.trim().toLowerCase();
+    final sourceId = (source.sourceId ?? '').trim().toLowerCase();
+    if (sourceId.isNotEmpty) {
+      return '$providerId|source:$sourceId';
+    }
+    final mirrorGroup = (source.mirrorGroupId ?? '').trim().toLowerCase();
+    if (mirrorGroup.isNotEmpty) {
+      return '$providerId|mirror:$mirrorGroup';
+    }
+    final uri = Uri.tryParse(source.url) ?? candidate.uri;
+    return '$providerId|route:${uri.host.toLowerCase()}${uri.path}';
+  }
+
+  Future<bool> _openLibVlcSourceWithCoordinator(
+    PlaybackSource source, {
+    Duration? resumePosition,
+    String? statusMessage,
+    bool quietRecovery = false,
+    bool saveProgressBeforeOpen = true,
+  }) async {
+    if (_playerClosing) return false;
+    final openingToken = ++_openingSourceToken;
+    final openingRouteStartupOwner = _routeStartupOwner;
+    final openingBudgetOwner = _libVlcSeekOwner ?? openingRouteStartupOwner;
+    final openingRouteStartupGeneration = openingRouteStartupOwner.generation;
+    _openingSource = true;
+    final openStopwatch = Stopwatch()..start();
+    _stopStallWatchdog();
+    _openingGuardTimer?.cancel();
+    if (saveProgressBeforeOpen) {
+      _trackLastKnownPlaybackPosition();
+      _saveNativeProgress(force: true);
+    }
+    await _disposeCurrentController(
+      awaitLibVlcRelease: true,
+      saveProgress: saveProgressBeforeOpen,
+    );
+    if (_playerClosing || openingToken != _openingSourceToken || !mounted) {
+      _openingSource = false;
+      return false;
+    }
+
+    _nativeWallClockStartedAt = null;
+    _lastSavedSecond = -1;
+    _resetPlaybackIntegritySample();
+    _lastCadencePosition = Duration.zero;
+    _lastCadenceSampleAt = null;
+    _playbackCadenceSamples = 0;
+    _resetPlaybackCadenceCorrection();
+    _activeSourceHasZeroClockMetadata = false;
+    _activeSourceVerifiedForSession = false;
+    _activeSource = null;
+    _clearControllerErrorGrace();
+    _resetLibVlcContinuousTsProof();
+
+    final openingStatus = statusMessage ?? _openStatusFor(source.providerId);
+    _logPlaybackStatus(
+      quietRecovery ? 'Recovering playback' : openingStatus,
+      reason: quietRecovery ? 'open_source_quiet_recovery' : 'open_source',
+    );
+    setState(() {
+      if (!quietRecovery) {
+        _loading = true;
+        _playbackWaitMessage = null;
+        _playbackWaitMessagePausedPlayback = false;
+        _statusMessage = openingStatus;
+      }
+      _nativeProvidersExhausted = false;
+    });
+
+    final requestedCoordinatorAnchor = resumePosition ??
+        _preOpenPreferredResumePosition(
+          source,
+          _NativePlaybackEngine.libvlc,
+        );
+    final deferP2pResumeUntilProof =
+        source.sourceClass == PlaybackSourceClass.p2p && resumePosition == null;
+    final deferredP2pResumeAnchor = deferP2pResumeUntilProof
+        ? _savedResumePositionFor(Duration.zero)
+        : Duration.zero;
+    final startBehavior = AppState.playerBehaviorSettings.value.startBehavior;
+    final explicitStartOver = requestedCoordinatorAnchor <= Duration.zero &&
+        (resumePosition != null ||
+            startBehavior == 'restart' ||
+            (_resumePromptHandled && !_resumePromptAccepted));
+    final coordinatorAnchor = deferP2pResumeUntilProof
+        ? Duration.zero
+        : explicitStartOver
+            ? Duration.zero
+            : preserveMobileLibVlcAnchor(
+                current: _currentPlaybackResumeAnchor(),
+                candidate: requestedCoordinatorAnchor,
+                explicitSeek: false,
+              );
+    final openReason = explicitStartOver
+        ? MobileLibVlcOpenReason.explicitStartOver
+        : coordinatorAnchor > Duration.zero
+            ? MobileLibVlcOpenReason.resume
+            : MobileLibVlcOpenReason.initial;
+    final requestedIndex = _activeSources.indexWhere(
+      (candidate) =>
+          candidate.providerId == source.providerId &&
+          candidate.url == source.url,
+    );
+    final candidateSourcePool = requestedIndex >= 0
+        ? _activeSources
+        : <PlaybackSource>[..._activeSources, source];
+    final allCandidateEntries =
+        <MapEntry<MobileLibVlcSourceCandidate, PlaybackSource>>[
+      for (var index = 0; index < candidateSourcePool.length; index += 1)
+        (() {
+          final candidateSource = candidateSourcePool[index];
+          final sourceId = (candidateSource.sourceId ?? '').trim();
+          final candidate = MobileLibVlcSourceCandidate(
+            id: sourceId.isEmpty ? 'candidate-$index' : sourceId,
+            mirrorGroup:
+                candidateSource.mirrorGroupId ?? 'candidate-mirror-$index',
+            qualityLabel: _qualityLabel(candidateSource),
+            uri: Uri.parse(candidateSource.url),
+            headers: candidateSource.headers,
+            providerId: candidateSource.providerId,
+            audioLanguage: candidateSource.language ?? '',
+            requiresTransport: !widget.liveMode &&
+                _isHlsSource(candidateSource) &&
+                _libVlcContinuousTsRelayEnabled,
+          );
+          return MapEntry(candidate, candidateSource);
+        })(),
+    ];
+    final candidateSources =
+        Map<MobileLibVlcSourceCandidate, PlaybackSource>.fromEntries(
+      allCandidateEntries,
+    );
+    final sessionTimelines = <String, MobileLibVlcSessionTimeline>{};
+    final rejectedRenditionHeightsByScope = <String, Set<int>>{};
+    _mobileLibVlcCandidateSources = candidateSources;
+    final candidates = requestedIndex >= 0
+        ? allCandidateEntries
+            .skip(requestedIndex)
+            .map((entry) => entry.key)
+            .toList(growable: false)
+        : <MobileLibVlcSourceCandidate>[allCandidateEntries.last.key];
+
+    late final MobileLibVlcCoordinator coordinator;
+    String? openingStaleReason() {
+      final transactionOwner = _libVlcSeekOwner ?? _libVlcSourceSwitchOwner;
+      return mobileLibVlcOpeningStaleReason(
+        playerClosing: _playerClosing,
+        mounted: mounted,
+        routeOwnerCurrent:
+            identical(_routeStartupOwner, openingRouteStartupOwner),
+        routeOwnerAvailable: openingRouteStartupOwner.ownsAttempt(
+          openingRouteStartupGeneration,
+        ),
+        transactionOwnerPresent: transactionOwner != null,
+        transactionOwnerAvailable: transactionOwner?.ownsAttempt(
+              transactionOwner.generation,
+            ) ??
+            false,
+        openingTokenCurrent: openingToken == _openingSourceToken,
+        coordinatorCurrent: identical(_mobileLibVlcCoordinator, coordinator),
+      );
+    }
+
+    bool openingIsStale() => openingStaleReason() != null;
+    MobileLibVlcTerminalFailure cancelledFailure() {
+      return MobileLibVlcTerminalFailure(
+        kind: MobileLibVlcFailureKind.cancelled,
+        message: 'The libVLC opening attempt was superseded.',
+        anchor: coordinatorAnchor,
+      );
+    }
+
+    var freshCandidateOrdinal = allCandidateEntries.length;
+
+    MobileLibVlcSourceCandidate registerFreshCandidate(
+      PlaybackSource freshSource,
+    ) {
+      final sourceId = (freshSource.sourceId ?? '').trim();
+      final candidate = MobileLibVlcSourceCandidate(
+        id: sourceId.isEmpty
+            ? 'fresh-candidate-${freshCandidateOrdinal++}'
+            : sourceId,
+        mirrorGroup: freshSource.mirrorGroupId ??
+            'fresh-mirror-${freshCandidateOrdinal++}',
+        qualityLabel: _qualityLabel(freshSource),
+        uri: Uri.parse(freshSource.url),
+        headers: freshSource.headers,
+        providerId: freshSource.providerId,
+        audioLanguage: freshSource.language ?? '',
+        requiresTransport: !widget.liveMode &&
+            _isHlsSource(freshSource) &&
+            _libVlcContinuousTsRelayEnabled,
+      );
+      rejectedRenditionHeightsByScope.remove(
+        _mobileLibVlcRenditionScope(candidate, freshSource),
+      );
+      candidateSources[candidate] = freshSource;
+      _mobileLibVlcCandidateSources?[candidate] = freshSource;
+      return candidate;
+    }
+
+    Future<List<PlaybackSource>> resolveFreshProviderSources(
+      String providerId,
+    ) async {
+      if (providerId.trim().isEmpty || openingIsStale()) {
+        return const <PlaybackSource>[];
+      }
+      final timeout = _providerResolveTimeoutFor(providerId);
+      try {
+        final freshSources = await _expandQualitySources(
+          await _runCancelableProviderWork<List<PlaybackSource>>(
+            timeout: timeout,
+            operation: (cancellation) =>
+                _resolveRecoveryProvider(providerId, cancellation),
+          ),
+        );
+        if (openingIsStale()) throw cancelledFailure();
+        return _nativePlayableSources(
+          _prioritizePreferredQuality(freshSources),
+        );
+      } catch (error) {
+        if (error is MobileLibVlcTerminalFailure) rethrow;
+        DiagnosticLog.add(
+          'native libvlc fresh provider session unavailable '
+          'error=${_safeDiagnosticError(error)}',
+        );
+        return const <PlaybackSource>[];
+      }
+    }
+
+    Future<MobileLibVlcSourceCandidate?> refreshCurrentCandidate(
+      MobileLibVlcSourceCandidate candidate,
+    ) async {
+      final currentSource = candidateSources[candidate];
+      if (currentSource == null) return null;
+      final freshSources = await resolveFreshProviderSources(
+        currentSource.providerId,
+      );
+      if (freshSources.isEmpty) return null;
+      final currentSourceId = (currentSource.sourceId ?? '').trim();
+      final currentQuality = _qualityLabel(currentSource);
+      final currentLanguage = (currentSource.language ?? '').trim();
+      PlaybackSource? selected;
+      for (final freshSource in freshSources) {
+        final freshSourceId = (freshSource.sourceId ?? '').trim();
+        if (currentSourceId.isNotEmpty && freshSourceId == currentSourceId) {
+          selected = freshSource;
+          break;
+        }
+        if (selected == null &&
+            freshSource.mirrorGroupId == currentSource.mirrorGroupId &&
+            _qualityLabel(freshSource) == currentQuality &&
+            (freshSource.language ?? '').trim() == currentLanguage) {
+          selected = freshSource;
+        }
+      }
+      selected ??= freshSources.firstWhere(
+        (freshSource) => _qualityLabel(freshSource) == currentQuality,
+        orElse: () => freshSources.first,
+      );
+      return registerFreshCandidate(selected);
+    }
+
+    Future<List<MobileLibVlcSourceCandidate>> resolveFreshCandidates() async {
+      if (openingIsStale()) {
+        return const <MobileLibVlcSourceCandidate>[];
+      }
+      _showMobileLibVlcFindingAnotherSourceStatus();
+      final freshSources = <PlaybackSource>[];
+      final freshRequestResolver = _resolveFreshRequests;
+      if (freshRequestResolver != null) {
+        try {
+          final freshRequests =
+              await _runCancelableProviderWork<List<NativePlaybackRequest>>(
+            timeout: const Duration(seconds: 12),
+            operation: freshRequestResolver,
+          );
+          if (openingIsStale()) throw cancelledFailure();
+          for (final request
+              in mobilePrioritizeExplicitLibVlcRequestsByTransport(
+            _prioritizeResolvedFreshRequests(
+              freshRequests
+                  .where(
+                    (request) => request.sources.isNotEmpty,
+                  )
+                  .toList(growable: false),
+            ),
+            explicitLibVlc: _manualLibVlcConfigured,
+          )) {
+            final expandedSources =
+                await _expandQualitySources(request.sources);
+            if (openingIsStale()) throw cancelledFailure();
+            freshSources.addAll(
+              _nativePlayableSources(
+                _prioritizePreferredQuality(expandedSources),
+              ),
+            );
+          }
+        } catch (error) {
+          if (error is MobileLibVlcTerminalFailure) rethrow;
+          DiagnosticLog.add(
+            'native libvlc fresh route session unavailable '
+            'error=${_safeDiagnosticError(error)}',
+          );
+        }
+      }
+
+      if (freshSources.isEmpty) {
+        final providerIds = <String>{
+          if ((_activeSource?.providerId ?? '').trim().isNotEmpty)
+            _activeSource!.providerId,
+          for (final mappedSource in candidateSources.values)
+            if (mappedSource.providerId.trim().isNotEmpty)
+              mappedSource.providerId,
+        };
+        for (final providerId in providerIds) {
+          freshSources.addAll(
+            await resolveFreshProviderSources(providerId),
+          );
+          if (freshSources.isNotEmpty) break;
+        }
+      }
+
+      final seen = <String>{};
+      final freshCandidates = <MobileLibVlcSourceCandidate>[];
+      for (final freshSource in freshSources) {
+        final headerEntries = freshSource.headers.entries.toList()
+          ..sort((left, right) => left.key.compareTo(right.key));
+        final identity = <String>[
+          freshSource.providerId,
+          freshSource.url,
+          for (final entry in headerEntries) '${entry.key}:${entry.value}',
+        ].join('|');
+        if (!seen.add(identity)) continue;
+        freshCandidates.add(registerFreshCandidate(freshSource));
+      }
+      return freshCandidates;
+    }
+
+    coordinator = MobileLibVlcCoordinator(
+      driverFactory: (candidate, playbackUri) async {
+        if (openingIsStale()) throw cancelledFailure();
+        final originalSource = candidateSources[candidate];
+        if (originalSource == null) {
+          throw StateError('The libVLC source mapping is unavailable.');
+        }
+        final usesRelay = playbackUri != candidate.uri;
+        PlaybackSource? preparedP2pSource;
+        if (originalSource.sourceClass == PlaybackSourceClass.p2p) {
+          preparedP2pSource = await _controllerSourceFor(
+            originalSource,
+            _NativePlaybackEngine.libvlc,
+            resumePosition: coordinatorAnchor,
+          );
+          if (openingIsStale()) throw cancelledFailure();
+        }
+        final sessionTimeline = sessionTimelines.putIfAbsent(
+          candidate.attemptIdentity,
+          () => MobileLibVlcSessionTimeline(anchor: coordinatorAnchor),
+        );
+        final PlaybackSource driverSource;
+        if (preparedP2pSource != null) {
+          driverSource = preparedP2pSource;
+        } else {
+          driverSource = usesRelay
+              ? originalSource.copyWith(
+                  url: playbackUri.toString(),
+                  type: 'ts',
+                  headers: const <String, String>{},
+                )
+              : originalSource;
+        }
+        _recordLibVlcStartupStage('native_driver_handoff');
+        final publishControllerImmediately = coordinator.currentDriver == null;
+        final driverGeneration = coordinator.generation;
+        _NativePlaybackController? publishedController;
+        final driver = _MobileLibVlcDriverAdapter(
+          source: driverSource,
+          liveMode: widget.liveMode,
+          volume: publishControllerImmediately ? _volumePreview : 0,
+          playbackSpeed: _playbackSpeed,
+          fitMode: _fitMode,
+          timeline: usesRelay ? sessionTimeline : null,
+          onControllerReady: (controller) {
+            if (openingIsStale() ||
+                driverGeneration != coordinator.generation) {
+              return;
+            }
+            if (!publishControllerImmediately) {
+              _stagedMobileLibVlcControllers[driverGeneration] = controller;
+              if (mounted) setState(() {});
+              return;
+            }
+            final previousController = _controller;
+            if (previousController != null &&
+                !identical(previousController, controller)) {
+              _detachControllerUpdateListener(previousController);
+            }
+            publishedController = controller;
+            _activeMobileLibVlcSessionTimeline =
+                usesRelay ? sessionTimeline : null;
+            _controller = controller;
+            _attachControllerUpdateListener(controller);
+            setState(() {});
+          },
+        );
+        if (openingIsStale() || driverGeneration != coordinator.generation) {
+          _removeStagedMobileLibVlcController(
+            driverGeneration,
+            driver.controller,
+          );
+          if (identical(_controller, publishedController)) {
+            _controller = null;
+            final controllerToDetach = publishedController;
+            if (controllerToDetach != null) {
+              _detachControllerUpdateListener(controllerToDetach);
+            }
+            if (mounted) setState(() {});
+          }
+          await driver.dispose();
+          throw cancelledFailure();
+        }
+        return driver;
+      },
+      transportFactory: (candidate, anchor) async {
+        final staleBucket = openingStaleReason();
+        if (staleBucket != null) {
+          DiagnosticLog.add(
+            'native libvlc transactional transport rejected reason=opening_stale staleBucket=$staleBucket',
+          );
+          throw cancelledFailure();
+        }
+        if (!candidate.requiresTransport) {
+          DiagnosticLog.add(
+            'native libvlc transactional transport skipped reason=transport_not_required',
+          );
+          return null;
+        }
+        final preparingSwitch = coordinator.currentDriver != null;
+        if (!preparingSwitch) {
+          await _mobileLibVlcTransportSubscription?.cancel();
+          _mobileLibVlcTransportSubscription = null;
+          _mobileLibVlcRelayActive = false;
+          _resetLibVlcContinuousTsProof();
+        }
+        final source = candidateSources[candidate];
+        if (source == null) {
+          DiagnosticLog.add(
+            'native libvlc transactional transport rejected reason=source_mapping_missing',
+          );
+          return null;
+        }
+        if (!_canUseLibVlcHlsRelaySource(
+          source,
+          _NativePlaybackEngine.libvlc,
+        )) {
+          DiagnosticLog.add(
+            'native libvlc transactional transport rejected reason=relay_capability_unavailable',
+          );
+          return null;
+        }
+        final renditionScope = _mobileLibVlcRenditionScope(candidate, source);
+        final sessionTimeline = MobileLibVlcSessionTimeline(anchor: anchor);
+        sessionTimelines[candidate.attemptIdentity] = sessionTimeline;
+        final stagedTransportMetadata =
+            preparingSwitch ? _StagedMobileLibVlcTransportMetadata() : null;
+        final stagedTransportKey = (candidate, coordinator.generation);
+        if (stagedTransportMetadata != null) {
+          _stagedMobileLibVlcTransportMetadata[stagedTransportKey] =
+              stagedTransportMetadata;
+        }
+        MobileLibVlcRelayTransport transport;
+        try {
+          _recordLibVlcStartupStage('relay_transport_start');
+          transport = await MobileLibVlcRelayTransport.start(
+            candidate: candidate,
+            anchor: anchor,
+            currentPlaybackPosition: () =>
+                sessionTimeline.absolutePlaybackPosition,
+            targetHeight: _libVlcContinuousTsTargetHeight,
+            excludedHeights: rejectedRenditionHeightsByScope[renditionScope] ??
+                const <int>{},
+            onDuration: (duration) {
+              if (openingIsStale() || duration <= Duration.zero) return;
+              if (stagedTransportMetadata != null &&
+                  !stagedTransportMetadata.committed) {
+                stagedTransportMetadata.duration = duration;
+                return;
+              }
+              _libVlcContinuousTsDurationAccepted = true;
+              setState(() {
+                _lastKnownPlaybackDuration = duration;
+              });
+              _maybeClearLibVlcContinuousTsWaitMessage(
+                reason: 'libvlc_coordinator_transport_duration',
+              );
+            },
+            onRenditionSelected: (selectedHeight) {
+              if (openingIsStale() || selectedHeight <= 0) return;
+              if (stagedTransportMetadata != null &&
+                  !stagedTransportMetadata.committed) {
+                stagedTransportMetadata.selectedHeight = selectedHeight;
+              }
+            },
+            onRenditionFailure: (failedHeight) {
+              if (openingIsStale() || failedHeight <= 1) return;
+              rejectedRenditionHeightsByScope
+                  .putIfAbsent(renditionScope, () => <int>{})
+                  .add(failedHeight);
+              if (stagedTransportMetadata != null &&
+                  !stagedTransportMetadata.committed) {
+                stagedTransportMetadata.failedHeights.add(failedHeight);
+                return;
+              }
+              DiagnosticLog.add(
+                'native libvlc coordinator rendition rejected '
+                'height=$failedHeight action=coordinator_recovery',
+              );
+            },
+            onTimelineOffset: (offset) {
+              if (openingIsStale()) return;
+              sessionTimeline.recordTimelineOffset(offset);
+              if (stagedTransportMetadata != null &&
+                  !stagedTransportMetadata.committed) {
+                stagedTransportMetadata.timelineOffset = offset;
+                return;
+              }
+              _libVlcContinuousTsTimelineOffset = offset;
+            },
+            onEvent: DiagnosticLog.add,
+          );
+        } catch (_) {
+          if (identical(
+            _stagedMobileLibVlcTransportMetadata[stagedTransportKey],
+            stagedTransportMetadata,
+          )) {
+            _stagedMobileLibVlcTransportMetadata.remove(stagedTransportKey);
+          }
+          rethrow;
+        }
+        if (openingIsStale()) {
+          if (identical(
+            _stagedMobileLibVlcTransportMetadata[stagedTransportKey],
+            stagedTransportMetadata,
+          )) {
+            _stagedMobileLibVlcTransportMetadata.remove(stagedTransportKey);
+          }
+          await transport.stop();
+          throw cancelledFailure();
+        }
+        if (!preparingSwitch) {
+          await _adoptMobileLibVlcTransport(
+            transport,
+            anchor: anchor,
+            isStale: openingIsStale,
+          );
+        }
+        return transport;
+      },
+      currentRefresher: refreshCurrentCandidate,
+      freshResolver: resolveFreshCandidates,
+      startupTimeout: _sourceInitializeTimeout(
+        source,
+        _NativePlaybackEngine.libvlc,
+      ),
+    );
+    _mobileLibVlcCoordinator = coordinator;
+
+    final protectedResumeAnchor =
+        deferP2pResumeUntilProof ? deferredP2pResumeAnchor : coordinatorAnchor;
+    if (protectedResumeAnchor > Duration.zero || explicitStartOver) {
+      _resumeProgressAnchorPosition = preserveMobileLibVlcAnchor(
+        current: _resumeProgressAnchorPosition,
+        candidate: protectedResumeAnchor,
+        explicitSeek: explicitStartOver,
+      );
+      _resumeProgressAnchorLogSecond = -1;
+    }
+
+    try {
+      _recordLibVlcStartupStage('coordinator_open_start');
+      final result = await coordinator.open(
+        candidates: candidates,
+        anchor: coordinatorAnchor,
+        reason: openReason,
+        isLive: widget.liveMode,
+        rejectedTransportSessions: _libVlcLaunchRejectionCircuit
+            .rejectedSessionsFor(_libVlcLaunchGeneration),
+        routeStartupDeadline: openingBudgetOwner.deadline,
+        routeStartupRemainingBudget: () =>
+            openingBudgetOwner.remainingWorkBudget,
+      );
+      if (openingIsStale()) {
+        await coordinator.close();
+        return false;
+      }
+      final provedSource = candidateSources[result.candidate];
+      final controller = _controller;
+      if (provedSource == null || controller == null) {
+        throw StateError('The proved libVLC source is unavailable.');
+      }
+      _activeSource = provedSource;
+      final provedSourceIndex = _activeSources.indexWhere(
+        (candidate) =>
+            candidate.providerId == provedSource.providerId &&
+            candidate.url == provedSource.url,
+      );
+      if (provedSourceIndex >= 0) {
+        _sourceIndex = provedSourceIndex;
+      }
+      _activeSourceVerifiedForSession = true;
+      _activeSourceHasZeroClockMetadata =
+          controller.duration <= Duration.zero && controller.size == Size.zero;
+      var provedPlaybackAnchor = coordinatorAnchor;
+      Duration deferredP2pResumePosition = Duration.zero;
+      PlaybackSource? deferredP2pControllerSource;
+      if (deferP2pResumeUntilProof) {
+        final hasSavedResume =
+            _savedResumePositionFor(controller.duration) > Duration.zero;
+        if (hasSavedResume) {
+          await controller.pause();
+          if (openingIsStale()) {
+            await coordinator.close();
+            return false;
+          }
+          if (startBehavior == 'ask' && !_resumePromptHandled) {
+            setState(() {
+              _loading = false;
+              _statusMessage = null;
+              _playbackWaitMessage = null;
+              _playbackWaitMessagePausedPlayback = false;
+            });
+          }
+        }
+        final selectedStartPosition =
+            await _resumePositionFor(controller.duration);
+        if (openingIsStale()) {
+          await coordinator.close();
+          return false;
+        }
+        if (selectedStartPosition > Duration.zero) {
+          _resumeProgressAnchorPosition = preserveMobileLibVlcAnchor(
+            current: _resumeProgressAnchorPosition,
+            candidate: selectedStartPosition,
+            explicitSeek: false,
+          );
+          _resumeProgressAnchorLogSecond = -1;
+          final activeDriver = coordinator.currentDriver;
+          if (activeDriver is _MobileLibVlcDriverAdapter) {
+            deferredP2pControllerSource = activeDriver.source;
+          }
+          deferredP2pResumePosition = selectedStartPosition;
+          await controller.play();
+          provedPlaybackAnchor = selectedStartPosition;
+        } else if (hasSavedResume) {
+          _clearUnprovedResumePlaybackState(
+            reason: 'libvlc_p2p_post_proof_start_over',
+          );
+          await controller.play();
+        }
+        if (openingIsStale()) {
+          await coordinator.close();
+          return false;
+        }
+      }
+      final shouldPromptForResume = resumePosition == null &&
+          !deferP2pResumeUntilProof &&
+          coordinatorAnchor > Duration.zero &&
+          !_preferSavedResumeOnInitialOpen &&
+          startBehavior == 'ask' &&
+          !_resumePromptHandled &&
+          _resumePromptCanOpenForController(controller);
+      if (shouldPromptForResume) {
+        await controller.pause();
+        if (openingIsStale()) {
+          await coordinator.close();
+          return false;
+        }
+        setState(() {
+          _loading = false;
+          _statusMessage = null;
+          _playbackWaitMessage = null;
+          _playbackWaitMessagePausedPlayback = false;
+        });
+        final selectedStartPosition =
+            await _resumePositionFor(controller.duration);
+        if (openingIsStale()) {
+          if (identical(_mobileLibVlcCoordinator, coordinator)) {
+            await _disposeCurrentController(
+              updateUi: false,
+              awaitLibVlcRelease: true,
+              saveProgress: false,
+            );
+          } else {
+            await coordinator.close();
+          }
+          return false;
+        }
+        if (selectedStartPosition <= Duration.zero) {
+          _clearUnprovedResumePlaybackState(
+            reason: 'libvlc_coordinator_resume_prompt_start_over',
+          );
+          return _openLibVlcSourceWithCoordinator(
+            provedSource,
+            resumePosition: Duration.zero,
+            statusMessage: openingStatus,
+            quietRecovery: quietRecovery,
+            saveProgressBeforeOpen: false,
+          );
+        }
+        await controller.play();
+        if (openingIsStale()) {
+          await coordinator.close();
+          return false;
+        }
+      }
+      _preferSavedResumeOnInitialOpen = false;
+      _nativeWallClockStartedAt = DateTime.now();
+      _lastSavedSecond = -1;
+      _resetPlaybackIntegritySample();
+      _clearFailedSourceAttempt(provedSource);
+      if (provedPlaybackAnchor > Duration.zero) {
+        _rememberCrediblePlaybackAnchor(
+          provedPlaybackAnchor,
+          reason: 'libvlc_coordinator_open_anchor',
+        );
+      } else {
+        _resumeProgressAnchorPosition = Duration.zero;
+        _resumeProgressAnchorLogSecond = -1;
+      }
+      if (provedSource.subtitles.isNotEmpty && _subtitles.isEmpty) {
+        _subtitles = provedSource.subtitles;
+      }
+      await DiagnosticLog.markNativeEngineActive(
+        engineId: _NativePlaybackEngine.libvlc.id,
+        reason: 'coordinator_startup_proved',
+      );
+      if (openingIsStale()) {
+        await coordinator.close();
+        return false;
+      }
+      _recordNativeOpenSuccess(
+        provedSource,
+        controller,
+        engine: _NativePlaybackEngine.libvlc,
+        startupMs: openStopwatch.elapsedMilliseconds,
+        reason: 'coordinator_startup_proved',
+      );
+      _openingSource = false;
+      _userPaused = false;
+      setState(() {
+        _loading = false;
+        _statusMessage = null;
+        _playbackWaitMessage = null;
+        _playbackWaitMessagePausedPlayback = false;
+      });
+      coordinator.startHealthMonitoring(
+        isLive: widget.liveMode,
+        onRecovered: (result) =>
+            _handleMobileLibVlcCoordinatorRecovered(coordinator, result),
+        onTerminalFailure: (failure) =>
+            _handleMobileLibVlcCoordinatorFailure(coordinator, failure),
+      );
+      _startStallWatchdog();
+      _ensureSubtitlesLoading();
+      _scheduleControlsHide();
+      if (deferredP2pResumePosition > Duration.zero &&
+          deferredP2pControllerSource != null) {
+        unawaited(
+          _restoreP2pResumeAfterProof(
+            coordinator: coordinator,
+            controller: controller,
+            controllerSource: deferredP2pControllerSource,
+            originalSource: provedSource,
+            position: deferredP2pResumePosition,
+          ),
+        );
+      }
+      final cancelledProviderRunId = ++_providerRunId;
+      DiagnosticLog.add(
+        'native provider scan ownership advanced '
+        'runId=$cancelledProviderRunId '
+        'reason=libvlc_coordinator_open_succeeded '
+        'engine=libvlc '
+        'position=${_currentPlaybackResumeAnchor().inSeconds}s',
+      );
+      return true;
+    } catch (error) {
+      _openingGuardTimer?.cancel();
+      final stillOwnsOpen = !openingIsStale();
+      if (stillOwnsOpen) {
+        _openingSource = false;
+      }
+      if (!stillOwnsOpen) return false;
+      await _disposeCurrentController(
+        updateUi: false,
+        awaitLibVlcRelease: true,
+        saveProgress: false,
+      );
+      _activeSource = null;
+      if (error is MobileLibVlcTerminalFailure) {
+        _resumeProgressAnchorPosition = preserveMobileLibVlcAnchor(
+          current: _resumeProgressAnchorPosition,
+          candidate: error.anchor,
+          explicitSeek: explicitStartOver,
+        );
+        if (!explicitStartOver) {
+          _rememberCrediblePlaybackAnchor(
+            _resumeProgressAnchorPosition,
+            reason: 'libvlc_coordinator_failed_open_anchor',
+          );
+        }
+        _lastOpenFailureMessage = 'libVLC could not open this source.';
+        DiagnosticLog.add(
+          'native libvlc coordinator open failed '
+          'kind=${error.kind.name} '
+          'anchor=${error.anchor.inSeconds}s',
+        );
+        if (error.kind == MobileLibVlcFailureKind.transportFailure) {
+          _markFailedLibVlcHlsSourceForRoute(
+            source,
+            reason: 'coordinator_transport_failure',
+          );
+        }
+      } else {
+        _lastOpenFailureMessage = 'libVLC could not open this source.';
+        DiagnosticLog.add(
+          'native libvlc coordinator open failed '
+          'kind=unexpected error=${_safeDiagnosticError(error)}',
+        );
+      }
+      if (!_playerClosing && mounted) {
+        _recordSourceOpenFailure(source, error);
+        _incrementFailedSourceAttempt(source);
+      }
+      return false;
+    }
+  }
+
   Future<bool> _openSource(
     PlaybackSource source, {
     Duration? resumePosition,
@@ -3650,8 +6838,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     bool quietRecovery = false,
     bool saveProgressBeforeOpen = true,
     bool libVlcManualSeekReopen = false,
+    bool libVlcAdaptiveRenditionReopen = false,
+    bool requireStartupPlaybackProof = false,
+    bool allowResumeRecoveryEscalation = true,
   }) async {
     if (_playerClosing) return false;
+    _terminalOpeningCallbackQuarantined = false;
+    _controllerCallbackGeneration = _terminalCallbackGate.beginOpening();
+    final attemptedEngine = engineOverride ?? _engineForSource(source);
     if (!_nativePlaybackSupportsSourceClass(source)) {
       _recordNativeSourceClassSkip(source);
       DiagnosticLog.add(
@@ -3659,6 +6853,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return false;
     }
+    if (attemptedEngine == _NativePlaybackEngine.libvlc) {
+      return _openLibVlcSourceWithCoordinator(
+        source,
+        resumePosition: resumePosition,
+        statusMessage: statusMessage,
+        quietRecovery: quietRecovery,
+        saveProgressBeforeOpen: saveProgressBeforeOpen,
+      );
+    }
+    final openingToken = ++_openingSourceToken;
+    _openingSource = true;
     final openStopwatch = Stopwatch()..start();
     var p2pLocalStreamReady = false;
     _stopStallWatchdog();
@@ -3671,9 +6876,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       awaitLibVlcRelease: true,
       saveProgress: saveProgressBeforeOpen,
     );
+    if (_playerClosing || !mounted || openingToken != _openingSourceToken) {
+      _openingSource = false;
+      return false;
+    }
     _nativeWallClockStartedAt = null;
+    _media3DirectHlsStartupProofPending = false;
+    _media3ResumeAnchorHadStartupVisualProof = false;
     _lastSavedSecond = -1;
     _resetPlaybackIntegritySample();
+    _lastCadencePosition = Duration.zero;
+    _lastCadenceSampleAt = null;
+    _playbackCadenceSamples = 0;
+    _resetPlaybackCadenceCorrection();
+    _clearMedia3ResumeSeekSettleWindow();
     _credibleWatchSecondsAtSourceOpen = _credibleWatchSeconds;
     _activeSourceHasZeroClockMetadata = false;
     _activeSourceVerifiedForSession = false;
@@ -3681,13 +6897,25 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _lastVerifiedConfidenceUrl = null;
     _verifiedConfidenceMilestone = 0;
     _clearControllerErrorGrace();
-    final attemptedEngine = engineOverride ?? _engineForSource(source);
+    final requiresSustainedMedia3DirectHlsOpenProof =
+        _requiresSustainedMedia3DirectHlsOpenProof(source, attemptedEngine);
+    if (_shouldRejectLibVlcDirectHlsStartup(source, attemptedEngine)) {
+      _lastOpenFailureMessage = 'This source needs the default engine.';
+      DiagnosticLog.add(
+        'native libvlc direct hls startup rejected provider=${source.providerId} reason=libvlc_direct_hls_startup_crash_guard quality=${_qualityLabel(source)}',
+      );
+      if (openingToken == _openingSourceToken) {
+        _openingSource = false;
+      }
+      return false;
+    }
     final initializeTimeout = _sourceInitializeTimeout(source, attemptedEngine);
     final strictManualLibVlc =
         attemptedEngine == _NativePlaybackEngine.libvlc &&
             _manualLibVlcStrictForSource(source);
-    final spendManualLibVlcProofBudget =
-        strictManualLibVlc && !libVlcManualSeekReopen;
+    final spendManualLibVlcProofBudget = strictManualLibVlc &&
+        !libVlcManualSeekReopen &&
+        !libVlcAdaptiveRenditionReopen;
     final manualLibVlcNoProofOpensForSource =
         _manualLibVlcNoProofOpensByUrl[source.url] ?? 0;
     if (spendManualLibVlcProofBudget &&
@@ -3697,6 +6925,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       DiagnosticLog.add(
         'native libvlc source circuit opened provider=${source.providerId} reason=visual_proof_missing sourceAttempts=$manualLibVlcNoProofOpensForSource sourceLimit=$_manualLibVlcSameSourceOpenWithoutProofLimit routeAttempts=$_manualLibVlcOpensWithoutProof routeLimit=$_manualLibVlcRouteOpenWithoutProofLimit',
       );
+      if (openingToken == _openingSourceToken) {
+        _openingSource = false;
+      }
       return false;
     }
     if (spendManualLibVlcProofBudget &&
@@ -3707,6 +6938,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       DiagnosticLog.add(
         'native libvlc route circuit opened provider=${source.providerId} reason=visual_proof_missing attempts=$_manualLibVlcOpensWithoutProof limit=$_manualLibVlcRouteOpenWithoutProofLimit',
       );
+      if (openingToken == _openingSourceToken) {
+        _openingSource = false;
+      }
       return false;
     }
     if (spendManualLibVlcProofBudget) {
@@ -3720,7 +6954,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       DiagnosticLog.add(
         'native libvlc manual seek reopen proof budget skipped provider=${source.providerId} sourceAttempts=$manualLibVlcNoProofOpensForSource routeAttempts=$_manualLibVlcOpensWithoutProof',
       );
+    } else if (strictManualLibVlc && libVlcAdaptiveRenditionReopen) {
+      DiagnosticLog.add(
+        'native libvlc adaptive rendition reopen proof budget skipped provider=${source.providerId} sourceAttempts=$manualLibVlcNoProofOpensForSource routeAttempts=$_manualLibVlcOpensWithoutProof',
+      );
     }
+    _media3DirectHlsStartupProofPending =
+        requiresSustainedMedia3DirectHlsOpenProof;
     try {
       DiagnosticLog.add(
         'native open provider=${source.providerId} sourceClass=${source.sourceClass.wireName} type=${source.type ?? 'unknown'} engine=${attemptedEngine.id} profile=${_sourceDiagnosticProfile(source)} url=[hidden]',
@@ -3746,15 +6986,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       DiagnosticLog.add(
         'native engine selected engine=${attemptedEngine.id} provider=${source.providerId}',
       );
-      if (attemptedEngine == _NativePlaybackEngine.libvlc) {
-        final profile = _libVlcProfileForSource(source);
-        DiagnosticLog.add(
-          'native libvlc config provider=${source.providerId} profile=${profile.id} hwAcc=${profile.hwAcc.name} networkCaching=${profile.networkCachingMs}',
-        );
-      }
       var startPosition = resumePosition;
       final relayResumePosition = startPosition ??
-          _libVlcRelayPreferredResumePosition(source, attemptedEngine);
+          _preOpenPreferredResumePosition(source, attemptedEngine);
       final relayResumeAwaitingPrompt = startPosition == null &&
           relayResumePosition > Duration.zero &&
           !_resumePromptHandled &&
@@ -3769,16 +7003,33 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         attemptedEngine,
         resumePosition: relayResumePosition,
       );
+      if (_playerClosing || !mounted || openingToken != _openingSourceToken) {
+        _openingSource = false;
+        return false;
+      }
+      final libVlcContinuousTsMode =
+          attemptedEngine == _NativePlaybackEngine.libvlc &&
+              _libVlcHlsRelay != null;
+      _LibVlcProfile? libVlcProfile;
+      if (attemptedEngine == _NativePlaybackEngine.libvlc) {
+        libVlcProfile = _libVlcProfileForSource(source);
+        final effectiveNetworkCachingMs = _libVlcNetworkCachingMs(
+          libVlcProfile,
+          liveMode: widget.liveMode,
+          continuousTsMode: libVlcContinuousTsMode,
+        );
+        DiagnosticLog.add(
+          'native libvlc config provider=${source.providerId} profile=${libVlcProfile.id} hwAcc=${libVlcProfile.hwAcc.name} mode=${widget.liveMode ? 'live' : 'vod'} transport=${libVlcContinuousTsMode ? 'continuous_ts' : 'direct'} networkCaching=$effectiveNetworkCachingMs',
+        );
+      }
       p2pLocalStreamReady = source.sourceClass == PlaybackSourceClass.p2p;
       final media3NativeEnabled =
-          AppState.playerBehaviorSettings.value.experimentalControlsEnabled &&
-              AppState.playerBehaviorSettings.value.media3NativeExoEnabled &&
-              !_media3NativeFallbackUrls.contains(source.url);
+          AppState.playerBehaviorSettings.value.media3NativeExoEnabled;
       if (attemptedEngine == _NativePlaybackEngine.exoplayer &&
           !media3NativeEnabled &&
           defaultTargetPlatform == TargetPlatform.android) {
         DiagnosticLog.add(
-          'native media3 surface fallback active provider=${source.providerId} reason=previous_platform_view_failure',
+          'native media3 surface disabled provider=${source.providerId} reason=media3_native_disabled',
         );
       }
       if (attemptedEngine == _NativePlaybackEngine.libvlc) {
@@ -3792,28 +7043,19 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         source: controllerSource,
         liveMode: widget.liveMode,
         exoViewType: _exoVideoViewTypeFor(source),
-        libVlcProfile: attemptedEngine == _NativePlaybackEngine.libvlc
-            ? _libVlcProfileForSource(source)
-            : null,
+        libVlcProfile: libVlcProfile,
+        libVlcContinuousTsMode: libVlcContinuousTsMode,
         media3NativeEnabled: media3NativeEnabled,
+        initialPosition: attemptedEngine == _NativePlaybackEngine.exoplayer
+            ? Duration.zero
+            : startPosition ?? relayResumePosition,
       );
       _controller = controller;
-      controller.addListener(_handleControllerUpdate);
+      _attachControllerUpdateListener(controller);
       if (controller.requiresPlatformViewWarmup && mounted) {
         // Native platform-view engines initialize from their Android view; make
         // sure the view is inserted before waiting for the controller.
         setState(() {});
-      }
-      _openingSource = true;
-      final openingToken = ++_openingSourceToken;
-      _startOpeningGuard(
-        source,
-        openingToken,
-        initializeTimeout + const Duration(seconds: 4),
-      );
-      if (controller.requiresPlatformViewWarmup) {
-        await WidgetsBinding.instance.endOfFrame;
-        await Future<void>.delayed(const Duration(milliseconds: 16));
       }
       final controllerInitializeTimeout = _controllerInitializeTimeout(
         source,
@@ -3821,6 +7063,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         attemptedEngine,
         initializeTimeout,
       );
+      _startOpeningGuard(
+        source,
+        openingToken,
+        controllerInitializeTimeout + const Duration(seconds: 4),
+      );
+      if (controller.requiresPlatformViewWarmup) {
+        await WidgetsBinding.instance.endOfFrame;
+        await Future<void>.delayed(const Duration(milliseconds: 16));
+      }
       await controller.initialize(timeout: controllerInitializeTimeout);
       _openingGuardTimer?.cancel();
       if (!mounted ||
@@ -3828,7 +7079,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           openingToken != _openingSourceToken ||
           _controller != controller) {
         _openingSource = false;
-        controller.removeListener(_handleControllerUpdate);
+        _detachControllerUpdateListener(controller);
         await controller.dispose();
         return false;
       }
@@ -3891,6 +7142,25 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       final resolvedStartPosition = startPosition;
       final resumePromptWasDeclined =
           _resumePromptHandled && !_resumePromptAccepted;
+      final shouldReopenAfterResumePromptStartOver = resumePromptWasDeclined &&
+          resumePosition == null &&
+          resolvedStartPosition <= Duration.zero &&
+          !widget.liveMode;
+      if (shouldReopenAfterResumePromptStartOver) {
+        DiagnosticLog.add(
+          'native resume prompt start-over reopen provider=${source.providerId} engine=${attemptedEngine.id} reason=declined_or_dismissed_prompt',
+        );
+        _clearUnprovedResumePlaybackState(
+          reason: 'resume_prompt_start_over',
+        );
+        return _openSource(
+          source,
+          resumePosition: Duration.zero,
+          statusMessage: openingStatus,
+          engineOverride: attemptedEngine,
+          saveProgressBeforeOpen: false,
+        );
+      }
       final shouldReopenLibVlcRelayForStartOver = attemptedEngine ==
               _NativePlaybackEngine.libvlc &&
           _manualLibVlcConfigured &&
@@ -3905,11 +7175,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         DiagnosticLog.add(
           'native libvlc hls relay start-over reopen provider=${source.providerId} reason=post_load_prompt_decline',
         );
+        _clearUnprovedResumePlaybackState(
+          reason: 'libvlc_relay_prompt_start_over',
+        );
         return _openSource(
           source,
           resumePosition: Duration.zero,
           statusMessage: openingStatus,
           engineOverride: attemptedEngine,
+          saveProgressBeforeOpen: false,
         );
       }
       if (resolvedStartPosition <= Duration.zero) {
@@ -3921,6 +7195,29 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           reason: 'open_source_resume_anchor',
         );
       }
+      if (_shouldRejectLibVlcDirectHlsResume(
+        source,
+        attemptedEngine,
+        resolvedStartPosition,
+      )) {
+        if (_effectivePlaybackEngine == 'auto') {
+          _libvlcUnavailableForSession = true;
+        }
+        _lastOpenFailureMessage = 'This source needs the default engine.';
+        DiagnosticLog.add(
+          'native libvlc direct hls resume rejected provider=${source.providerId} position=${resolvedStartPosition.inSeconds}s reason=resumed_direct_hls_libvlc_crash_guard autoRouteUnavailable=$_libvlcUnavailableForSession',
+        );
+        _recordSourceOpenFailure(
+          source,
+          StateError('libVLC direct HLS resume blocked before player reveal'),
+        );
+        await _disposeCurrentController(
+          updateUi: false,
+          awaitLibVlcRelease: true,
+          saveProgress: false,
+        );
+        return false;
+      }
       final libVlcVisualClockUnavailable =
           attemptedEngine == _NativePlaybackEngine.libvlc &&
               controller.size == Size.zero;
@@ -3928,13 +7225,38 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           controller.duration <= Duration.zero && controller.size == Size.zero;
       final playbackClockUnavailable =
           nativeClockUnavailable || libVlcVisualClockUnavailable;
-      final resumeSeekBarrierActive = resolvedStartPosition > Duration.zero;
+      final nativeMedia3InitialResumePositionApplied =
+          attemptedEngine == _NativePlaybackEngine.exoplayer &&
+              controller.media3 != null &&
+              controller.media3!.initialPosition == resolvedStartPosition &&
+              resolvedStartPosition > Duration.zero;
+      final useNativeMedia3PrePlaybackResumeSeek =
+          attemptedEngine == _NativePlaybackEngine.exoplayer &&
+              controller.media3 != null &&
+              !nativeMedia3InitialResumePositionApplied &&
+              resolvedStartPosition > Duration.zero &&
+              source.sourceClass == PlaybackSourceClass.direct &&
+              _isHlsSource(source) &&
+              !_isLiveTvMode &&
+              !widget.liveMode;
+      final delayMedia3ResumeSeekUntilVisualProof =
+          !nativeMedia3InitialResumePositionApplied &&
+              !useNativeMedia3PrePlaybackResumeSeek &&
+              _shouldDelayMedia3ResumeSeekUntilVisualProof(
+                source,
+                attemptedEngine,
+                resolvedStartPosition,
+              );
+      final resumeSeekBarrierActive = resolvedStartPosition > Duration.zero &&
+          !delayMedia3ResumeSeekUntilVisualProof &&
+          !nativeMedia3InitialResumePositionApplied;
       _activeSourceHasZeroClockMetadata =
           attemptedEngine == _NativePlaybackEngine.libvlc &&
               playbackClockUnavailable;
       if (source.sourceClass == PlaybackSourceClass.p2p &&
           resolvedStartPosition > Duration.zero &&
-          !playbackClockUnavailable) {
+          !playbackClockUnavailable &&
+          !delayMedia3ResumeSeekUntilVisualProof) {
         await _warmP2pResumeRange(
           controllerSource,
           source,
@@ -3943,16 +7265,50 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           controller.duration,
         );
       }
-      if (resolvedStartPosition > Duration.zero && playbackClockUnavailable) {
+      if (nativeMedia3InitialResumePositionApplied) {
+        _resumeProgressAnchorPosition = resolvedStartPosition;
+        _resumeProgressAnchorLogSecond = -1;
+        DiagnosticLog.add(
+          'native media3 resume ordering provider=${source.providerId} position=${resolvedStartPosition.inSeconds}s reason=native_media3_initial_position',
+        );
+      } else if (resolvedStartPosition > Duration.zero &&
+          useNativeMedia3PrePlaybackResumeSeek) {
+        DiagnosticLog.add(
+          'native media3 resume ordering provider=${source.providerId} position=${resolvedStartPosition.inSeconds}s reason=native_media3_pre_playback_resume',
+        );
+        await _seekToResumePosition(
+          resolvedStartPosition,
+          source.providerId,
+          controller,
+        );
+        _resumeProgressAnchorPosition = resolvedStartPosition;
+        _resumeProgressAnchorLogSecond = -1;
+      } else if (resolvedStartPosition > Duration.zero &&
+          playbackClockUnavailable) {
         _resumeProgressAnchorPosition = resolvedStartPosition;
         _resumeProgressAnchorLogSecond = -1;
         DiagnosticLog.add(
           'native resume seek deferred provider=${source.providerId} engine=${attemptedEngine.id} position=${resolvedStartPosition.inSeconds}s reason=metadata clock unavailable',
         );
-        _scheduleDeferredResumeSeek(
-          resolvedStartPosition,
-          source.providerId,
-          controller,
+        if (!(delayMedia3ResumeSeekUntilVisualProof &&
+            requiresSustainedMedia3DirectHlsOpenProof)) {
+          _scheduleDeferredResumeSeek(
+            resolvedStartPosition,
+            source.providerId,
+            controller,
+            requiresVisualProof: delayMedia3ResumeSeekUntilVisualProof,
+          );
+        } else {
+          DiagnosticLog.add(
+            'native resume seek held provider=${source.providerId} engine=${attemptedEngine.id} position=${resolvedStartPosition.inSeconds}s reason=media3_startup_proof_pending',
+          );
+        }
+      } else if (resolvedStartPosition > Duration.zero &&
+          delayMedia3ResumeSeekUntilVisualProof) {
+        _resumeProgressAnchorPosition = resolvedStartPosition;
+        _resumeProgressAnchorLogSecond = -1;
+        DiagnosticLog.add(
+          'native resume seek deferred provider=${source.providerId} engine=${attemptedEngine.id} position=${resolvedStartPosition.inSeconds}s reason=media3_wait_first_frame',
         );
       } else if (resolvedStartPosition > Duration.zero) {
         await _seekToResumePosition(
@@ -3972,8 +7328,70 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       await controller.setVolume(_volumePreview);
       await controller.setVideoSizeMode(_nativeVideoSizeModeFor(_fitMode));
       await controller.play();
+      if (resolvedStartPosition > Duration.zero &&
+          delayMedia3ResumeSeekUntilVisualProof &&
+          source.sourceClass == PlaybackSourceClass.p2p &&
+          attemptedEngine == _NativePlaybackEngine.exoplayer) {
+        unawaited(
+          _restoreMedia3P2pResumeAfterProof(
+            controller: controller,
+            controllerSource: controllerSource,
+            originalSource: source,
+            position: resolvedStartPosition,
+          ),
+        );
+      }
+      if (resolvedStartPosition > Duration.zero &&
+          delayMedia3ResumeSeekUntilVisualProof &&
+          source.sourceClass != PlaybackSourceClass.p2p &&
+          !requiresSustainedMedia3DirectHlsOpenProof) {
+        _scheduleDeferredResumeSeek(
+          resolvedStartPosition,
+          source.providerId,
+          controller,
+          requiresVisualProof: delayMedia3ResumeSeekUntilVisualProof,
+        );
+      }
       if ((_playbackSpeed - 1).abs() >= 0.001) {
         await controller.setPlaybackSpeed(_playbackSpeed);
+      }
+      if (requireStartupPlaybackProof &&
+          !resumeSeekBarrierActive &&
+          !requiresSustainedMedia3DirectHlsOpenProof) {
+        final startupProved = await _waitForSourceSwitchStartupProof(
+          controller,
+          source,
+          attemptedEngine,
+        );
+        if (!startupProved) {
+          DiagnosticLog.add(
+            'native source switch startup proof failed provider=${source.providerId} engine=${attemptedEngine.id} position=${controller.position.inSeconds}s buffering=${controller.isBuffering} playing=${controller.isPlaying} action=reject_candidate reason=source_switch_startup_proof_unavailable',
+          );
+          if (attemptedEngine == _NativePlaybackEngine.exoplayer &&
+              source.sourceClass == PlaybackSourceClass.direct &&
+              _isHlsSource(source) &&
+              source.url.isNotEmpty) {
+            _markRuntimeSourceFailure(
+              source,
+              'media3_source_switch_startup_proof_unavailable',
+            );
+            _media3TerminalFailedUrlsForSession.add(source.url);
+          }
+          _incrementFailedSourceAttempt(source);
+          _recordSourceOpenFailure(
+            source,
+            TimeoutException(
+              'Source switch startup proof unavailable before player reveal',
+              const Duration(seconds: 5),
+            ),
+          );
+          await _disposeCurrentController(
+            updateUi: false,
+            awaitLibVlcRelease: attemptedEngine == _NativePlaybackEngine.libvlc,
+            saveProgress: false,
+          );
+          return false;
+        }
       }
       if (resumeSeekBarrierActive) {
         DiagnosticLog.add(
@@ -3993,6 +7411,86 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           if (resumeSeekProof == _ResumeSeekProofResult.timeout &&
               controller.isInitialized &&
               !controller.hasError) {
+            final libVlcContinuousTsStartupTransportActive =
+                attemptedEngine == _NativePlaybackEngine.libvlc &&
+                    playbackClockUnavailable &&
+                    _libVlcContinuousTsTransportRecentlyActive(DateTime.now());
+            final shouldRejectUnprovedStartup = requireStartupPlaybackProof &&
+                attemptedEngine == _NativePlaybackEngine.libvlc &&
+                playbackClockUnavailable &&
+                controller.position <= Duration.zero &&
+                !_libVlcContinuousTsStartupProofReady &&
+                !libVlcContinuousTsStartupTransportActive;
+            final shouldRejectUnprovedMedia3Resume =
+                _shouldRejectUnprovedMedia3ResumeStartup(
+              source,
+              controller,
+              resolvedStartPosition,
+            );
+            if (shouldRejectUnprovedMedia3Resume) {
+              DiagnosticLog.add(
+                'native recovery resume barrier failed provider=${source.providerId} engine=${attemptedEngine.id} position=${resolvedStartPosition.inSeconds}s observed=${controller.position.inSeconds}s buffering=${controller.isBuffering} playing=${controller.isPlaying} action=reject_candidate reason=media3_resume_seek_proof_unavailable',
+              );
+              _quarantineFailedMedia3ResumeCandidate(
+                source,
+                anchor: resolvedStartPosition,
+                reason: 'media3_resume_seek_proof_unavailable',
+              );
+              _excludeResumeRecoveryQualityAfterRuntimeFailure(
+                source,
+                engine: attemptedEngine,
+                recoveryPosition: resolvedStartPosition,
+              );
+              if (await _restartFromBeginningAfterResumeAnchorFailures(
+                source: source,
+                controller: controller,
+                recoveryPosition: resolvedStartPosition,
+                reason: 'media3_resume_seek_proof_unavailable',
+              )) {
+                return true;
+              }
+              _recordSourceOpenFailure(
+                source,
+                TimeoutException(
+                  'Media3 resume seek proof unavailable before player reveal',
+                  const Duration(seconds: 5),
+                ),
+              );
+              await _disposeCurrentController(
+                updateUi: false,
+                awaitLibVlcRelease: false,
+                saveProgress: false,
+              );
+              return false;
+            }
+            if (shouldRejectUnprovedStartup) {
+              DiagnosticLog.add(
+                'native recovery resume barrier failed provider=${source.providerId} engine=${attemptedEngine.id} position=${resolvedStartPosition.inSeconds}s action=reject_candidate reason=libvlc_startup_proof_unavailable',
+              );
+              _incrementFailedSourceAttempt(source);
+              _recordSourceOpenFailure(
+                source,
+                TimeoutException(
+                  'libVLC startup proof unavailable before player reveal',
+                  const Duration(seconds: 3),
+                ),
+              );
+              await _disposeCurrentController(
+                updateUi: false,
+                awaitLibVlcRelease: true,
+                saveProgress: false,
+              );
+              return false;
+            }
+            if (attemptedEngine == _NativePlaybackEngine.libvlc &&
+                playbackClockUnavailable &&
+                controller.position <= Duration.zero &&
+                (_libVlcContinuousTsStartupProofReady ||
+                    libVlcContinuousTsStartupTransportActive)) {
+              DiagnosticLog.add(
+                'native recovery resume barrier timeout held provider=${source.providerId} engine=${attemptedEngine.id} position=${resolvedStartPosition.inSeconds}s action=keep_candidate reason=${libVlcContinuousTsStartupTransportActive ? 'libvlc_continuous_ts_startup_transport_active' : 'libvlc_continuous_ts_startup_proof_deferred'}',
+              );
+            }
             _resumeProgressAnchorPosition = resolvedStartPosition;
             _resumeProgressAnchorLogSecond = -1;
             _scheduleDeferredResumeSeek(
@@ -4007,8 +7505,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             DiagnosticLog.add(
               'native recovery resume barrier failed provider=${source.providerId} engine=${attemptedEngine.id} position=${resolvedStartPosition.inSeconds}s action=reject_candidate',
             );
-            _failedSourceAttempts[source.url] =
-                (_failedSourceAttempts[source.url] ?? 0) + 1;
+            if (attemptedEngine == _NativePlaybackEngine.exoplayer) {
+              _quarantineFailedMedia3ResumeCandidate(
+                source,
+                anchor: resolvedStartPosition,
+                reason: 'media3_resume_barrier_rejected',
+              );
+            } else {
+              _incrementFailedSourceAttempt(source);
+            }
             _recordSourceOpenFailure(
               source,
               TimeoutException(
@@ -4026,10 +7531,115 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           }
         }
       }
+      if (requiresSustainedMedia3DirectHlsOpenProof) {
+        final sustainedOpenProved =
+            await _waitForSustainedMedia3DirectHlsOpenProof(
+          controller,
+          source,
+          resumePosition: resolvedStartPosition,
+        );
+        if (!sustainedOpenProved) {
+          DiagnosticLog.add(
+            'native media3 direct hls startup proof failed provider=${source.providerId} engine=${attemptedEngine.id} position=${controller.position.inSeconds}s buffering=${controller.isBuffering} playing=${controller.isPlaying} action=reject_candidate reason=sustained_direct_hls_startup_proof_unavailable',
+          );
+          if (attemptedEngine == _NativePlaybackEngine.exoplayer &&
+              source.sourceClass == PlaybackSourceClass.direct &&
+              _isHlsSource(source) &&
+              source.url.isNotEmpty) {
+            _markDirectHlsRouteRiskRecovery(
+              source,
+              anchor: resolvedStartPosition,
+              reason: 'media3_direct_hls_startup_proof_unavailable',
+            );
+            _markRuntimeSourceFailure(
+              source,
+              'media3_direct_hls_startup_proof_unavailable',
+            );
+            _media3TerminalFailedUrlsForSession.add(source.url);
+          }
+          _excludeResumeRecoveryQualityAfterRuntimeFailure(
+            source,
+            engine: attemptedEngine,
+            recoveryPosition: resolvedStartPosition,
+          );
+          if (allowResumeRecoveryEscalation &&
+              await _restartWithOrderedQualityAfterResumeOpenFailure(
+                source: source,
+                providerSourcesBeforeQualityPass: _activeSources,
+                engine: attemptedEngine,
+                recoveryResumePosition: resolvedStartPosition,
+                runId: _providerRunId,
+              )) {
+            return true;
+          }
+          _media3DirectHlsStartupProofPending = false;
+          _incrementFailedSourceAttempt(source);
+          _recordSourceOpenFailure(
+            source,
+            TimeoutException(
+              'Media3 direct HLS startup proof unavailable before player reveal',
+              const Duration(seconds: 18),
+            ),
+          );
+          await _disposeCurrentController(
+            updateUi: false,
+            awaitLibVlcRelease: false,
+            saveProgress: false,
+          );
+          return false;
+        }
+        _media3DirectHlsStartupProofPending = false;
+        if (resolvedStartPosition > Duration.zero &&
+            delayMedia3ResumeSeekUntilVisualProof &&
+            _deferredResumeSeekPosition == null) {
+          _media3ResumeAnchorHadStartupVisualProof = true;
+          _resumeProgressAnchorPosition = resolvedStartPosition;
+          _resumeProgressAnchorLogSecond = -1;
+          DiagnosticLog.add(
+            'native resume seek deferred provider=${source.providerId} engine=${attemptedEngine.id} position=${resolvedStartPosition.inSeconds}s reason=media3_startup_proof_observed',
+          );
+          await controller.pause();
+          _scheduleDeferredResumeSeek(
+            resolvedStartPosition,
+            source.providerId,
+            controller,
+          );
+          await controller.play();
+          final postSeekProof = await _waitForDeferredResumeSeekProof(
+            controller,
+            source.providerId,
+            resolvedStartPosition,
+          );
+          if (postSeekProof != _ResumeSeekProofResult.proved) {
+            DiagnosticLog.add(
+              'native media3 post-startup resume proof failed provider=${source.providerId} position=${resolvedStartPosition.inSeconds}s observed=${controller.position.inSeconds}s reason=${postSeekProof.name} action=reject_candidate_preserve_anchor',
+            );
+            _excludeResumeRecoveryQualityAfterRuntimeFailure(
+              source,
+              engine: attemptedEngine,
+              recoveryPosition: resolvedStartPosition,
+            );
+            _incrementFailedSourceAttempt(source);
+            _recordSourceOpenFailure(
+              source,
+              TimeoutException(
+                'Media3 resume proof unavailable after startup warmup',
+                _resumeSeekRetryWindow,
+              ),
+            );
+            await _disposeCurrentController(
+              updateUi: false,
+              awaitLibVlcRelease: false,
+              saveProgress: false,
+            );
+            return false;
+          }
+        }
+      }
       _nativeWallClockStartedAt = DateTime.now();
       _lastSavedSecond = -1;
       _resetPlaybackIntegritySample();
-      _failedSourceAttempts.remove(source.url);
+      _clearFailedSourceAttempt(source);
       final progressItem = _progressItem;
       final playbackKey = _playbackKey;
       if (progressItem != null &&
@@ -4058,6 +7668,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           reason: 'open_initialized',
         );
       }
+      if (openingToken == _openingSourceToken) {
+        _openingSource = false;
+      }
       if (_isPublicIptvSource(source)) {
         _rememberVerifiedSource(controller, const Duration(seconds: 6));
       }
@@ -4079,17 +7692,37 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _ensureSubtitlesLoading();
       _startStallWatchdog();
       _scheduleControlsHide();
+      final cancelledProviderRunId = ++_providerRunId;
+      DiagnosticLog.add(
+        'native provider scan ownership advanced '
+        'runId=$cancelledProviderRunId '
+        'reason=source_open_succeeded_cancel_stale_provider_scans '
+        'engine=${attemptedEngine.id} '
+        'position=${_currentPlaybackResumeAnchor().inSeconds}s',
+      );
       return true;
     } catch (error) {
       _openingGuardTimer?.cancel();
-      _openingSource = false;
+      _media3DirectHlsStartupProofPending = false;
+      final stillOwnsOpen = openingToken == _openingSourceToken;
+      if (stillOwnsOpen) {
+        _openingSource = false;
+      }
       if (_playerClosing || !mounted) {
         DiagnosticLog.add(
           'native open result ignored provider=${source.providerId} reason=player_closing error=${_safeDiagnosticError(error)}',
         );
-        await _disposeCurrentController(
-          awaitLibVlcRelease: true,
-          saveProgress: false,
+        if (stillOwnsOpen) {
+          await _disposeCurrentController(
+            awaitLibVlcRelease: true,
+            saveProgress: false,
+          );
+        }
+        return false;
+      }
+      if (!stillOwnsOpen) {
+        DiagnosticLog.add(
+          'native open result ignored provider=${source.providerId} reason=superseded_open error=${_safeDiagnosticError(error)}',
         );
         return false;
       }
@@ -4108,6 +7741,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         if (!softVerifiedLibVlcAttempt && !rendererDriftQuietRecoveryAttempt) {
           _recordRouteHlsOpenTimeout(source, attemptedEngine);
         }
+      } else if (!softVerifiedLibVlcAttempt &&
+          !rendererDriftQuietRecoveryAttempt) {
+        _recordRouteHlsAccessFailure(source, attemptedEngine);
       }
       DiagnosticLog.add(
         'native open failed provider=${source.providerId} sourceClass=${source.sourceClass.wireName} engine=${attemptedEngine.id} timedOut=$timedOut elapsed=${openStopwatch.elapsedMilliseconds}ms profile=${_sourceDiagnosticProfile(source)} error=${_safeDiagnosticError(error)}',
@@ -4119,10 +7755,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               : 'native verified source cache soft-failed provider=${source.providerId} engine=${attemptedEngine.id} action=continue_full_search',
         );
       } else {
-        _forgetVerifiedSource(source, 'open_failed');
+        _forgetVerifiedSource(
+          source,
+          timedOut ? 'open_failed_timeout' : 'open_failed',
+        );
         _recordSourceOpenFailure(source, error);
-        _failedSourceAttempts[source.url] =
-            (_failedSourceAttempts[source.url] ?? 0) + 1;
+        _incrementFailedSourceAttempt(source);
         AppState.recordNativeProviderFailure(
           mediaKey: _playbackKey,
           providerId: source.providerId,
@@ -4158,16 +7796,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         final appWideLibVlcUnavailable = _isAppSessionLibVlcUnavailableError(
           error,
         );
+        final manualLibVlcCandidateFailure =
+            _manualLibVlcStrictForSource(source) && !appWideLibVlcUnavailable;
         final libVlcUnavailableScope =
             appWideLibVlcUnavailable ? 'app-session' : 'route-session';
-        _libvlcUnavailableForSession = true;
+        if (!manualLibVlcCandidateFailure) {
+          _libvlcUnavailableForSession = true;
+        }
         if (appWideLibVlcUnavailable) {
           _libvlcUnavailableForAppSession = true;
         }
         DiagnosticLog.add(
-          'native libvlc unavailable provider=${source.providerId} scope=$libVlcUnavailableScope',
+          'native libvlc unavailable provider=${source.providerId} scope=$libVlcUnavailableScope action=${manualLibVlcCandidateFailure ? 'try_next_libvlc_candidate' : 'fallback_engine'}',
         );
-        _switchPlaybackEngineToAutoAfterLibVlcFailure(source.providerId);
+        if (!manualLibVlcCandidateFailure) {
+          _switchPlaybackEngineToAutoAfterLibVlcFailure(source.providerId);
+        }
       }
       if (attemptedEngine == _NativePlaybackEngine.libvlc) {
         await DiagnosticLog.clearNativeEngineActive(
@@ -4271,6 +7915,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return Duration(seconds: seconds);
     }
+    if (_canUseLibVlcHlsRelaySource(source, engine)) {
+      const timeout = Duration(seconds: 40);
+      DiagnosticLog.add(
+        'native source open timeout budget provider=${source.providerId} sourceClass=${source.sourceClass.wireName} engine=${engine.id} quality=${_qualityLabel(source)} timeout=${timeout.inSeconds}s reason=libvlc_continuous_ts_relay',
+      );
+      return timeout;
+    }
+    if (engine == _NativePlaybackEngine.libvlc &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source)) {
+      const timeout = Duration(seconds: 24);
+      DiagnosticLog.add(
+        'native source open timeout budget provider=${source.providerId} sourceClass=${source.sourceClass.wireName} engine=${engine.id} quality=${_qualityLabel(source)} timeout=${timeout.inSeconds}s reason=libvlc_native_direct_hls',
+      );
+      return timeout;
+    }
     var seconds = switch (engine) {
       _NativePlaybackEngine.libvlc => _libVlcOpenTimeout.inSeconds,
       _NativePlaybackEngine.exoplayer => _exoPlayerOpenTimeout.inSeconds,
@@ -4284,11 +7944,31 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       'patient' => (seconds + 3).clamp(8, 24).toInt(),
       _ => seconds.clamp(6, 20).toInt(),
     };
+    if (engine == _NativePlaybackEngine.libvlc &&
+        !_isHlsSource(source) &&
+        source.sourceClass != PlaybackSourceClass.p2p) {
+      seconds = math.max(seconds, 24);
+      DiagnosticLog.add(
+        'native source open timeout budget provider=${source.providerId} sourceClass=${source.sourceClass.wireName} engine=${engine.id} quality=${_qualityLabel(source)} timeout=${seconds}s reason=libvlc_tv_parity_direct_vod',
+      );
+      return Duration(seconds: seconds);
+    }
     if (_shouldUseResolvedDirectHlsOpenBudget(source, engine)) {
+      if (_recentMidPlaybackRuntimeFailureForProvider(source.providerId) ||
+          _recentDirectHlsRouteRiskRecoveryWindow()) {
+        seconds = switch (style) {
+          'patient' => math.min(math.max(seconds, 8), 12),
+          _ => math.min(math.max(seconds, 8), 10),
+        };
+        DiagnosticLog.add(
+          'native source open timeout budget provider=${source.providerId} sourceClass=${source.sourceClass.wireName} engine=${engine.id} quality=${_qualityLabel(source)} timeout=${seconds}s reason=mid_playback_direct_hls_recovery',
+        );
+        return Duration(seconds: seconds);
+      }
       seconds = switch (style) {
-        'fast' => 6,
-        'patient' => math.max(seconds, 12),
-        _ => seconds,
+        'fast' => math.max(seconds, 10),
+        'patient' => math.max(seconds, 18),
+        _ => math.max(seconds, 14),
       };
       DiagnosticLog.add(
         'native source open timeout budget provider=${source.providerId} sourceClass=${source.sourceClass.wireName} engine=${engine.id} quality=${_qualityLabel(source)} timeout=${seconds}s reason=resolved-direct-hls',
@@ -4315,12 +7995,49 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _isHlsSource(source);
   }
 
+  bool _recentMidPlaybackRuntimeFailureForProvider(String providerId) {
+    final failedAt = _lastRuntimeSourceFailureAt;
+    if (failedAt == null) return false;
+    if (_lastRuntimeSourceFailureProviderId != providerId) return false;
+    if (DateTime.now().difference(failedAt) > const Duration(seconds: 45)) {
+      return false;
+    }
+    final anchor = _heldPlaybackAnchor(
+      fallback: _lastRuntimeSourceFailurePosition,
+    );
+    return anchor >= const Duration(seconds: 30) ||
+        _lastRuntimeSourceFailurePosition >= const Duration(seconds: 30);
+  }
+
+  bool _recentDirectHlsRouteRiskRecoveryWindow() {
+    final riskAt = _lastDirectHlsRouteRiskAt;
+    if (riskAt == null) return false;
+    if (DateTime.now().difference(riskAt) > const Duration(seconds: 45)) {
+      return false;
+    }
+    final anchor = _heldPlaybackAnchor(
+      fallback: _lastDirectHlsRouteRiskAnchor,
+    );
+    return anchor >= const Duration(seconds: 30) ||
+        _lastDirectHlsRouteRiskAnchor >= const Duration(seconds: 30);
+  }
+
   Duration _controllerInitializeTimeout(
     PlaybackSource originalSource,
     PlaybackSource controllerSource,
     _NativePlaybackEngine engine,
     Duration fallback,
   ) {
+    if (engine == _NativePlaybackEngine.libvlc &&
+        controllerSource.type == 'ts' &&
+        !widget.liveMode &&
+        !_isPublicIptvSource(originalSource)) {
+      const timeout = Duration(seconds: 22);
+      DiagnosticLog.add(
+        'native libvlc controller attach budget provider=${originalSource.providerId} timeout=${timeout.inSeconds}s reason=libvlc_continuous_ts_platform_view',
+      );
+      return timeout;
+    }
     if (originalSource.sourceClass == PlaybackSourceClass.p2p &&
         controllerSource.type == 'p2p-local') {
       final seconds = switch (engine) {
@@ -4340,22 +8057,28 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _NativePlaybackEngine engine, {
     required Duration resumePosition,
   }) async {
-    if (engine == _NativePlaybackEngine.libvlc &&
-        _manualLibVlcConfigured &&
-        source.sourceClass == PlaybackSourceClass.direct &&
-        _isHlsSource(source) &&
-        source.headers.isNotEmpty) {
+    if (_canUseLibVlcHlsRelaySource(source, engine)) {
       await _stopLibVlcHlsRelay('new_source');
       _resetLibVlcContinuousTsProof();
-      final useContinuousTsRelay = resumePosition > Duration.zero;
+      final relayGeneration = _libVlcHlsRelayGeneration;
+      bool relayCallbackIsStale() =>
+          _playerClosing ||
+          !mounted ||
+          relayGeneration != _libVlcHlsRelayGeneration ||
+          _activeSource?.url != source.url;
+      final continuousTsMode = _libVlcContinuousTsRelayEnabled;
       final relay = await LibVlcHlsRelay.start(
         upstreamUri: Uri.parse(source.url),
         headers: source.headers,
+        limitHeadersToUpstreamOrigin: true,
         resumePosition: resumePosition,
-        continuousTsMode: useContinuousTsRelay,
+        continuousTsMode: continuousTsMode,
+        continuousTsTargetHeight: _libVlcContinuousTsTargetHeight,
+        continuousTsExcludedHeights: const <int>{},
+        currentPlaybackPosition: () =>
+            _libVlcRelayPlaybackPosition(resumePosition),
         onDuration: (duration) {
-          if (_playerClosing || !mounted || duration <= Duration.zero) return;
-          if (_activeSource?.url != source.url) return;
+          if (relayCallbackIsStale() || duration <= Duration.zero) return;
           _libVlcContinuousTsDurationAccepted = true;
           setState(() {
             _lastKnownPlaybackDuration = duration;
@@ -4368,24 +8091,70 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           );
         },
         onContinuousTsProgress: (streamedSegments) {
-          if (_playerClosing || !mounted) return;
-          if (_activeSource?.url != source.url) return;
+          if (relayCallbackIsStale()) return;
           _libVlcContinuousTsStreamedSegments = streamedSegments;
           _maybeClearLibVlcContinuousTsWaitMessage(
             reason: 'libvlc_continuous_ts_progress',
           );
         },
+        onContinuousTsBytes: (streamedBytes) {
+          if (relayCallbackIsStale()) return;
+          _libVlcContinuousTsStreamedBytes = streamedBytes;
+          _maybeClearLibVlcContinuousTsWaitMessage(
+            reason: 'libvlc_continuous_ts_bytes',
+          );
+        },
+        onContinuousTsTransportActivity: () {
+          if (relayCallbackIsStale()) return;
+          _libVlcContinuousTsLastTransportActivityAt = DateTime.now();
+        },
+        onContinuousTsStartupLeadReady: () {
+          if (relayCallbackIsStale()) return;
+          _libVlcContinuousTsStartupLeadReady = true;
+          DiagnosticLog.add(
+            'native libvlc continuous-ts startup lead accepted',
+          );
+        },
+        onContinuousTsBufferedPosition: (bufferedPosition) {
+          if (relayCallbackIsStale() ||
+              bufferedPosition <= _libVlcContinuousTsBufferedPosition) {
+            return;
+          }
+          setState(() {
+            _libVlcContinuousTsBufferedPosition = bufferedPosition;
+          });
+        },
+        onContinuousTsRenditionFailure: (failedHeight) {
+          if (relayCallbackIsStale() || failedHeight <= 1) return;
+          DiagnosticLog.add(
+            'native libvlc rendition delivery failed '
+            'height=$failedHeight action=coordinator_recovery',
+          );
+        },
+        onTimelineOffset: (offset) {
+          if (relayCallbackIsStale()) return;
+          _libVlcContinuousTsTimelineOffset = offset;
+          DiagnosticLog.add(
+            'native libvlc hls relay timeline offset updated '
+            'offset=${offset.inSeconds}s reason=decoder_preroll',
+          );
+        },
+        onContinuousTsUpstreamError: (upstreamErrors, lastStatusBucket) {
+          if (relayCallbackIsStale()) return;
+          _libVlcContinuousTsUpstreamErrors = upstreamErrors;
+          _libVlcContinuousTsLastStatusBucket = lastStatusBucket;
+        },
         onEvent: DiagnosticLog.add,
       );
       _libVlcHlsRelay = relay;
       _libVlcContinuousTsTimelineOffset =
-          useContinuousTsRelay ? resumePosition : Duration.zero;
+          continuousTsMode ? resumePosition : Duration.zero;
       DiagnosticLog.add(
-        'native libvlc hls relay started scope=${useContinuousTsRelay ? 'continuous_ts' : 'playlist'} headers=${_headerCountBucket(source.headers.length)} timelineOffset=${_libVlcContinuousTsTimelineOffset.inSeconds}s',
+        'native libvlc hls relay started scope=${continuousTsMode ? 'continuous_ts' : 'playlist'} headers=${_headerCountBucket(source.headers.length)} timelineOffset=${_libVlcContinuousTsTimelineOffset.inSeconds}s',
       );
       return source.copyWith(
         url: relay.localUri.toString(),
-        type: useContinuousTsRelay ? 'ts' : 'hls',
+        type: continuousTsMode ? 'ts' : 'hls',
         headers: const {},
       );
     }
@@ -4910,6 +8679,117 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
   }
 
+  Future<void> _restoreP2pResumeAfterProof({
+    required MobileLibVlcCoordinator coordinator,
+    required _NativePlaybackController controller,
+    required PlaybackSource controllerSource,
+    required PlaybackSource originalSource,
+    required Duration position,
+  }) async {
+    bool stale() =>
+        !mounted ||
+        _playerClosing ||
+        !identical(_mobileLibVlcCoordinator, coordinator) ||
+        !identical(_controller, controller) ||
+        !identical(_activeSource, originalSource);
+
+    await _warmP2pResumeRange(
+      controllerSource,
+      originalSource,
+      _NativePlaybackEngine.libvlc,
+      position,
+      controller.duration,
+    );
+    if (stale()) return;
+    final resumeSeekApplied = await _seekToResumePosition(
+      position,
+      originalSource.providerId,
+      controller,
+    );
+    if (!resumeSeekApplied || stale()) {
+      DiagnosticLog.add(
+        'native p2p resume restore held provider=${originalSource.providerId} position=${position.inSeconds}s reason=seek_not_applied action=preserve_resume_anchor',
+      );
+      return;
+    }
+    await controller.play();
+    if (stale()) return;
+    final resumeSeekProof = await _waitForDeferredResumeSeekProof(
+      controller,
+      originalSource.providerId,
+      position,
+    );
+    if (resumeSeekProof != _ResumeSeekProofResult.proved) {
+      DiagnosticLog.add(
+        'native p2p resume restore held provider=${originalSource.providerId} position=${position.inSeconds}s reason=${resumeSeekProof.name} action=preserve_resume_anchor',
+      );
+      return;
+    }
+    DiagnosticLog.add(
+      'native p2p resume restore proved provider=${originalSource.providerId} position=${position.inSeconds}s',
+    );
+  }
+
+  Future<void> _restoreMedia3P2pResumeAfterProof({
+    required _NativePlaybackController controller,
+    required PlaybackSource controllerSource,
+    required PlaybackSource originalSource,
+    required Duration position,
+  }) async {
+    bool stale() =>
+        !mounted ||
+        _playerClosing ||
+        !identical(_controller, controller) ||
+        !identical(_activeSource, originalSource);
+
+    final startupProved = await _waitForSourceSwitchStartupProof(
+      controller,
+      originalSource,
+      _NativePlaybackEngine.exoplayer,
+    );
+    if (!startupProved || stale()) {
+      DiagnosticLog.add(
+        'native media3 p2p resume restore held provider=${originalSource.providerId} position=${position.inSeconds}s reason=startup_unproved action=preserve_resume_anchor',
+      );
+      return;
+    }
+    await _warmP2pResumeRange(
+      controllerSource,
+      originalSource,
+      _NativePlaybackEngine.exoplayer,
+      position,
+      controller.duration,
+    );
+    if (stale()) return;
+    final resumeSeekApplied = await _seekToResumePosition(
+      position,
+      originalSource.providerId,
+      controller,
+    );
+    if (!resumeSeekApplied || stale()) {
+      DiagnosticLog.add(
+        'native media3 p2p resume restore held provider=${originalSource.providerId} position=${position.inSeconds}s reason=seek_not_applied action=preserve_resume_anchor',
+      );
+      return;
+    }
+    await controller.play();
+    if (stale()) return;
+    final resumeSeekProof = await _waitForDeferredResumeSeekProof(
+      controller,
+      originalSource.providerId,
+      position,
+    );
+    if (resumeSeekProof != _ResumeSeekProofResult.proved) {
+      DiagnosticLog.add(
+        'native media3 p2p resume restore held provider=${originalSource.providerId} position=${position.inSeconds}s reason=${resumeSeekProof.name} action=preserve_resume_anchor',
+      );
+      return;
+    }
+    DiagnosticLog.add(
+      'native media3 p2p resume restore proved provider=${originalSource.providerId} position=${position.inSeconds}s',
+    );
+  }
+
   int? _p2pTotalBytesFromContentRange(String? value) {
     if (value == null || value.isEmpty) return null;
     final total = value.split('/').last.trim();
@@ -5033,6 +8913,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   Duration _providerResolveTimeoutFor(String providerId) {
     final base = _providerResolveTimeout;
     final status = AppState.nativeProviderHealthFor(providerId);
+    final recentMidPlaybackRuntimeFailure =
+        _recentMidPlaybackRuntimeFailureForProvider(providerId);
+    final recentDirectHlsRouteRiskRecovery =
+        _recentDirectHlsRouteRiskRecoveryWindow();
+    final savedResumeRoute = _hasSavedResumeProgressForRoute &&
+        !_shouldUseFreshAutoQualityForResumeRoute;
+    final stallRecoveryRoute = _recoveringFromStall ||
+        _resumeRecoveryExcludedQualityRanks.isNotEmpty ||
+        _media3PersistentBufferingNudgeCountForSource > 0;
     var seconds = switch (status) {
       NativeProviderHealthStatus.failing ||
       NativeProviderHealthStatus.noSource =>
@@ -5046,13 +8935,137 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         base.inSeconds,
     };
     if (providerId.startsWith('addon-')) seconds += 4;
+    if (_verifiedCacheFallbackCanOpenSoon(providerId)) {
+      seconds = math.min(seconds, 4);
+    }
+    if (!savedResumeRoute && _emptyProviderResolveResultsForRoute >= 2) {
+      seconds = math.min(seconds, providerId.startsWith('addon-') ? 6 : 4);
+      DiagnosticLog.add(
+        'native provider resolve timeout shortened provider=$providerId emptyRouteResults=$_emptyProviderResolveResultsForRoute reason=empty_route_scan',
+      );
+    }
     if (_limitToFirstQualityPass && !providerId.startsWith('addon-')) {
       seconds = math.min(seconds, 6);
     }
-    final minimum = _limitToFirstQualityPass && !providerId.startsWith('addon-')
-        ? 4
-        : base.inSeconds;
+    if (savedResumeRoute && !stallRecoveryRoute) {
+      seconds = math.min(seconds, providerId.startsWith('addon-') ? 12 : 8);
+      DiagnosticLog.add(
+        'native provider resolve timeout capped provider=$providerId reason=saved_resume_route',
+      );
+    }
+    if (recentMidPlaybackRuntimeFailure || recentDirectHlsRouteRiskRecovery) {
+      seconds = math.min(seconds, providerId.startsWith('addon-') ? 10 : 8);
+      DiagnosticLog.add(
+        'native provider resolve timeout capped provider=$providerId timeout=${seconds}s reason=${recentMidPlaybackRuntimeFailure ? 'mid_playback_runtime_recovery' : 'direct_hls_route_risk_recovery'}',
+      );
+    }
+    if (_temporaryAutoProviderRecovery || stallRecoveryRoute) {
+      final freshRecoveryMinimum = providerId.startsWith('addon-') ? 18 : 14;
+      final canExtendForFreshRecovery =
+          !recentMidPlaybackRuntimeFailure && !recentDirectHlsRouteRiskRecovery;
+      if (canExtendForFreshRecovery && seconds < freshRecoveryMinimum) {
+        seconds = freshRecoveryMinimum;
+        DiagnosticLog.add(
+          'native provider resolve timeout extended provider=$providerId '
+          'timeout=${seconds}s reason=${stallRecoveryRoute ? 'stall_recovery_candidate' : 'fresh_recovery_candidate'}',
+        );
+      }
+    }
+    final verifiedFallbackSoon = _verifiedCacheFallbackCanOpenSoon(providerId);
+    final minimum =
+        recentMidPlaybackRuntimeFailure || recentDirectHlsRouteRiskRecovery
+            ? (providerId.startsWith('addon-') ? 6 : 4)
+            : (savedResumeRoute && (!verifiedFallbackSoon || stallRecoveryRoute)
+                ? 8
+                : (_emptyProviderResolveResultsForRoute >= 2 ||
+                        (_limitToFirstQualityPass || verifiedFallbackSoon) &&
+                            !providerId.startsWith('addon-'))
+                    ? 4
+                    : base.inSeconds);
     return Duration(seconds: seconds.clamp(minimum, 30).toInt());
+  }
+
+  bool _prioritizeResolvedMidPlaybackRecoveryRequests({
+    required PlaybackSource failedSource,
+  }) {
+    if (_requests.isEmpty) return false;
+    final currentProviderIndex = _providerIndex;
+    final resolved = <NativePlaybackRequest>[];
+    final unresolved = <NativePlaybackRequest>[];
+    final seenUrls = <String>{};
+
+    for (var index = 0; index < _requests.length; index += 1) {
+      if (index == currentProviderIndex) continue;
+      final request = _requests[index];
+      if (request.sources.isEmpty) {
+        if (index > currentProviderIndex) unresolved.add(request);
+        continue;
+      }
+      final eligible = request.sources.where((candidate) {
+        if (candidate.url.isEmpty ||
+            candidate.url == failedSource.url ||
+            _failedSourceAttemptCount(candidate) != 0 ||
+            !_nativePlaybackSupportsSourceClass(candidate)) {
+          return false;
+        }
+        return seenUrls.add(candidate.url);
+      }).toList(growable: false);
+      if (eligible.isEmpty) continue;
+      resolved.add(
+        NativePlaybackRequest(
+          providerId: request.providerId,
+          sources: eligible,
+        ),
+      );
+    }
+
+    if (resolved.isEmpty) return false;
+    _requests = <NativePlaybackRequest>[...resolved, ...unresolved];
+    _providerIndex = 0;
+    _sourceIndex = 0;
+    _activeSources = const <PlaybackSource>[];
+    _activeSource = null;
+    DiagnosticLog.add(
+      'native midplay recovery reordered resolved=${resolved.length} '
+      'unresolved=${unresolved.length} '
+      'reason=resolved_candidates_before_broad_provider_scan',
+    );
+    return true;
+  }
+
+  bool get _hasSavedResumeProgressForRoute {
+    if (widget.liveMode || _completionCloseStarted || _playerClosing) {
+      return false;
+    }
+    final item = _progressItem;
+    final key = _playbackKey;
+    if (item == null || key == null || key.isEmpty) return false;
+    final entry = AppState.progressFor(item, playbackKey: key);
+    if (entry == null) return false;
+    if (entry.watchedSeconds < 30) return false;
+    if (entry.durationSeconds <= 0) return true;
+    return entry.durationSeconds > entry.watchedSeconds + 60;
+  }
+
+  bool _verifiedCacheFallbackCanOpenSoon(String providerId) {
+    final fallbackStart = _verifiedCacheFallbackStartIndex;
+    if (fallbackStart == null || fallbackStart <= 0) return false;
+    if (_providerIndex >= fallbackStart) return false;
+    if (_providerIndex >= _requests.length) return false;
+    final request = _requests[_providerIndex];
+    if (request.providerId != providerId || request.sources.isNotEmpty) {
+      return false;
+    }
+    return _requests.skip(fallbackStart).any(
+        (request) => request.sources.any(_verifiedSourceHasOpenableDescriptor));
+  }
+
+  bool _isVerifiedCacheFallbackRequest(NativePlaybackRequest request) {
+    final fallbackStart = _verifiedCacheFallbackStartIndex;
+    if (fallbackStart == null || fallbackStart < 0) return false;
+    if (_providerIndex < fallbackStart) return false;
+    if (request.sources.isEmpty) return false;
+    return request.sources.any(_verifiedSourceHasOpenableDescriptor);
   }
 
   int get _providerWarmupCount {
@@ -5129,38 +9142,73 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         controller.isBuffering;
   }
 
-  Duration get _libVlcContinuousTsVisualGrace {
-    final settings = AppState.playerBehaviorSettings.value;
-    final seconds = settings.experimentalControlsEnabled
-        ? settings.libVlcContinuousTsVisualGraceSeconds
-        : const PlayerBehaviorSettings().libVlcContinuousTsVisualGraceSeconds;
-    return Duration(seconds: seconds);
-  }
-
   bool get _libVlcContinuousTsActive {
-    return _manualLibVlcConfigured && _libVlcHlsRelay != null;
+    return (_libVlcHlsRelay != null || _mobileLibVlcRelayActive) &&
+        _controller?.engine == _NativePlaybackEngine.libvlc;
   }
 
   bool get _libVlcContinuousTsRelayProofReady {
     return _libVlcContinuousTsActive &&
         _libVlcContinuousTsDurationAccepted &&
-        _libVlcContinuousTsStreamedSegments > 0;
+        _libVlcContinuousTsStreamedSegments > 0 &&
+        _libVlcContinuousTsStreamedBytes >=
+            _libVlcContinuousTsMediaProofBytes &&
+        _libVlcContinuousTsUpstreamErrors == 0;
   }
 
-  bool _libVlcContinuousTsNoVisualRelayStalled(
-    _NativePlaybackController controller,
-    Duration? elapsed,
-  ) {
-    if (controller.engine != _NativePlaybackEngine.libvlc) return false;
+  bool _libVlcContinuousTsTransportRecentlyActive(DateTime now) {
     if (!_libVlcContinuousTsActive) return false;
-    if (elapsed == null || elapsed < _libVlcWarmupGrace) return false;
-    if (controller.position >= const Duration(seconds: 1)) return false;
-    if (controller.size != Size.zero) return false;
-    if (!_libVlcContinuousTsRelayProofReady &&
-        controller.duration <= Duration.zero) {
+    final lastActivityAt = _libVlcContinuousTsLastTransportActivityAt;
+    if (lastActivityAt == null) return false;
+    return now.difference(lastActivityAt) <=
+        _libVlcContinuousTsTransportFreshness;
+  }
+
+  Duration _libVlcContinuousTsRemainingLead(Duration position) {
+    if (!_libVlcContinuousTsActive ||
+        _libVlcContinuousTsBufferedPosition <= position) {
+      return Duration.zero;
+    }
+    return _libVlcContinuousTsBufferedPosition - position;
+  }
+
+  Duration _libVlcRelayPlaybackPosition(Duration fallback) {
+    final controller = _controller;
+    if (controller == null ||
+        controller.engine != _NativePlaybackEngine.libvlc ||
+        !controller.isInitialized ||
+        controller.hasError) {
+      return _heldPlaybackAnchor(fallback: fallback);
+    }
+    return _resumeAnchoredPlaybackPosition(controller);
+  }
+
+  bool get _libVlcContinuousTsStartupProofReady {
+    return _libVlcContinuousTsActive &&
+        _libVlcContinuousTsDurationAccepted &&
+        _libVlcContinuousTsStartupLeadReady;
+  }
+
+  bool _shouldHoldLibVlcContinuousTsStartupLead(
+    _NativePlaybackController controller,
+    PlaybackSource? source, {
+    DateTime? now,
+  }) {
+    if (controller.engine != _NativePlaybackEngine.libvlc) return false;
+    if (source == null || !_isHlsSource(source)) return false;
+    if (!_libVlcContinuousTsActive ||
+        _libVlcContinuousTsStartupLeadReady ||
+        _libVlcContinuousTsUpstreamErrors > 0 ||
+        controller.hasError) {
       return false;
     }
-    return AppState.playerBehaviorSettings.value.autoSwitchOnStall;
+    final startedAt = _nativeWallClockStartedAt;
+    if (startedAt == null) return true;
+    return (now ?? DateTime.now()).difference(startedAt) <
+        _libVlcContinuousTsStartupProofBudget(
+          source,
+          _NativePlaybackEngine.libvlc,
+        );
   }
 
   Duration get _libVlcReleaseSettle {
@@ -5191,8 +9239,36 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (source == null) return 6;
     if (_isLiveTvMode || _isPublicIptvSource(source)) return 8;
     if (source.sourceClass == PlaybackSourceClass.p2p) return 10;
+    if (_isHlsSource(source) &&
+        _resumeProgressAnchorPosition >= const Duration(seconds: 30)) {
+      return 4;
+    }
     if (_isHlsSource(source)) return 8;
     return 6;
+  }
+
+  int _bufferingRecoveryTickLimitForSourceAtPosition(
+    PlaybackSource? source,
+    Duration recoveryPosition,
+  ) {
+    final regularLimit = _bufferingRecoveryTickLimitForSource(source);
+    if (source == null) return regularLimit;
+    if (_isLiveTvMode || _isPublicIptvSource(source)) return regularLimit;
+    if (source.sourceClass == PlaybackSourceClass.p2p) return regularLimit;
+    if (_isHlsSource(source) &&
+        recoveryPosition >= const Duration(seconds: 30)) {
+      return math.min(regularLimit, 4);
+    }
+    return regularLimit;
+  }
+
+  int _zeroVisualStartupRecoveryTickLimitForSource(PlaybackSource? source) {
+    final regularLimit = _bufferingRecoveryTickLimitForSource(source);
+    if (source == null) return math.min(regularLimit, 4);
+    if (_isLiveTvMode || _isPublicIptvSource(source)) return regularLimit;
+    if (source.sourceClass == PlaybackSourceClass.p2p) return regularLimit;
+    if (_isHlsSource(source)) return math.min(regularLimit, 4);
+    return regularLimit;
   }
 
   int _stallRecoveryTickLimitForSource(PlaybackSource? source) {
@@ -5217,6 +9293,31 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final baseLimit = _bufferingRecoveryTickLimitForSource(source) *
         (_persistentBufferingAnchorRepairLimitForSource(source) + 1);
     if (source != null &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        _resumeProgressAnchorPosition >= const Duration(seconds: 30)) {
+      return math.min(
+        baseLimit,
+        _bufferingRecoveryTickLimitForSource(source) + 2,
+      );
+    }
+    if (source != null &&
+        _isHlsSource(source) &&
+        _media3ResumeAnchorHadStartupVisualProof &&
+        _resumeProgressAnchorPosition >= const Duration(seconds: 30)) {
+      return math.min(
+        baseLimit,
+        _bufferingRecoveryTickLimitForSource(source) + 2,
+      );
+    }
+    if (source != null &&
+        _sourceHasMedia3DirectHlsRendererDriftRepair(source)) {
+      return math.min(
+        baseLimit,
+        _bufferingRecoveryTickLimitForSource(source) + 2,
+      );
+    }
+    if (source != null &&
         _media3PersistentBufferingNudgeSourceKey ==
             _playbackSourceRuntimeKey(source)) {
       return math.min(
@@ -5225,6 +9326,29 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
     }
     return baseLimit;
+  }
+
+  int _persistentBufferingAnchorEscapeTickLimitForSourceAtPosition(
+    PlaybackSource? source,
+    Duration recoveryPosition,
+  ) {
+    final regularLimit =
+        _persistentBufferingAnchorEscapeTickLimitForSource(source);
+    if (source == null) return regularLimit;
+    if (_isLiveTvMode || _isPublicIptvSource(source)) return regularLimit;
+    if (source.sourceClass == PlaybackSourceClass.p2p) return regularLimit;
+    if (_isHlsSource(source) &&
+        recoveryPosition >= const Duration(seconds: 30)) {
+      return math.min(
+        regularLimit,
+        _bufferingRecoveryTickLimitForSourceAtPosition(
+              source,
+              recoveryPosition,
+            ) +
+            2,
+      );
+    }
+    return regularLimit;
   }
 
   int _verifiedZeroVisualEscalationTickLimitForSource(PlaybackSource? source) {
@@ -5261,19 +9385,158 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     required _QualityPass qualityPass,
     required _NativePlaybackEngine engine,
     required List<_NativePlaybackEngine> enginePasses,
+    bool bypassQualityPass = false,
   }) {
     var prepared = _prioritizePreferredQuality(sources);
     prepared = _deprioritizeFailedSources(prepared);
-    prepared = _filterSourcesForQualityPass(prepared, qualityPass);
-    prepared = _filterRiskyP2pSourcesForQualityPass(prepared, qualityPass);
-    prepared = _limitBaselineP2pSmartStartSources(prepared, qualityPass);
+    if (engine == _NativePlaybackEngine.exoplayer) {
+      prepared = _excludeFailedMidplayRecoverySources(prepared);
+    }
+    final effectiveQualityPass =
+        bypassQualityPass ? _QualityPass.autoPass : qualityPass;
+    if (bypassQualityPass && qualityPass.target != null) {
+      DiagnosticLog.add(
+        'native verified source cache bypassed saved quality pass=${qualityPass.label} reason=startup_fallback',
+      );
+    }
+    prepared = _filterSourcesForQualityPass(prepared, effectiveQualityPass);
+    prepared = _preferStableHlsOrderingForAutoPass(
+      prepared,
+      effectiveQualityPass,
+      engine: engine,
+    );
+    prepared = mobilePrioritizeExplicitLibVlcSourcesByTransport(
+      prepared,
+      explicitLibVlc:
+          engine == _NativePlaybackEngine.libvlc && _manualLibVlcConfigured,
+    );
+    prepared =
+        _filterRiskyP2pSourcesForQualityPass(prepared, effectiveQualityPass);
+    prepared = _limitBaselineP2pSmartStartSources(
+      prepared,
+      effectiveQualityPass,
+    );
     if (prepared.isEmpty) return prepared;
-    return _rankSourcesForEnginePass(
+    final ranked = _rankSourcesForEnginePass(
       prepared,
       engine,
       enginePasses,
-      qualityPass: qualityPass,
+      qualityPass: effectiveQualityPass,
     );
+    return _preferUntriedAdaptiveMedia3RecoverySource(
+      ranked,
+      engine: engine,
+      qualityPass: effectiveQualityPass,
+    );
+  }
+
+  List<PlaybackSource> _preferUntriedAdaptiveMedia3RecoverySource(
+    List<PlaybackSource> sources, {
+    required _NativePlaybackEngine engine,
+    required _QualityPass qualityPass,
+  }) {
+    final preferPersistentBufferingAdaptive = qualityPass.target == null &&
+        _media3RecoveryQualityCeilingReason ==
+            'persistent_buffering_quality_floor';
+    if (sources.length < 2 ||
+        engine != _NativePlaybackEngine.exoplayer ||
+        !preferPersistentBufferingAdaptive) {
+      return sources;
+    }
+    final adaptive = [
+      for (final source in sources)
+        if (_isAdaptiveHlsAutoSource(source) &&
+            _failedSourceAttemptCount(source) == 0)
+          source,
+    ];
+    if (adaptive.isEmpty ||
+        adaptive.any((source) => source.url == sources.first.url)) {
+      return sources;
+    }
+    final adaptiveUrls = adaptive.map((source) => source.url).toSet();
+    final remaining = [
+      for (final source in sources)
+        if (!adaptiveUrls.contains(source.url)) source,
+    ];
+    DiagnosticLog.add(
+      'native adaptive hls recovery order restored adaptive=${adaptive.length} remaining=${remaining.length} reason=persistent_buffering_quality_floor',
+    );
+    return <PlaybackSource>[...adaptive, ...remaining];
+  }
+
+  bool _deferFixedHlsAutoProviderIfNeeded(
+    NativePlaybackRequest request,
+    List<PlaybackSource> preparedSources,
+    _QualityPass qualityPass,
+    bool bypassQualityPass,
+    _NativePlaybackEngine engine,
+  ) {
+    if (bypassQualityPass) return false;
+    if (engine != _NativePlaybackEngine.exoplayer) return false;
+    if (widget.liveMode) return false;
+    if (!_hasSavedResumeProgressForRoute) return false;
+    if (qualityPass.isHighestAvailable || qualityPass.isUnknownQuality) {
+      return false;
+    }
+    if (_providerIndex >= _requests.length - 1) return false;
+    if (_deferredFixedHlsAutoProviders.contains(request.providerId)) {
+      return false;
+    }
+    if (preparedSources.isEmpty) return false;
+    if (preparedSources.any(_isAdaptiveHlsAutoSource)) return false;
+    var knownFixedHls = 0;
+    for (final source in preparedSources) {
+      if (source.sourceClass != PlaybackSourceClass.direct ||
+          !_isHlsSource(source)) {
+        return false;
+      }
+      final rank = _qualityRank(_qualityLabel(source));
+      if (rank <= 0) return false;
+      knownFixedHls += 1;
+    }
+    if (knownFixedHls <= 0) return false;
+    final deferredRequest = _requests.removeAt(_providerIndex);
+    _requests.add(deferredRequest);
+    _sourceIndex = 0;
+    _deferredFixedHlsAutoProviders.add(request.providerId);
+    DiagnosticLog.add(
+      'native provider deferred provider=${request.providerId} reason=auto_fixed_hls_wait_for_adaptive_or_later_provider fixedHls=$knownFixedHls remaining=${_requests.length - _providerIndex - 1} ${_qualityDiagnosticContext(qualityPass)}',
+    );
+    return true;
+  }
+
+  bool _deferAdaptiveHlsAutoProviderIfNeeded(
+    NativePlaybackRequest request,
+    List<PlaybackSource> preparedSources,
+    _QualityPass qualityPass,
+    bool bypassQualityPass,
+    _NativePlaybackEngine engine,
+  ) {
+    if (bypassQualityPass) return false;
+    if (engine != _NativePlaybackEngine.exoplayer) return false;
+    if (widget.liveMode) return false;
+    if (qualityPass.isHighestAvailable || qualityPass.isUnknownQuality) {
+      return false;
+    }
+    if (_providerIndex >= _requests.length - 1) return false;
+    if (_deferredFixedHlsAutoProviders.contains(request.providerId)) {
+      return false;
+    }
+    if (preparedSources.isEmpty) return false;
+    final onlyAdaptiveDirectHls = preparedSources.every(
+      (source) =>
+          source.sourceClass == PlaybackSourceClass.direct &&
+          _isAdaptiveHlsAutoSource(source),
+    );
+    if (!onlyAdaptiveDirectHls) return false;
+    final deferredRequest = _requests.removeAt(_providerIndex);
+    _requests.add(deferredRequest);
+    _sourceIndex = 0;
+    _deferredFixedHlsAutoProviders.add(request.providerId);
+    DiagnosticLog.add(
+      'native provider deferred provider=${request.providerId} reason=media3_resume_adaptive_hls_wait_for_fixed_or_later_provider remaining=${_requests.length - _providerIndex - 1} ${_qualityDiagnosticContext(qualityPass)}',
+    );
+    return true;
   }
 
   List<PlaybackSource> _limitBaselineP2pSmartStartSources(
@@ -5396,9 +9659,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         ).compareTo(_nativeSourceClassRank(b));
         if (classCompare != 0) return classCompare;
 
-        final failureCompare = (_failedSourceAttempts[a.url] ?? 0).compareTo(
-          _failedSourceAttempts[b.url] ?? 0,
-        );
+        final failureCompare = _failedSourceAttemptCount(
+          a,
+        ).compareTo(_failedSourceAttemptCount(b));
         if (failureCompare != 0) return failureCompare;
 
         final compatibilityCompare = _sourceEngineCompatibilityRank(
@@ -5486,7 +9749,16 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final strictDeviceCodec = engine == _NativePlaybackEngine.exoplayer;
     var rank = 0;
     if (container == 'hls' || container == 'dash') rank -= 3;
+    if (strictDeviceCodec && _isAdaptiveHlsAutoSource(source)) {
+      rank += 6;
+    }
     if (container == 'mp4') rank -= 2;
+    if (strictDeviceCodec &&
+        _hasSavedResumeProgressForRoute &&
+        !_isLiveTvMode &&
+        _isUnknownDirectMp4AutoSource(source)) {
+      rank += 8;
+    }
     if (container == 'mkv') rank += strictDeviceCodec ? 4 : 2;
     if (container == 'webm' || container == 'avi') rank += 2;
     if (video == 'h264') rank -= 4;
@@ -5502,6 +9774,32 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     if (audio == 'eac3' || audio == 'ac3') rank += 1;
     if (_qualityRank(_qualityLabel(source)) >= 2160) rank += 3;
+    rank += _media3DirectHlsRouteRiskRank(source, engine);
+    return rank;
+  }
+
+  int _media3DirectHlsRouteRiskRank(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    if (!_directHlsRouteRiskGuardsEnabled ||
+        engine != _NativePlaybackEngine.exoplayer ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source)) {
+      return 0;
+    }
+    final providerKey = _routeHlsProviderTimeoutKey(source, engine);
+    final qualityKey = _routeHlsQualityTimeoutKey(source, engine);
+    final providerRendererDrifts =
+        _routeHlsProviderRendererDrifts[providerKey] ?? 0;
+    final qualityRendererDrifts =
+        _routeHlsQualityRendererDrifts[qualityKey] ?? 0;
+    if (providerRendererDrifts <= 0 && qualityRendererDrifts <= 0) return 0;
+    final qualityRank = _qualityRank(_qualityLabel(source));
+    var rank = qualityRendererDrifts * 12;
+    if (qualityRank >= 720) {
+      rank += providerRendererDrifts * 8;
+    }
     return rank;
   }
 
@@ -5553,8 +9851,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return true;
     }
-    if (engine == _NativePlaybackEngine.libvlc &&
-        _libVlcAdaptiveUnsafeUrls.contains(source.url)) {
+    if (engine == _NativePlaybackEngine.exoplayer &&
+        _shouldSkipMedia3DirectHlsAfterRendererDrift(source)) {
       return true;
     }
     return engine == _NativePlaybackEngine.exoplayer &&
@@ -5743,8 +10041,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       _openingSourceToken += 1;
       _openingSource = false;
-      _failedSourceAttempts[source.url] =
-          (_failedSourceAttempts[source.url] ?? 0) + 1;
+      _incrementFailedSourceAttempt(source);
       AppState.recordNativeProviderFailure(
         mediaKey: _playbackKey,
         providerId: source.providerId,
@@ -6009,6 +10306,56 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return 'Refreshing source...';
   }
 
+  Future<void> _closeMobileLibVlcCoordinatorSession(String reason) async {
+    final coordinator = _mobileLibVlcCoordinator;
+    _mobileLibVlcCoordinator = null;
+    _stagedMobileLibVlcTransportMetadata.clear();
+    _stagedMobileLibVlcControllers.clear();
+    _activeMobileLibVlcSessionTimeline = null;
+    _mobileLibVlcSeekAbsoluteFloor = Duration.zero;
+    _mobileLibVlcSeekOwnerGeneration = -1;
+    _mobileLibVlcCandidateSources = null;
+    final transportSubscription = _mobileLibVlcTransportSubscription;
+    _mobileLibVlcTransportSubscription = null;
+    _mobileLibVlcRelayActive = false;
+    await transportSubscription?.cancel();
+    if (coordinator == null) return;
+    try {
+      await coordinator.close().timeout(const Duration(seconds: 4));
+      DiagnosticLog.add(
+        'native libvlc coordinator closed reason=$reason',
+      );
+    } catch (error) {
+      DiagnosticLog.add(
+        'native libvlc coordinator close failed '
+        'reason=$reason error=${_safeDiagnosticError(error)}',
+      );
+    } finally {
+      _resetLibVlcContinuousTsProof();
+    }
+  }
+
+  void _removeStagedMobileLibVlcController(
+    int generation, [
+    _NativePlaybackController? expected,
+  ]) {
+    final staged = _stagedMobileLibVlcControllers[generation];
+    if (staged == null || (expected != null && !identical(staged, expected))) {
+      return;
+    }
+    _stagedMobileLibVlcControllers.remove(generation);
+    if (mounted) setState(() {});
+  }
+
+  void _removeStaleMobileLibVlcSeekSurfaces(int ownerGeneration) {
+    _stagedMobileLibVlcControllers.removeWhere(
+      (generation, _) => generation != ownerGeneration,
+    );
+    _stagedMobileLibVlcTransportMetadata.removeWhere(
+      (key, _) => key.$2 != ownerGeneration,
+    );
+  }
+
   Future<void> _disposeCurrentController({
     bool updateUi = true,
     bool awaitLibVlcRelease = false,
@@ -6016,15 +10363,23 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }) async {
     _stopStallWatchdog();
     _cancelDeferredResumeSeek();
+    _media3DirectHlsStartupProofPending = false;
     final controller = _controller;
-    if (controller == null) return;
+    if (controller == null) {
+      await _closeMobileLibVlcCoordinatorSession(
+        'controller_missing',
+      );
+      return;
+    }
     if (saveProgress) {
       _trackLastKnownPlaybackPosition();
       _saveNativeProgress(force: true);
     }
     _controller = null;
-    controller.removeListener(_handleControllerUpdate);
+    _detachControllerUpdateListener(controller);
     final isLibVlc = controller.engine == _NativePlaybackEngine.libvlc;
+    final coordinatorOwnsController =
+        isLibVlc && _mobileLibVlcCoordinator != null;
     if (!controller.isInitialized) {
       DiagnosticLog.add(
         'native controller pause skipped engine=${controller.engine.id} reason=controller_not_initialized',
@@ -6055,8 +10410,19 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     if (mounted && updateUi) {
       setState(() {});
-      if (!isLibVlc) {
-        await WidgetsBinding.instance.endOfFrame;
+      try {
+        await WidgetsBinding.instance.endOfFrame.timeout(
+          const Duration(seconds: 1),
+        );
+        if (isLibVlc) {
+          DiagnosticLog.add(
+            'native libvlc lifecycle reason=platform_view_unmounted_before_dispose',
+          );
+        }
+      } catch (error) {
+        DiagnosticLog.add(
+          'native controller unmount frame skipped engine=${controller.engine.id} error=${_safeDiagnosticError(error)}',
+        );
       }
     }
     if (isLibVlc && awaitLibVlcRelease) {
@@ -6075,8 +10441,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final releaseTimeout = isLibVlc && awaitLibVlcRelease
         ? const Duration(seconds: 4)
         : const Duration(seconds: 2);
-    final release = controller.dispose().timeout(releaseTimeout);
-    if (isLibVlc && !awaitLibVlcRelease) {
+    final release = coordinatorOwnsController
+        ? _closeMobileLibVlcCoordinatorSession(
+            'controller_disposed',
+          ).timeout(releaseTimeout)
+        : controller.dispose().timeout(releaseTimeout);
+    if (isLibVlc && !awaitLibVlcRelease && !coordinatorOwnsController) {
       DiagnosticLog.add('native libvlc controller release detached');
       unawaited(
         release.then((_) {
@@ -6136,7 +10506,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _stopStallWatchdog();
     _cancelDeferredResumeSeek();
     _controller = null;
-    controller.removeListener(_handleControllerUpdate);
+    _detachControllerUpdateListener(controller);
     _activeSourceHasZeroClockMetadata = false;
     _nativeWallClockStartedAt = null;
     _lastSavedSecond = -1;
@@ -6174,6 +10544,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }
 
   Future<void> _stopLibVlcHlsRelay(String reason) async {
+    _libVlcHlsRelayGeneration += 1;
     final relay = _libVlcHlsRelay;
     if (relay == null) return;
     _libVlcHlsRelay = null;
@@ -6191,9 +10562,21 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
   }
 
-  void _resetLibVlcContinuousTsProof() {
+  void _resetLibVlcContinuousTsProof({
+    bool preserveSeekSettlement = false,
+  }) {
+    if (!preserveSeekSettlement) {
+      _libVlcSeekSettlementBarrier.clear();
+      _libVlcSeekSettlementLoggedGeneration = -1;
+    }
     _libVlcContinuousTsDurationAccepted = false;
+    _libVlcContinuousTsStartupLeadReady = false;
     _libVlcContinuousTsStreamedSegments = 0;
+    _libVlcContinuousTsStreamedBytes = 0;
+    _libVlcContinuousTsBufferedPosition = Duration.zero;
+    _libVlcContinuousTsLastTransportActivityAt = null;
+    _libVlcContinuousTsUpstreamErrors = 0;
+    _libVlcContinuousTsLastStatusBucket = 'none';
     _libVlcContinuousTsTimelineOffset = Duration.zero;
   }
 
@@ -6206,7 +10589,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
     DiagnosticLog.add(
-      'native libvlc continuous-ts relay proof accepted reason=$reason streamed=${_countDiagnosticBucket(_libVlcContinuousTsStreamedSegments)} durationKnown=$_libVlcContinuousTsDurationAccepted',
+      'native libvlc continuous-ts relay proof accepted reason=$reason streamed=${_countDiagnosticBucket(_libVlcContinuousTsStreamedSegments)} bytes=$_libVlcContinuousTsStreamedBytes durationKnown=$_libVlcContinuousTsDurationAccepted',
     );
     _clearPlaybackWaitMessage(reason: reason);
   }
@@ -6375,7 +10758,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }
 
   String _normalizeSavedQuality(String quality) {
-    return quality.trim();
+    return _displayQualityLabel(quality);
   }
 
   void _ensureSubtitlesLoading() {
@@ -6471,8 +10854,40 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return merged;
   }
 
+  void _attachControllerUpdateListener(_NativePlaybackController controller) {
+    _detachControllerUpdateListener(controller);
+    final callbackGeneration = _controllerCallbackGeneration;
+    void listener() {
+      if (!identical(_controller, controller) ||
+          !_terminalCallbackGate.permits(callbackGeneration)) {
+        widget.lifecycleHarness?.recordCallback(accepted: false);
+        return;
+      }
+      widget.lifecycleHarness?.recordCallback(accepted: true);
+      _handleControllerUpdate();
+    }
+
+    _controllerUpdateListeners[controller] = listener;
+    controller.addListener(listener);
+    widget.lifecycleHarness?.recordAttach();
+  }
+
+  void _detachControllerUpdateListener(_NativePlaybackController controller) {
+    final listener = _controllerUpdateListeners.remove(controller);
+    if (listener != null) {
+      controller.removeListener(listener);
+      widget.lifecycleHarness?.recordDetach();
+      return;
+    }
+    controller.removeListener(_handleControllerUpdate);
+  }
+
   void _handleControllerUpdate() {
-    if (_playerClosing) return;
+    if (_playerClosing ||
+        _terminalOpeningCallbackQuarantined ||
+        !_terminalCallbackGate.permits(_controllerCallbackGeneration)) {
+      return;
+    }
     final controller = _controller;
     if (controller != null &&
         controller.hasError &&
@@ -6488,6 +10903,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         return;
       }
       final recoveryPosition = _effectiveRecoveryPosition(controller.position);
+      if (_controllerErrorRecoveryAlreadyQueued(
+        controller,
+        recoveryPosition: recoveryPosition,
+        reason: 'listener',
+      )) {
+        return;
+      }
       final shouldRepairAtAnchor = _shouldRepairExoControllerErrorAtAnchor(
         controller,
         recoveryPosition,
@@ -6517,6 +10939,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           skipSameSource: !shouldRepairAtAnchor,
           skipProvider: !shouldRepairAtAnchor,
         ),
+      );
+      return;
+    }
+    if (controller != null && _resumeStartupSeekProofPending(controller)) {
+      _syncKeepScreenOn();
+      _maybeRecordDeferredLibVlcOpenSuccess(
+        controller,
+        reason: 'controller_update_resume_seek_pending',
       );
       return;
     }
@@ -6745,6 +11175,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   void _startStallWatchdog() {
     if (_playerClosing) return;
     _stopStallWatchdog();
+    if (_controller?.engine == _NativePlaybackEngine.libvlc &&
+        _mobileLibVlcCoordinator != null) {
+      return;
+    }
     _lastWatchdogPosition = _controller?.position ?? Duration.zero;
     _stallWatchdogTicks = 0;
     _blackVideoWatchdogTicks = 0;
@@ -6801,11 +11235,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _playbackCadenceConsecutiveJumpEvents = 0;
     _playbackCadenceHealthySamples = 0;
     _playbackCadenceUnstableEvents = 0;
-    _libVlcFrozenClockSamples = 0;
     _playbackCadenceClockUnstable = false;
     _lastPlaybackCadenceDriftHoldAt = null;
     _lastPlaybackCadenceDriftObservationLogAt = null;
     _playbackCadenceUnstableWindowStartedAt = null;
+    _media3RendererDriftHoldSourceKey = null;
+    _media3RendererDriftHoldCountForSource = 0;
+    _media3DirectHlsRendererDriftHoldCount = 0;
     _unstableClockProgressSkipLogSecond = -1;
   }
 
@@ -6830,6 +11266,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _unstableClockProgressSkipLogSecond = -1;
     _media3RendererDriftRepairSourceKey = null;
     _media3RendererDriftRepairCountForSource = 0;
+    _media3RendererDriftHoldSourceKey = null;
+    _media3RendererDriftHoldCountForSource = 0;
   }
 
   String _playbackSourceRuntimeKey(PlaybackSource source) {
@@ -6904,8 +11342,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     _media3PersistentBufferingStreakTicks = 0;
     _media3PersistentBufferingHealthySamples = 0;
+    _media3PersistentBufferingLastHealthyPosition = Duration.zero;
     _media3PersistentBufferingSourceKey = null;
     if (reason == 'credible_playback_recovered') {
+      _clearPlaybackWaitMessage(reason: reason!);
       _clearMedia3RecoveryQualityCeiling(reason: reason!);
     }
   }
@@ -6951,6 +11391,54 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _lastSavedSecond >= 5;
   }
 
+  bool _media3HasCurrentSessionBufferingHoldProof(
+    _NativePlaybackController controller,
+    PlaybackSource? source,
+  ) {
+    if (source == null) return false;
+    if (controller.engine != _NativePlaybackEngine.exoplayer) return false;
+    if (!controller.isInitialized ||
+        controller.hasError ||
+        controller.duration <= Duration.zero ||
+        controller.size == Size.zero ||
+        _activeSourceHasZeroClockMetadata) {
+      return false;
+    }
+    if (_isLiveTvMode || _isPublicIptvSource(source)) return true;
+    if (source.sourceClass == PlaybackSourceClass.p2p) return false;
+    if (!controller.hasRenderedVideoFrame) return false;
+    if (_media3HasSustainedVisualCadenceProof(controller)) return true;
+    return _sourceHasRawVisualPlaybackProof(controller) ||
+        _sourceHasVisualPlaybackProof(controller);
+  }
+
+  bool _media3HasPersistentBufferingHoldProof(
+    _NativePlaybackController controller,
+    PlaybackSource? source,
+  ) {
+    if (!_media3HasCurrentSessionBufferingHoldProof(controller, source)) {
+      return false;
+    }
+    if (source == null) return false;
+    if (source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        _media3PersistentBufferingStreakTicks > 0) {
+      final proofMinimum = _verifiedSourcePlaybackProofMinimum(
+        source,
+        publicIptvSource: _isPublicIptvSource(source),
+      );
+      final hasSustainedCadence = _playbackCadenceHealthySamples >= 4 &&
+          !_playbackCadenceClockUnstable &&
+          _sourceCredibleWatchSeconds >= proofMinimum.inSeconds;
+      final hasRecoveredFromCurrentStreak =
+          _media3PersistentBufferingHealthySamples >= 4;
+      if (!hasSustainedCadence && !hasRecoveredFromCurrentStreak) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   void _recordMedia3PersistentBufferingTick(
     _NativePlaybackController controller,
     PlaybackSource? source,
@@ -6970,16 +11458,25 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     _media3PersistentBufferingSourceKey = sourceKey;
     _media3PersistentBufferingStreakTicks += 1;
-    _media3PersistentBufferingHealthySamples = 0;
+    if (!_hasRecentMedia3PersistentBufferingProgressProof(
+      recoveryPosition,
+      minimumSamples: 1,
+    )) {
+      _media3PersistentBufferingHealthySamples = 0;
+      _media3PersistentBufferingLastHealthyPosition = Duration.zero;
+    }
+    _forgetVerifiedSource(source, 'media3_persistent_buffering');
     if (_media3PersistentBufferingStreakTicks > _bufferingWatchdogTicks) {
       _bufferingWatchdogTicks = _media3PersistentBufferingStreakTicks;
     }
     _lastMedia3PersistentBufferingSourceKey = sourceKey;
     _lastMedia3PersistentBufferingSeenAt = DateTime.now();
-    _lastMedia3PersistentBufferingTicks =
-        _media3PersistentBufferingStreakTicks;
+    _lastMedia3PersistentBufferingTicks = _media3PersistentBufferingStreakTicks;
     final escapeTickLimit =
-        _persistentBufferingAnchorEscapeTickLimitForSource(source);
+        _persistentBufferingAnchorEscapeTickLimitForSourceAtPosition(
+      source,
+      recoveryPosition,
+    );
     if (_media3PersistentBufferingStreakTicks == 1 ||
         _media3PersistentBufferingStreakTicks == escapeTickLimit ||
         _media3PersistentBufferingStreakTicks % escapeTickLimit == 0) {
@@ -7003,9 +11500,37 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     )) {
       return false;
     }
+    if (_sourceHasMedia3DirectHlsRendererDriftRepair(source)) return false;
     if (!_isHlsSource(source)) return false;
-    final recoveryTickLimit = _bufferingRecoveryTickLimitForSource(source);
-    if (_media3PersistentBufferingStreakTicks < recoveryTickLimit) {
+    if (_hasRecentMedia3PersistentBufferingProgressProof(
+      recoveryPosition,
+      minimumSamples: 2,
+    )) {
+      DiagnosticLog.add(
+        'native media3 persistent buffering segment nudge skipped provider=${source.providerId} healthy=$_media3PersistentBufferingHealthySamples position=${recoveryPosition.inSeconds}s action=hold_moving_buffering reason=recent_progress_proof',
+      );
+      return false;
+    }
+    final recoveryTickLimit = _bufferingRecoveryTickLimitForSourceAtPosition(
+      source,
+      recoveryPosition,
+    );
+    final hasPersistentBufferingHoldProof =
+        _media3HasPersistentBufferingHoldProof(
+      controller,
+      source,
+    );
+    final provenSourceHoldLimit = hasPersistentBufferingHoldProof
+        ? math.min(2, recoveryTickLimit)
+        : recoveryTickLimit;
+    if (hasPersistentBufferingHoldProof &&
+        _media3PersistentBufferingStreakTicks < provenSourceHoldLimit) {
+      DiagnosticLog.add(
+        'native media3 persistent buffering segment nudge skipped provider=${source.providerId} ticks=$_media3PersistentBufferingStreakTicks limit=$provenSourceHoldLimit action=hold_proven_source reason=credible_playback_buffering',
+      );
+      return false;
+    }
+    if (_media3PersistentBufferingStreakTicks < provenSourceHoldLimit) {
       return false;
     }
     final duration = controller.duration;
@@ -7014,6 +11539,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return false;
     }
     final sourceKey = _playbackSourceRuntimeKey(source);
+    if (_media3PersistentBufferingNudgeSourceKey == sourceKey &&
+        _media3PersistentBufferingNudgeCountForSource >= 1) {
+      DiagnosticLog.add(
+        'native media3 persistent buffering segment nudge skipped provider=${source.providerId} count=$_media3PersistentBufferingNudgeCountForSource action=escape_source reason=persistent_buffering_segment_nudge_limit',
+      );
+      return false;
+    }
     if (_media3PersistentBufferingNudgeSourceKey == sourceKey &&
         (recoveryPosition.inSeconds -
                     _media3PersistentBufferingNudgeAnchorSecond)
@@ -7043,8 +11575,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
     _media3PersistentBufferingNudgeInFlight = true;
-    _media3PersistentBufferingNudgeSourceKey =
-        _playbackSourceRuntimeKey(source);
+    final sourceKey = _playbackSourceRuntimeKey(source);
+    if (_media3PersistentBufferingNudgeSourceKey != sourceKey) {
+      _media3PersistentBufferingNudgeCountForSource = 0;
+    }
+    _media3PersistentBufferingNudgeSourceKey = sourceKey;
+    _media3PersistentBufferingNudgeCountForSource += 1;
     _media3PersistentBufferingNudgeAnchorSecond = recoveryPosition.inSeconds;
     final duration = controller.duration;
     final target = recoveryPosition + const Duration(seconds: 2);
@@ -7053,7 +11589,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         ? duration - const Duration(seconds: 1)
         : target;
     DiagnosticLog.add(
-      'native media3 persistent buffering segment nudge provider=${source.providerId} position=${recoveryPosition.inSeconds}s target=${clampedTarget.inSeconds}s action=seek_forward reason=persistent_buffering_segment_nudge',
+      'native media3 persistent buffering segment nudge provider=${source.providerId} count=$_media3PersistentBufferingNudgeCountForSource position=${recoveryPosition.inSeconds}s target=${clampedTarget.inSeconds}s action=seek_forward reason=persistent_buffering_segment_nudge',
     );
     _armMedia3RecoveryQualityCeiling(
       controller,
@@ -7087,27 +11623,37 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }
 
   void _recordMedia3PersistentBufferingHealthySample(
-    _NativePlaybackController controller,
-    PlaybackSource? source,
-    Duration position,
-  ) {
+      _NativePlaybackController controller,
+      PlaybackSource? source,
+      Duration position,
+      {bool allowVisualBufferingProgress = false}) {
     if (_media3PersistentBufferingStreakTicks <= 0) return;
     if (source == null ||
         controller.engine != _NativePlaybackEngine.exoplayer ||
         _media3PersistentBufferingSourceKey !=
             _playbackSourceRuntimeKey(source)) {
-      _resetMedia3PersistentBufferingStreak(reason: 'healthy_sample_source_changed');
+      _resetMedia3PersistentBufferingStreak(
+          reason: 'healthy_sample_source_changed');
       return;
     }
+    final visualBufferingProgress = allowVisualBufferingProgress &&
+        controller.isBuffering &&
+        controller.isPlaying &&
+        controller.hasRenderedVideoFrame &&
+        controller.duration > Duration.zero &&
+        controller.size != Size.zero &&
+        !_activeSourceHasZeroClockMetadata;
     if (!controller.isInitialized ||
-        controller.isBuffering ||
+        (controller.isBuffering && !visualBufferingProgress) ||
         !controller.isPlaying ||
         controller.hasError ||
         controller.size == Size.zero) {
       _media3PersistentBufferingHealthySamples = 0;
+      _media3PersistentBufferingLastHealthyPosition = Duration.zero;
       return;
     }
     _media3PersistentBufferingHealthySamples += 1;
+    _media3PersistentBufferingLastHealthyPosition = position;
     if (_media3PersistentBufferingHealthySamples >= 4) {
       _resetMedia3PersistentBufferingStreak(
         reason: 'credible_playback_recovered',
@@ -7115,8 +11661,59 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
     DiagnosticLog.add(
-      'native media3 persistent buffering tentative progress provider=${source.providerId} ticks=$_media3PersistentBufferingStreakTicks healthy=$_media3PersistentBufferingHealthySamples/4 position=${position.inSeconds}s action=retain_watchdog',
+      'native media3 persistent buffering tentative progress provider=${source.providerId} ticks=$_media3PersistentBufferingStreakTicks healthy=$_media3PersistentBufferingHealthySamples/4 position=${position.inSeconds}s bufferingVisual=$visualBufferingProgress action=retain_watchdog',
     );
+  }
+
+  bool _hasRecentMedia3PersistentBufferingProgressProof(
+    Duration recoveryPosition, {
+    required int minimumSamples,
+  }) {
+    if (_media3PersistentBufferingHealthySamples < minimumSamples) {
+      return false;
+    }
+    final lastHealthy = _media3PersistentBufferingLastHealthyPosition;
+    if (lastHealthy <= Duration.zero) return false;
+    return recoveryPosition <= lastHealthy + const Duration(seconds: 2);
+  }
+
+  bool _shouldTolerateMedia3ResumeSeekSettleBurst(
+    _NativePlaybackController controller,
+    PlaybackSource source,
+    DateTime now,
+    Duration position,
+    Duration previousPosition,
+    double ratio,
+  ) {
+    final until = _media3ResumeSeekSettleUntil;
+    if (until == null || now.isAfter(until)) {
+      _clearMedia3ResumeSeekSettleWindow();
+      return false;
+    }
+    if (controller.engine != _NativePlaybackEngine.exoplayer ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source) ||
+        !controller.isPlaying ||
+        controller.isBuffering ||
+        controller.hasError ||
+        !controller.hasRenderedVideoFrame ||
+        controller.duration <= Duration.zero ||
+        controller.size == Size.zero ||
+        _activeSourceHasZeroClockMetadata ||
+        _media3ResumeSeekSettleAnchor < const Duration(seconds: 30) ||
+        position < _media3ResumeSeekSettleAnchor - const Duration(seconds: 5) ||
+        position >
+            _media3ResumeSeekSettleAnchor + const Duration(seconds: 45) ||
+        position <= previousPosition ||
+        ratio < 1.80 ||
+        _media3ResumeSeekSettleDrifts >= 4) {
+      return false;
+    }
+    _media3ResumeSeekSettleDrifts += 1;
+    DiagnosticLog.add(
+      'native media3 resume seek settle tolerated provider=${source.providerId} observed=${position.inSeconds}s previous=${previousPosition.inSeconds}s anchor=${_media3ResumeSeekSettleAnchor.inSeconds}s ratio=${ratio.toStringAsFixed(2)} tolerated=$_media3ResumeSeekSettleDrifts/4 reason=post_resume_seek_clock_settling',
+    );
+    return true;
   }
 
   void _samplePlaybackCadence() {
@@ -7135,7 +11732,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         controller.hasError) {
       return;
     }
+    if (controller.engine == _NativePlaybackEngine.libvlc &&
+        _mobileLibVlcCoordinator != null) {
+      return;
+    }
     final now = DateTime.now();
+    _logMedia3ChildLoadTelemetryIfChanged(controller, source);
     final previousSampleAt = _lastCadenceSampleAt ?? now;
     var previousPosition = _lastCadencePosition;
     final position = _resumeAnchoredPlaybackPosition(controller);
@@ -7145,37 +11747,95 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     );
     final wallDeltaMs = now.difference(previousSampleAt).inMilliseconds;
     if (wallDeltaMs <= 0) return;
+    if (wallDeltaMs < 500) return;
     final speed = math.max(_playbackSpeed, 1.0);
-    final firstAnchoredLibVlcRelaySample =
-        controller.engine == _NativePlaybackEngine.libvlc &&
-            _libVlcContinuousTsActive &&
-            _libVlcContinuousTsTimelineOffset > Duration.zero &&
-            previousPosition <= Duration.zero &&
-            position >= _libVlcContinuousTsTimelineOffset;
-    if (firstAnchoredLibVlcRelaySample) {
-      previousPosition = position -
-          Duration(milliseconds: (wallDeltaMs * speed).round());
-    }
     final playbackDeltaMs =
         position.inMilliseconds - previousPosition.inMilliseconds;
     _playbackCadenceSamples += 1;
     final ratio = playbackDeltaMs / wallDeltaMs;
     final allowedDeltaMs = (wallDeltaMs * speed * 1.80 + 1600).round();
+    final media3DirectHlsClockBurst =
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+            _shouldAvoidLibVlcRendererDriftEscalation(source) &&
+            controller.isPlaying &&
+            !controller.isBuffering &&
+            position.inSeconds >= 8 &&
+            ratio >= 2.70;
     final correctedTarget = previousPosition +
         Duration(milliseconds: (wallDeltaMs * speed).round());
+    if (_shouldPreemptSustainedMedia3DirectHlsClockDrift(
+      controller,
+      source,
+      now,
+    )) {
+      final heldPosition = _lastCrediblePlaybackPosition > Duration.zero
+          ? _lastCrediblePlaybackPosition
+          : previousPosition;
+      final recoveryAnchor = _media3RendererDriftRecoveryAnchor(
+        heldPosition: heldPosition,
+        observedPosition: position,
+        correctedTarget: correctedTarget,
+      );
+      if (recoveryAnchor >= const Duration(seconds: 3) &&
+          _sourceHasMedia3DirectHlsRendererDriftRepair(source) &&
+          _shouldAvoidLibVlcRendererDriftEscalation(source)) {
+        DiagnosticLog.add(
+          'native playback cadence renderer drift preemptive escape queued provider=${source.providerId} engine=${controller.engine.id} observed=${position.inSeconds}s stable=${heldPosition.inSeconds}s anchor=${recoveryAnchor.inSeconds}s ratio=${ratio.toStringAsFixed(2)} unstable=$_playbackCadenceUnstableEvents action=advance_source_at_anchor reason=sustained_unstable_direct_hls_clock_after_repair',
+        );
+        unawaited(
+          _advanceFromMedia3DirectHlsRendererDrift(
+            source: source,
+            anchor: recoveryAnchor,
+            reason: 'media3_repaired_direct_hls_renderer_drift_unproven',
+          ),
+        );
+        return;
+      }
+      if (recoveryAnchor >= const Duration(seconds: 3) &&
+          _canStartMedia3RendererDriftRepair(
+            source: source,
+            anchor: recoveryAnchor,
+            now: now,
+          )) {
+        DiagnosticLog.add(
+          'native playback cadence renderer drift preemptive repair queued provider=${source.providerId} engine=${controller.engine.id} observed=${position.inSeconds}s stable=${heldPosition.inSeconds}s anchor=${recoveryAnchor.inSeconds}s ratio=${ratio.toStringAsFixed(2)} unstable=$_playbackCadenceUnstableEvents action=repair_renderer_at_anchor reason=sustained_unstable_direct_hls_clock',
+        );
+        unawaited(
+          _repairMedia3RendererDriftAtAnchor(
+            source: source,
+            anchor: recoveryAnchor,
+            observedPosition: position,
+            heldPosition: heldPosition,
+          ),
+        );
+      }
+    }
     final hasImpossibleAdvance = controller.isPlaying &&
         !controller.isBuffering &&
-        playbackDeltaMs > allowedDeltaMs &&
+        (playbackDeltaMs > allowedDeltaMs || media3DirectHlsClockBurst) &&
         ratio > 2.25 &&
         position.inSeconds >= 8;
-    final hasFrozenLibVlcClock = controller.engine == _NativePlaybackEngine.libvlc &&
-        controller.isPlaying &&
-        !controller.isBuffering &&
-        position.inSeconds >= 5 &&
-        playbackDeltaMs <= 120;
     _lastCadenceSampleAt = now;
     if (hasImpossibleAdvance) {
-      _libVlcFrozenClockSamples = 0;
+      if (_shouldTolerateMedia3ResumeSeekSettleBurst(
+        controller,
+        source,
+        now,
+        position,
+        previousPosition,
+        ratio,
+      )) {
+        _lastCadencePosition = position;
+        _lastWatchdogPosition = position;
+        _playbackCadenceConsecutiveJumpEvents = 0;
+        _playbackCadenceHealthySamples += 1;
+        _recordMedia3PersistentBufferingHealthySample(
+          controller,
+          source,
+          position,
+        );
+        return;
+      }
       _playbackCadenceJumpEvents += 1;
       _playbackCadenceConsecutiveJumpEvents += 1;
       _playbackCadenceHealthySamples = 0;
@@ -7196,8 +11856,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       final lastObservationAt = _lastPlaybackCadenceDriftObservationLogAt;
       final observationLogThrottled = lastObservationAt != null &&
           now.difference(lastObservationAt) < const Duration(seconds: 8);
-      if (_playbackCadenceJumpEvents >= 2 &&
-          isPastStartup &&
+      final isMedia3DirectHlsSource =
+          controller.engine == _NativePlaybackEngine.exoplayer &&
+              source.sourceClass == PlaybackSourceClass.direct &&
+              _isHlsSource(source);
+      final directHlsSevereFirstJump = isMedia3DirectHlsSource &&
+          !_activeSourceVerifiedForSession &&
+          _media3DirectHlsStartupProofPending &&
+          ratio >= 4.25 &&
+          _playbackCadenceConsecutiveJumpEvents >= 1;
+      if ((_playbackCadenceJumpEvents >= 2 || directHlsSevereFirstJump) &&
+          (isPastStartup || directHlsSevereFirstJump) &&
           correctedTarget < position) {
         final engineClockMismatch =
             controller.engine == _NativePlaybackEngine.exoplayer &&
@@ -7207,10 +11876,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           final repairedSameSource =
               _media3RendererDriftRepairSourceKey == sourceKey &&
                   _media3RendererDriftRepairCountForSource > 0;
-          final severeRendererDrift =
-              ratio >= 6.0 && _playbackCadenceConsecutiveJumpEvents >= 2;
-          final minimumDriftConsecutiveEvents =
-              severeRendererDrift ? 2 : (repairedSameSource ? 2 : 3);
+          final severeRendererDrift = (ratio >= 4.25 &&
+                  (_playbackCadenceConsecutiveJumpEvents >= 2 ||
+                      directHlsSevereFirstJump)) ||
+              (media3DirectHlsClockBurst &&
+                  _playbackCadenceConsecutiveJumpEvents >= 2);
+          final hasSustainedVisualCadenceProof =
+              _media3HasSustainedVisualCadenceProof(controller);
+          final shouldEscapeManualMedia3DirectHls = severeRendererDrift &&
+              isMedia3DirectHlsSource &&
+              _effectivePlaybackEngine == 'exoplayer' &&
+              !hasSustainedVisualCadenceProof;
+          final minimumDriftConsecutiveEvents = directHlsSevereFirstJump
+              ? 1
+              : (severeRendererDrift ? 2 : (repairedSameSource ? 2 : 3));
           final minimumDriftObservation = severeRendererDrift
               ? Duration.zero
               : (repairedSameSource
@@ -7238,6 +11917,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                 repairedSameSource: repairedSameSource,
                 severeRendererDrift: severeRendererDrift,
                 unstableFor: unstableFor,
+                ratio: ratio,
               )) {
                 _holdMedia3RendererDriftOnCurrentSource(
                   controller,
@@ -7247,6 +11927,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                   heldPosition: heldPosition,
                   ratio: ratio,
                   unstableFor: unstableFor,
+                );
+                return;
+              }
+              if (shouldEscapeManualMedia3DirectHls) {
+                _recordMedia3DirectHlsRendererDriftRisk(source);
+                DiagnosticLog.add(
+                  'native playback cadence renderer drift direct hls escape queued provider=${source.providerId} engine=${controller.engine.id} observed=${position.inSeconds}s stable=${heldPosition.inSeconds}s anchor=${recoveryAnchor.inSeconds}s ratio=${ratio.toStringAsFixed(2)} consecutive=$_playbackCadenceConsecutiveJumpEvents action=advance_source_at_anchor reason=manual_media3_direct_hls_renderer_drift',
+                );
+                unawaited(
+                  _advanceFromMedia3DirectHlsRendererDrift(
+                    source: source,
+                    anchor: recoveryAnchor,
+                    reason: 'manual_media3_direct_hls_renderer_drift',
+                  ),
                 );
                 return;
               }
@@ -7312,28 +12006,47 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     } else if (ratio > 0.35 && ratio < 1.80 && !controller.isBuffering) {
       _lastCadencePosition = position;
       _playbackCadenceConsecutiveJumpEvents = 0;
-      _libVlcFrozenClockSamples = 0;
       _playbackCadenceHealthySamples += 1;
       _recordMedia3PersistentBufferingHealthySample(
         controller,
         source,
         position,
       );
+      if (_playbackCadenceClockUnstable &&
+          _playbackCadenceHealthySamples >= 4) {
+        _lastIntegritySampleAt = now;
+        _lastIntegrityPosition = position;
+        _lastKnownPlaybackPosition = position;
+        _rememberCrediblePlaybackAnchor(
+          position,
+          reason: 'cadence_clock_recovered',
+        );
+        DiagnosticLog.add(
+          'native playback cadence clock recovered provider=${source.providerId} engine=${controller.engine.id} position=${position.inSeconds}s healthy=$_playbackCadenceHealthySamples action=trust_current_clock',
+        );
+        _clearPlaybackCadenceUnstableState();
+      }
       if (_playbackCadenceHealthySamples >= 15) {
         _clearPlaybackCadenceUnstableState();
       }
+    } else if (ratio > 0.35 &&
+        ratio < 1.80 &&
+        controller.isBuffering &&
+        controller.isPlaying &&
+        _shouldKeepVisualControllerBufferingQuiet(
+          controller,
+          source,
+          position,
+        )) {
+      _lastCadencePosition = position;
+      _playbackCadenceConsecutiveJumpEvents = 0;
+      _recordMedia3PersistentBufferingHealthySample(
+        controller,
+        source,
+        position,
+        allowVisualBufferingProgress: true,
+      );
     } else {
-      if (hasFrozenLibVlcClock) {
-        _libVlcFrozenClockSamples += 1;
-        if (_libVlcFrozenClockSamples == 3 ||
-            _libVlcFrozenClockSamples % 8 == 0) {
-          DiagnosticLog.add(
-            'native libvlc frozen playback clock provider=${source.providerId} samples=$_libVlcFrozenClockSamples position=${position.inSeconds}s playbackDeltaMs=$playbackDeltaMs action=watchdog',
-          );
-        }
-      } else if (!controller.isBuffering) {
-        _libVlcFrozenClockSamples = 0;
-      }
       if (_playbackCadenceClockUnstable || controller.isBuffering) {
         _lastCadencePosition = stableCadencePosition;
       } else {
@@ -7348,34 +12061,89 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         controller.isBuffering;
     if (!shouldLog) return;
     DiagnosticLog.add(
-      'native playback cadence sample sourceClass=${source.sourceClass.wireName} provider=${source.providerId} engine=${controller.engine.id} view=${controller.videoViewType?.name ?? 'native'} position=${position.inSeconds}s wallDeltaMs=$wallDeltaMs playbackDeltaMs=$playbackDeltaMs ratio=${ratio.toStringAsFixed(2)} engineSpeed=${controller.playbackSpeed.toStringAsFixed(2)} playing=${controller.isPlaying} buffering=${controller.isBuffering}',
+      'native playback cadence sample sourceClass=${source.sourceClass.wireName} provider=${source.providerId} engine=${controller.engine.id} view=${controller.videoViewType?.name ?? 'native'} position=${position.inSeconds}s bufferEnd=${controller.bufferedPosition.inSeconds}s bufferAhead=${controller.totalBufferedDuration.inSeconds}s relayBufferEnd=${_libVlcContinuousTsBufferedPosition.inSeconds}s relayLead=${_libVlcContinuousTsRemainingLead(position).inSeconds}s relayFatal=${_libVlcContinuousTsUpstreamErrors > 0} wallDeltaMs=$wallDeltaMs playbackDeltaMs=$playbackDeltaMs ratio=${ratio.toStringAsFixed(2)} engineSpeed=${controller.playbackSpeed.toStringAsFixed(2)} playing=${controller.isPlaying} buffering=${controller.isBuffering}',
     );
   }
 
-  Future<bool> _retrySourceWithExoPlayerAfterLibVlcFailure(
+  void _logMedia3ChildLoadTelemetryIfChanged(
+    _NativePlaybackController controller,
     PlaybackSource source,
-    Duration resumePosition, {
-    required String statusMessage,
-    required String reason,
-  }) async {
-    if (!mounted || _playerClosing) return false;
-    if (_manualLibVlcStrictForSource(source)) {
-      DiagnosticLog.add(
-        'native exoplayer retry skipped provider=${source.providerId} reason=manual_libvlc_locked originalReason=$reason',
-      );
-      return false;
-    }
-    if (!_libvlcUnavailableForSession && !_libvlcUnavailableForAppSession) {
-      return false;
-    }
+  ) {
+    final media3Controller = controller.media3;
+    if (media3Controller == null) return;
+    final signature = [
+      media3Controller.loadCompletedSummary,
+      media3Controller.loadErrorSummary,
+      media3Controller.lastLoadErrorBucket,
+    ].join('|');
+    if (signature == _lastMedia3ChildLoadTelemetrySignature) return;
+    _lastMedia3ChildLoadTelemetrySignature = signature;
     DiagnosticLog.add(
-      'native retrying source with exoplayer provider=${source.providerId} position=${resumePosition.inSeconds}s reason=$reason',
+      'native media3 child load telemetry provider=${source.providerId} loads=${media3Controller.loadCompletedSummary} loadErrors=${media3Controller.loadErrorSummary} lastLoadError=${media3Controller.lastLoadErrorBucket}',
     );
-    return _openSource(
+  }
+
+  Future<void> _recoverFromMedia3HlsPersistentBufferingNudge(
+    PlaybackSource source,
+    Duration recoveryPosition,
+  ) async {
+    final retriedWithLibVlc = await _retrySourceWithLibVlcAfterExoVisualFailure(
       source,
-      resumePosition: resumePosition,
-      statusMessage: statusMessage,
-      engineOverride: _NativePlaybackEngine.exoplayer,
+      recoveryPosition,
+      statusMessage: 'Recovering stream...',
+      reason: 'media3_hls_buffering_nudge_limit',
+    );
+    if (retriedWithLibVlc) {
+      DiagnosticLog.add(
+        'native media3 persistent buffering nudge recovered with libvlc provider=${source.providerId} ticks=$_media3PersistentBufferingStreakTicks position=${recoveryPosition.inSeconds}s action=retry_libvlc reason=media3_hls_buffering_nudge_limit',
+      );
+      return;
+    }
+
+    final qualityRank = _qualityRank(_qualityLabel(source));
+    final inferredRank =
+        qualityRank > 0 ? qualityRank : _media3RecoveryQualityCeilingRank;
+    if (qualityRank > 0) {
+      _resumeRecoveryExcludedQualityRanks.add(qualityRank);
+    } else {
+      _resumeRecoveryUnrankedDirectHlsFailures += 1;
+    }
+    _markRuntimeSourceFailure(
+      source,
+      'media3_persistent_buffering_nudge_limit',
+    );
+    _incrementFailedSourceAttempt(source);
+    _ignoreSavedQualityForResumeRecovery = true;
+    _anchorNativeRecoveryProgress(
+      recoveryPosition,
+      reason: 'media3_persistent_buffering_nudge_limit',
+    );
+    _bufferingWatchdogTicks = 0;
+    _persistentBufferingRecoveryEscapeArmed = true;
+    DiagnosticLog.add(
+      'native media3 persistent buffering nudge limit escaping source provider=${source.providerId} ticks=$_media3PersistentBufferingStreakTicks rank=${inferredRank ?? qualityRank} position=${recoveryPosition.inSeconds}s action=advance_source reason=media3_hls_buffering_nudge_limit',
+    );
+    final nextSourceIndex =
+        _nextSourceIndexAfterHardFailure(_activeSources, _sourceIndex);
+    if (nextSourceIndex != null) {
+      DiagnosticLog.add(
+        'native media3 persistent buffering nudge provider=${source.providerId} nextSourceIndex=$nextSourceIndex action=advance_known_source_without_resolve position=${recoveryPosition.inSeconds}s reason=media3_hls_buffering_nudge_limit',
+      );
+      if (await _tryKnownMedia3RecoverySourceAtIndex(
+        nextSourceIndex,
+        recoveryPosition,
+        reason: 'media3_persistent_buffering_alternate_source',
+      )) {
+        return;
+      }
+      _recoveringFromStall = false;
+    }
+    await _recoverFromPlaybackStall(
+      recoveryPosition,
+      skipSameSource: true,
+      skipProvider: false,
+      forceSourceAdvance: true,
+      allowSourceReload: false,
     );
   }
 
@@ -7386,9 +12154,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     required String reason,
   }) async {
     if (!mounted || _playerClosing) return false;
-    final overrideManualEngine =
-        _canOverrideManualEngineForVisualRepair(reason);
-    if (_effectivePlaybackEngine != 'auto' && !overrideManualEngine) {
+    if (_effectivePlaybackEngine != 'auto') {
       DiagnosticLog.add(
         'native retry with libvlc skipped provider=${source.providerId} reason=manual_engine_locked originalReason=$reason',
       );
@@ -7398,8 +12164,19 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return false;
     }
     if (_isLiveTvMode && !_isPublicIptvSource(source)) return false;
-    if (source.sourceClass == PlaybackSourceClass.direct &&
+    if (_shouldRejectLibVlcDirectHlsStartup(
+      source,
+      _NativePlaybackEngine.libvlc,
+    )) {
+      DiagnosticLog.add(
+        'native retry with libvlc skipped provider=${source.providerId} reason=libvlc_direct_hls_startup_crash_guard originalReason=$reason',
+      );
+      return false;
+    }
+    if (_libVlcContinuousTsRelayEnabled &&
+        source.sourceClass == PlaybackSourceClass.direct &&
         _isHlsSource(source) &&
+        !_canUseLibVlcHlsRelaySource(source, _NativePlaybackEngine.libvlc) &&
         resumePosition >= const Duration(seconds: 5)) {
       if (_effectivePlaybackEngine == 'auto') {
         _libvlcUnavailableForSession = true;
@@ -7409,11 +12186,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return false;
     }
-    if (overrideManualEngine) {
-      DiagnosticLog.add(
-        'native retry with libvlc provider=${source.providerId} position=${resumePosition.inSeconds}s action=override_manual_engine_lock reason=$reason',
-      );
-    }
     DiagnosticLog.add(
       'native retrying source with libvlc provider=${source.providerId} position=${resumePosition.inSeconds}s reason=$reason',
     );
@@ -7422,12 +12194,65 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       resumePosition: resumePosition,
       statusMessage: statusMessage,
       engineOverride: _NativePlaybackEngine.libvlc,
+      requireStartupPlaybackProof: true,
     );
   }
 
-  bool _canOverrideManualEngineForVisualRepair(String reason) {
-    return reason == 'exoplayer_black_video' ||
-        reason == 'media3_platform_view_black_video';
+  bool _shouldRejectLibVlcDirectHlsStartup(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    if (engine != _NativePlaybackEngine.libvlc) return false;
+    if (!_libVlcContinuousTsRelayEnabled) return false;
+    if (_nativeRouteIsLiveWithoutRequestState || _isPublicIptvSource(source)) {
+      return false;
+    }
+    if (_canUseLibVlcHlsRelaySource(source, engine)) return false;
+    return source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source);
+  }
+
+  bool _shouldRejectLibVlcDirectHlsResume(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+    Duration resumePosition,
+  ) {
+    if (engine != _NativePlaybackEngine.libvlc) return false;
+    if (!_libVlcContinuousTsRelayEnabled) return false;
+    if (resumePosition < const Duration(seconds: 5)) return false;
+    if (_nativeRouteIsLiveWithoutRequestState || _isPublicIptvSource(source)) {
+      return false;
+    }
+    if (_canUseLibVlcHlsRelaySource(source, engine)) return false;
+    return source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source);
+  }
+
+  bool _canUseLibVlcHlsRelaySource(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    if (engine != _NativePlaybackEngine.libvlc) return false;
+    if (!_libVlcContinuousTsRelayEnabled) return false;
+    if (source.sourceClass != PlaybackSourceClass.direct) return false;
+    if (!_isHlsSource(source)) return false;
+    if (source.headers.isNotEmpty) return true;
+    return mobileFirstPartyOpaqueMediaCapability(Uri.tryParse(source.url));
+  }
+
+  bool get _nativeRouteIsLiveWithoutRequestState {
+    return widget.liveMode || _progressItem?.type == MediaType.liveTv;
+  }
+
+  Duration? _preOpenLibVlcDirectHlsResumePosition(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    if (engine != _NativePlaybackEngine.libvlc) return null;
+    if (source.sourceClass != PlaybackSourceClass.direct) return null;
+    if (!_isHlsSource(source)) return null;
+    final resumePosition = _preOpenPreferredResumePosition(source, engine);
+    return resumePosition > Duration.zero ? resumePosition : null;
   }
 
   bool _shouldTryLibVlcForMedia3ResumeFailure(
@@ -7455,8 +12280,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         (description.contains('source error') ||
             description.contains('exoplaybackexception') ||
             description.contains('failed_runtime_check'));
-    return sourceError &&
-        _hadRecentMedia3PersistentBufferingForSource(source);
+    return sourceError && _hadRecentMedia3PersistentBufferingForSource(source);
   }
 
   void _prepareForSystemPip() {
@@ -7560,49 +12384,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _resetTransientPlaybackDebounce();
       return;
     }
+    if (controller.engine == _NativePlaybackEngine.libvlc &&
+        _mobileLibVlcCoordinator != null) {
+      return;
+    }
 
     final position = controller.position;
-    final libVlcFrozenClockRecovery = controller.engine ==
-            _NativePlaybackEngine.libvlc &&
-        _libVlcFrozenClockSamples >= 8;
-    if (_libVlcContinuousTsPlaybackActive(controller) &&
-        !libVlcFrozenClockRecovery) {
-      _lastWatchdogPosition = position;
-      _stallWatchdogTicks = 0;
-      _deadPauseTicks = 0;
-      _blackVideoWatchdogTicks = 0;
-      _bufferingWatchdogTicks = 0;
-      _resetTransientPlaybackDebounce();
-      if (_lastSavedSecond == 8 || _lastSavedSecond % 30 == 0) {
-        DiagnosticLog.add(
-          'native libvlc continuous-ts playback protected provider=${_activeSource?.providerId} watched=${_lastSavedSecond}s position=${position.inSeconds}s duration=${controller.duration.inSeconds}s size=${controller.size.width.toInt()}x${controller.size.height.toInt()}',
-        );
-      }
-      _clearPlaybackWaitMessage(reason: 'libvlc_continuous_ts_playing');
-      return;
-    }
-    if (libVlcFrozenClockRecovery &&
-        AppState.playerBehaviorSettings.value.autoSwitchOnStall) {
-      final recoveryPosition = _effectiveRecoveryPosition(
-        _resumeAnchoredPlaybackPosition(controller),
-      );
-      DiagnosticLog.add(
-        'native libvlc frozen playback clock recovery queued provider=${_activeSource?.providerId} samples=$_libVlcFrozenClockSamples position=${recoveryPosition.inSeconds}s action=advance_source',
-      );
-      _showPlaybackWaitMessage(
-        'Recovering playback...',
-        reason: 'libvlc_frozen_clock_recovery',
-      );
-      unawaited(
-        _recoverFromPlaybackStall(
-          recoveryPosition,
-          skipSameSource: true,
-          skipProvider: false,
-          forceSourceAdvance: true,
-        ),
-      );
-      return;
-    }
     if (controller.hasError) {
       if (!AppState.playerBehaviorSettings.value.autoSwitchOnStall) {
         DiagnosticLog.add(
@@ -7614,6 +12401,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         return;
       }
       final recoveryPosition = _effectiveRecoveryPosition(position);
+      if (_controllerErrorRecoveryAlreadyQueued(
+        controller,
+        recoveryPosition: recoveryPosition,
+        reason: 'watchdog',
+      )) {
+        return;
+      }
       final shouldRepairAtAnchor = _shouldRepairExoControllerErrorAtAnchor(
         controller,
         recoveryPosition,
@@ -7718,84 +12512,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         );
         return;
       }
-      final libVlcZeroVisualElapsed = _nativeWallClockStartedAt == null
-          ? null
-          : DateTime.now().difference(_nativeWallClockStartedAt!);
-      final libVlcZeroVisualMetadata =
-          controller.engine == _NativePlaybackEngine.libvlc &&
-              _activeSourceHasZeroClockMetadata &&
-              controller.size == Size.zero;
-      if (controller.engine == _NativePlaybackEngine.libvlc &&
-          _libVlcContinuousTsRelayProofReady &&
-          libVlcZeroVisualMetadata &&
-          libVlcZeroVisualElapsed != null &&
-          libVlcZeroVisualElapsed >= _libVlcWarmupGrace &&
-          AppState.playerBehaviorSettings.value.autoSwitchOnStall) {
-        DiagnosticLog.add(
-          'native libvlc zero-visual relay proof timeout provider=${_activeSource?.providerId} elapsed=${libVlcZeroVisualElapsed.inSeconds}s duration=${controller.duration.inSeconds}s size=0x0 reason=relay_proof_no_visual action=recover',
-        );
-        _showPlaybackWaitMessage(
-          'Recovering playback...',
-          reason: 'libvlc_relay_zero_visual',
-        );
-        unawaited(
-          _recoverFromPlaybackStall(
-            _effectiveRecoveryPosition(position),
-            skipSameSource: false,
-            skipProvider: false,
-            forceSourceAdvance: false,
-          ),
-        );
-        return;
-      }
-      if (controller.engine == _NativePlaybackEngine.libvlc &&
-          _libVlcContinuousTsRelayProofReady &&
-          !libVlcZeroVisualMetadata) {
-        _lastWatchdogPosition = position;
-        _stallWatchdogTicks = 0;
-        _deadPauseTicks = 0;
-        _bufferingWatchdogTicks = 0;
-        _resetTransientPlaybackDebounce();
-        _maybeClearLibVlcContinuousTsWaitMessage(
-          reason: 'libvlc_continuous_ts_metadata_fallback',
-        );
-        return;
-      }
-      if (controller.engine == _NativePlaybackEngine.libvlc &&
-          _libVlcContinuousTsActive &&
-          libVlcZeroVisualElapsed != null &&
-          libVlcZeroVisualElapsed < _libVlcContinuousTsVisualGrace) {
-        DiagnosticLog.add(
-          'native libvlc continuous-ts visual grace elapsed=${libVlcZeroVisualElapsed.inSeconds}s position=${position.inSeconds}s duration=${controller.duration.inSeconds}s size=0x0 reason=metadata_clock',
-        );
-        _showPlaybackWaitMessage(
-          'Getting stream details...',
-          reason: 'libvlc_continuous_ts_visual_grace',
-          pausePlayback: false,
-        );
-        return;
-      }
       _showPlaybackWaitMessage(
         'Getting stream details...',
         reason: 'metadata_clock_unavailable',
         pausePlayback: false,
       );
-      if (controller.engine == _NativePlaybackEngine.libvlc &&
-          libVlcZeroVisualElapsed != null &&
-          libVlcZeroVisualElapsed >= _libVlcWarmupGrace &&
-          AppState.playerBehaviorSettings.value.autoSwitchOnStall) {
-        DiagnosticLog.add(
-          'native libvlc zero-visual timeout provider=${_activeSource?.providerId} elapsed=${libVlcZeroVisualElapsed.inSeconds}s duration=${controller.duration.inSeconds}s size=0x0 action=recover',
-        );
-        unawaited(
-          _recoverFromPlaybackStall(
-            _effectiveRecoveryPosition(position),
-            skipSameSource: false,
-            skipProvider: false,
-            forceSourceAdvance: false,
-          ),
-        );
-      }
       return;
     }
 
@@ -7808,6 +12529,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _resetTransientPlaybackDebounce();
       final source = _activeSource;
       final recoveryTickLimit = _bufferingRecoveryTickLimitForSource(source);
+      final zeroVisualStartupRecoveryTickLimit =
+          _zeroVisualStartupRecoveryTickLimitForSource(source);
       final bufferingStartupGrace = _media3StartupGraceActive(
         controller,
         source,
@@ -7845,6 +12568,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           controller.duration > Duration.zero &&
           controller.size == Size.zero &&
           _progressItem?.type != MediaType.music;
+      final zeroVisualRecoveryTickLimit = media3ZeroVisualBuffering
+          ? zeroVisualStartupRecoveryTickLimit
+          : recoveryTickLimit;
       final zeroVisualHasProgressAnchor =
           position >= const Duration(seconds: 3) ||
               _lastKnownPlaybackPosition >= const Duration(seconds: 3) ||
@@ -7859,7 +12585,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               _lastKnownPlaybackPosition >= const Duration(seconds: 3) ||
               _resumeProgressAnchorPosition >= const Duration(seconds: 3));
       final zeroVisualAnchorHoldExpired =
-          _bufferingWatchdogTicks >= recoveryTickLimit;
+          _bufferingWatchdogTicks >= zeroVisualRecoveryTickLimit;
       if (media3ZeroVisualBuffering &&
           zeroVisualHasProgressAnchor &&
           !controller.hasError &&
@@ -7882,13 +12608,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           zeroVisualHasProgressAnchor &&
           !bufferingSourceHasRuntimeProof &&
           AppState.playerBehaviorSettings.value.autoSwitchOnStall &&
-          _bufferingWatchdogTicks >= recoveryTickLimit;
+          _bufferingWatchdogTicks >= zeroVisualRecoveryTickLimit;
       final canRecoverUnanchoredZeroVisualBuffering =
           media3ZeroVisualBuffering &&
               !zeroVisualHasProgressAnchor &&
               !bufferingSourceHasRuntimeProof &&
               AppState.playerBehaviorSettings.value.autoSwitchOnStall &&
-              _bufferingWatchdogTicks >= recoveryTickLimit;
+              _bufferingWatchdogTicks >= zeroVisualRecoveryTickLimit;
       final canRecoverZeroVisualBuffering =
           canRecoverAnchoredZeroVisualBuffering ||
               canRecoverUnanchoredZeroVisualBuffering;
@@ -7907,7 +12633,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       if (canRecoverZeroVisualBuffering) {
         final recoveryPosition = _effectiveRecoveryPosition(position);
         DiagnosticLog.add(
-          'native buffering watchdog provider=${source.providerId} tick=$_bufferingWatchdogTicks limit=$recoveryTickLimit position=${position.inSeconds}s recoveryPosition=${recoveryPosition.inSeconds}s action=recover reason=media3_zero_visual_buffering',
+          'native buffering watchdog provider=${source.providerId} tick=$_bufferingWatchdogTicks limit=$zeroVisualRecoveryTickLimit position=${position.inSeconds}s recoveryPosition=${recoveryPosition.inSeconds}s action=recover reason=media3_zero_visual_buffering',
         );
         _showPlaybackWaitMessage(
           'Recovering playback...',
@@ -7933,29 +12659,79 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         source,
         persistentBufferingRecoveryPosition,
       );
-      if (_shouldTryMedia3PersistentBufferingSegmentNudge(
-        controller,
+      if (controller.engine == _NativePlaybackEngine.exoplayer &&
+          source != null &&
+          source.sourceClass == PlaybackSourceClass.direct &&
+          _isHlsSource(source) &&
+          _media3PersistentBufferingStreakTicks == 1) {
+        DiagnosticLog.add(
+          'native media3 persistent buffering synthetic nudge disabled provider=${source.providerId} position=${persistentBufferingRecoveryPosition.inSeconds}s action=hold_current_source reason=tv_parity_no_synthetic_seek',
+        );
+      }
+      final persistentBufferingRecoveryTickLimit =
+          _bufferingRecoveryTickLimitForSourceAtPosition(
         source,
         persistentBufferingRecoveryPosition,
-      )) {
+      );
+      final persistentBufferingEscapeTickLimit =
+          _persistentBufferingAnchorEscapeTickLimitForSourceAtPosition(
+        source,
+        persistentBufferingRecoveryPosition,
+      );
+      final persistentBufferingHasRecentProgress =
+          _hasRecentMedia3PersistentBufferingProgressProof(
+        persistentBufferingRecoveryPosition,
+        minimumSamples: 2,
+      );
+      final persistentBufferingNudgeLimitReached =
+          !persistentBufferingHasRecentProgress &&
+              _media3PersistentBufferingNudgedSource(source) &&
+              _media3PersistentBufferingNudgeCountForSource >= 1 &&
+              _media3PersistentBufferingStreakTicks >=
+                  math.max(4, persistentBufferingRecoveryTickLimit ~/ 2);
+      final resumeRecoveryQualityLimitReached = source != null &&
+          !persistentBufferingHasRecentProgress &&
+          source.sourceClass == PlaybackSourceClass.direct &&
+          _isHlsSource(source) &&
+          _resumeRecoveryExcludedQualityRanks.isNotEmpty &&
+          _bufferingWatchdogTicks > persistentBufferingRecoveryTickLimit;
+      final persistentBufferingRepairLimit =
+          persistentBufferingNudgeLimitReached
+              ? persistentBufferingRecoveryTickLimit + 1
+              : resumeRecoveryQualityLimitReached
+                  ? persistentBufferingRecoveryTickLimit + 1
+                  : _media3PersistentBufferingNudgedSource(source)
+                      ? persistentBufferingEscapeTickLimit
+                      : source != null &&
+                              _isHlsSource(source) &&
+                              _media3HasPersistentBufferingHoldProof(
+                                controller,
+                                source,
+                              )
+                          ? persistentBufferingRecoveryTickLimit
+                          : persistentBufferingRecoveryTickLimit *
+                              _persistentBufferingAnchorRepairLimitForSource(
+                                source,
+                              );
+      final persistentBufferingEscapeReady =
+          !persistentBufferingHasRecentProgress &&
+              (persistentBufferingNudgeLimitReached ||
+                  resumeRecoveryQualityLimitReached ||
+                  _bufferingWatchdogTicks >=
+                      persistentBufferingEscapeTickLimit);
+      if (persistentBufferingNudgeLimitReached &&
+          source != null &&
+          controller.engine == _NativePlaybackEngine.exoplayer &&
+          source.sourceClass == PlaybackSourceClass.direct &&
+          _isHlsSource(source)) {
         unawaited(
-          _tryMedia3PersistentBufferingSegmentNudge(
-            controller,
-            source!,
+          _recoverFromMedia3HlsPersistentBufferingNudge(
+            source,
             persistentBufferingRecoveryPosition,
           ),
         );
         return;
       }
-      final persistentBufferingEscapeTickLimit =
-          _persistentBufferingAnchorEscapeTickLimitForSource(source);
-      final persistentBufferingRepairLimit =
-          _media3PersistentBufferingNudgedSource(source)
-              ? persistentBufferingEscapeTickLimit
-              : recoveryTickLimit *
-                  _persistentBufferingAnchorRepairLimitForSource(source);
-      final persistentBufferingEscapeReady =
-          _bufferingWatchdogTicks >= persistentBufferingEscapeTickLimit;
       if (_shouldKeepVerifiedControllerBufferingQuiet(
         controller,
         source,
@@ -7966,44 +12742,44 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$recoveryTickLimit position=${position.inSeconds}s recoveryPosition=${persistentBufferingRecoveryPosition.inSeconds}s action=expire_quiet_guard reason=persistent_buffering_anchor_expired',
           );
         } else {
-        final keepVisualBufferingQuiet =
-            _shouldKeepVisualControllerBufferingQuiet(
-          controller,
-          source,
-          persistentBufferingRecoveryPosition,
-        );
-        if (_bufferingWatchdogTicks == 1 ||
-            _bufferingWatchdogTicks == recoveryTickLimit - 1) {
-          DiagnosticLog.add(
-            'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$recoveryTickLimit position=${position.inSeconds}s recoveryPosition=${persistentBufferingRecoveryPosition.inSeconds}s action=hold_quiet reason=verified_controller_buffering_grace',
+          final keepVisualBufferingQuiet =
+              _shouldKeepVisualControllerBufferingQuiet(
+            controller,
+            source,
+            persistentBufferingRecoveryPosition,
           );
-        }
-        if (keepVisualBufferingQuiet) {
           if (_bufferingWatchdogTicks == 1 ||
-              _bufferingWatchdogTicks == recoveryTickLimit ||
-              _bufferingWatchdogTicks % recoveryTickLimit == 0) {
+              _bufferingWatchdogTicks == recoveryTickLimit - 1) {
             DiagnosticLog.add(
-              'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$recoveryTickLimit position=${position.inSeconds}s recoveryPosition=${persistentBufferingRecoveryPosition.inSeconds}s action=hold_quiet reason=verified_controller_buffering_visual_progress',
+              'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$recoveryTickLimit position=${position.inSeconds}s recoveryPosition=${persistentBufferingRecoveryPosition.inSeconds}s action=hold_quiet reason=verified_controller_buffering_grace',
             );
           }
-          _clearTransientBufferingWaitMessage(
-            reason: 'verified_controller_buffering_visual_progress',
-          );
-        } else if (_bufferingWaitMessageReady(
-          _bufferingWatchdogTicks,
-          recoveryTickLimit,
-        )) {
-          _showPlaybackWaitMessage(
-            'Buffering stream...',
-            reason: 'verified_controller_buffering_grace',
-            pausePlayback: false,
-          );
-        } else {
-          _clearTransientBufferingWaitMessage(
-            reason: 'verified_controller_buffering_grace',
-          );
-        }
-        return;
+          if (keepVisualBufferingQuiet) {
+            if (_bufferingWatchdogTicks == 1 ||
+                _bufferingWatchdogTicks == recoveryTickLimit ||
+                _bufferingWatchdogTicks % recoveryTickLimit == 0) {
+              DiagnosticLog.add(
+                'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$recoveryTickLimit position=${position.inSeconds}s recoveryPosition=${persistentBufferingRecoveryPosition.inSeconds}s action=hold_quiet reason=verified_controller_buffering_visual_progress',
+              );
+            }
+            _clearTransientBufferingWaitMessage(
+              reason: 'verified_controller_buffering_visual_progress',
+            );
+          } else if (_bufferingWaitMessageReady(
+            _bufferingWatchdogTicks,
+            recoveryTickLimit,
+          )) {
+            _showPlaybackWaitMessage(
+              'Buffering stream...',
+              reason: 'verified_controller_buffering_grace',
+              pausePlayback: false,
+            );
+          } else {
+            _clearTransientBufferingWaitMessage(
+              reason: 'verified_controller_buffering_grace',
+            );
+          }
+          return;
         }
       }
       final shouldRepairPersistentBuffering =
@@ -8023,14 +12799,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         );
         if (!persistentBufferingEscapeReady &&
             _shouldHoldSoftWatchdogRecovery(
-          controller,
-          source,
-          persistentBufferingRecoveryPosition,
-          allowSourceReload: true,
-          forceSourceAdvance: false,
-          skipProvider: false,
-          libVlcZeroMetadataStall: false,
-        )) {
+              controller,
+              source,
+              persistentBufferingRecoveryPosition,
+              allowSourceReload: true,
+              forceSourceAdvance: false,
+              skipProvider: false,
+              libVlcZeroMetadataStall: false,
+            )) {
           _bufferingWatchdogTicks = 0;
           _holdSoftWatchdogRecovery(
             controller,
@@ -8057,6 +12833,23 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         DiagnosticLog.add(
           'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$recoveryTickLimit position=${position.inSeconds}s action=hold',
         );
+      }
+      if (_shouldKeepVisualControllerBufferingQuiet(
+        controller,
+        source,
+        persistentBufferingRecoveryPosition,
+      )) {
+        if (_bufferingWatchdogTicks == 1 ||
+            _bufferingWatchdogTicks == recoveryTickLimit ||
+            _bufferingWatchdogTicks % recoveryTickLimit == 0) {
+          DiagnosticLog.add(
+            'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$recoveryTickLimit position=${position.inSeconds}s recoveryPosition=${persistentBufferingRecoveryPosition.inSeconds}s action=hold_quiet reason=controller_buffering_visual_progress',
+          );
+        }
+        _clearTransientBufferingWaitMessage(
+          reason: 'controller_buffering_visual_progress',
+        );
+        return;
       }
       if (_bufferingWaitMessageReady(
         _bufferingWatchdogTicks,
@@ -8091,44 +12884,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final publicIptvSource =
         _activeSource != null && _isPublicIptvSource(_activeSource!);
 
-    final libVlcWarmupElapsed = _nativeWallClockStartedAt == null
-        ? null
-        : DateTime.now().difference(_nativeWallClockStartedAt!);
-    final libVlcStillWarmingUp =
-        controller.engine == _NativePlaybackEngine.libvlc &&
-            position <= Duration.zero &&
-            libVlcWarmupElapsed != null &&
-            libVlcWarmupElapsed < _libVlcWarmupGrace;
-    final libVlcContinuousTsVisualGraceActive =
-        controller.engine == _NativePlaybackEngine.libvlc &&
-            _libVlcContinuousTsActive &&
-            libVlcWarmupElapsed != null &&
-            libVlcWarmupElapsed < _libVlcContinuousTsVisualGrace;
-    final libVlcContinuousTsMetadataOnlyPlayback =
-        controller.engine == _NativePlaybackEngine.libvlc &&
-            controller.size == Size.zero &&
-            _libVlcContinuousTsPlaybackActive(controller);
-    if (libVlcContinuousTsMetadataOnlyPlayback) {
-      _blackVideoWatchdogTicks = 0;
-      _stallWatchdogTicks = 0;
-      _deadPauseTicks = 0;
-      _bufferingWatchdogTicks = 0;
-      _lastWatchdogPosition = position;
-      DiagnosticLog.add(
-        'native libvlc continuous-ts metadata-only surface held provider=${_activeSource?.providerId} position=${position.inSeconds}s streamed=${_countDiagnosticBucket(_libVlcContinuousTsStreamedSegments)} reason=libvlc_continuous_ts_metadata_only_surface_hold',
-      );
-      _clearPlaybackWaitMessage(
-        reason: 'libvlc_continuous_ts_metadata_only_surface_hold',
-      );
-      return;
-    }
-
-    final libVlcMissingVideoSurface =
-        controller.engine == _NativePlaybackEngine.libvlc &&
-            !libVlcContinuousTsVisualGraceActive &&
-            controller.isPlaying &&
-            position > Duration.zero &&
-            controller.size == Size.zero;
     final exoMissingVideoSurface =
         controller.engine == _NativePlaybackEngine.exoplayer &&
             controller.isPlaying &&
@@ -8136,7 +12891,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             controller.duration > Duration.zero &&
             controller.size == Size.zero &&
             _progressItem?.type != MediaType.music;
-    if (libVlcMissingVideoSurface || exoMissingVideoSurface) {
+    if (exoMissingVideoSurface) {
       if (_isSuspiciousProgressClockJump(
         position,
         reason: 'black_video_watchdog',
@@ -8233,65 +12988,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _clearPlaybackWaitMessage(reason: 'user_paused');
         return;
       }
-      if (libVlcStillWarmingUp) {
-        _lastWatchdogPosition = position;
-        _stallWatchdogTicks = 0;
-        _deadPauseTicks = 0;
-        _bufferingWatchdogTicks = 0;
-        _resetTransientPlaybackDebounce();
-        DiagnosticLog.add(
-          'native libvlc warmup waiting provider=${_activeSource?.providerId} elapsed=${libVlcWarmupElapsed.inSeconds}s duration=${controller.duration.inSeconds}s position=${position.inSeconds}s',
-        );
-        _showPlaybackWaitMessage(
-          'Warming up video engine...',
-          reason: 'libvlc_warmup',
-        );
-        return;
-      }
-      if (libVlcContinuousTsVisualGraceActive) {
-        _lastWatchdogPosition = position;
-        _stallWatchdogTicks = 0;
-        _deadPauseTicks = 0;
-        _bufferingWatchdogTicks = 0;
-        _resetTransientPlaybackDebounce();
-        if (_libVlcContinuousTsNoVisualRelayStalled(
-          controller,
-          libVlcWarmupElapsed,
-        )) {
-          unawaited(
-            _recoverLibVlcContinuousTsNoVisual(
-              _effectiveRecoveryPosition(position),
-              reason: 'libvlc_continuous_ts_inactive_no_visual',
-            ),
-          );
-          return;
-        }
-        if (_libVlcContinuousTsRelayProofReady) {
-          _maybeClearLibVlcContinuousTsWaitMessage(
-            reason: 'libvlc_continuous_ts_inactive_relay_proof',
-          );
-          return;
-        }
-        DiagnosticLog.add(
-          'native libvlc continuous-ts visual grace provider=${_activeSource?.providerId} elapsed=${libVlcWarmupElapsed.inSeconds}s position=${position.inSeconds}s duration=${controller.duration.inSeconds}s size=${controller.size.width.toInt()}x${controller.size.height.toInt()} reason=inactive',
-        );
-        _showPlaybackWaitMessage(
-          'Getting stream details...',
-          reason: 'libvlc_continuous_ts_inactive_grace',
-        );
-        return;
-      }
-      if (controller.engine == _NativePlaybackEngine.libvlc &&
-          _blackVideoWatchdogTicks > 0 &&
-          controller.size == Size.zero &&
-          AppState.playerBehaviorSettings.value.autoSwitchOnStall) {
-        final recoveryPosition = _effectiveRecoveryPosition(position);
-        DiagnosticLog.add(
-          'native libvlc visual surface inactive provider=${_activeSource?.providerId} position=${position.inSeconds}s action=switch-engine reason=dead-pause-after-zero-size',
-        );
-        unawaited(_recoverFromBlackVideo(recoveryPosition));
-        return;
-      }
       _deadPauseTicks += 1;
       final now = DateTime.now();
       _deadPauseFirstSeenAt ??= now;
@@ -8326,6 +13022,43 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
     _deadPauseTicks = 0;
     _deadPauseFirstSeenAt = null;
+    if (_media3ResumeAnchorIsVisiblyWrong(controller)) {
+      final source = _activeSource;
+      final recoveryPosition = _effectiveRecoveryPosition(
+        _resumeProgressAnchorPosition,
+      );
+      DiagnosticLog.add(
+        'native media3 resume anchor mismatch provider=${source?.providerId} '
+        'position=${position.inSeconds}s anchor=${_resumeProgressAnchorPosition.inSeconds}s '
+        'recovery=${recoveryPosition.inSeconds}s action=advance_source',
+      );
+      _stallWatchdogTicks = 0;
+      _deadPauseTicks = 0;
+      _bufferingWatchdogTicks = 0;
+      _persistentBufferingRecoveryEscapeArmed = false;
+      _resetTransientPlaybackDebounce();
+      if (source != null) {
+        _markRuntimeSourceFailure(source, 'resume_anchor_clock_mismatch');
+        _excludeResumeRecoveryQualityAfterRuntimeFailure(
+          source,
+          engine: controller.engine,
+          recoveryPosition: recoveryPosition,
+        );
+      }
+      _showPlaybackWaitMessage(
+        'Recovering playback...',
+        reason: 'resume_anchor_clock_mismatch',
+      );
+      unawaited(
+        _recoverFromPlaybackStall(
+          recoveryPosition,
+          skipSameSource: true,
+          skipProvider: true,
+          forceSourceAdvance: true,
+        ),
+      );
+      return;
+    }
     if (_isSuspiciousProgressClockJump(
       position,
       reason: 'watchdog_progress',
@@ -8375,39 +13108,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
 
-    if (libVlcContinuousTsVisualGraceActive) {
-      _stallWatchdogTicks = 0;
-      _deadPauseTicks = 0;
-      _bufferingWatchdogTicks = 0;
-      if (_libVlcContinuousTsNoVisualRelayStalled(
-        controller,
-        libVlcWarmupElapsed,
-      )) {
-        unawaited(
-          _recoverLibVlcContinuousTsNoVisual(
-            _effectiveRecoveryPosition(position),
-            reason: 'libvlc_continuous_ts_stall_no_visual',
-          ),
-        );
-        return;
-      }
-      if (_libVlcContinuousTsRelayProofReady) {
-        _maybeClearLibVlcContinuousTsWaitMessage(
-          reason: 'libvlc_continuous_ts_stall_relay_proof',
-        );
-        return;
-      }
-      DiagnosticLog.add(
-        'native libvlc continuous-ts visual grace provider=${_activeSource?.providerId} elapsed=${libVlcWarmupElapsed.inSeconds}s position=${position.inSeconds}s duration=${controller.duration.inSeconds}s size=${controller.size.width.toInt()}x${controller.size.height.toInt()} reason=stall_grace',
-      );
-      _showPlaybackWaitMessage(
-        'Getting stream details...',
-        reason: 'libvlc_continuous_ts_stall_grace',
-        pausePlayback: false,
-      );
-      return;
-    }
-
     if (publicIptvSource &&
         controller.engine == _NativePlaybackEngine.exoplayer) {
       _stallWatchdogTicks += 1;
@@ -8442,17 +13142,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _activeSource?.sourceClass != PlaybackSourceClass.p2p &&
             !_isLiveTvMode &&
             !publicIptvSource;
-    final libVlcFrozenPlaybackClock =
-        controller.engine == _NativePlaybackEngine.libvlc &&
-            _libVlcFrozenClockSamples >= 8;
-    if (isDirectHealthySource && libVlcFrozenPlaybackClock) {
-      DiagnosticLog.add(
-        'native playback no-progress frozen clock provider=${_activeSource?.providerId} position=${position.inSeconds}s elapsedMs=${noProgressElapsed.inMilliseconds} engine=${controller.engine.id} samples=$_libVlcFrozenClockSamples reason=libvlc_frozen_playback_clock',
-      );
-    }
     if (isDirectHealthySource &&
         _playbackCadenceClockUnstable &&
-        !libVlcFrozenPlaybackClock &&
         noProgressElapsed < _transientPlaybackRecoveryGrace) {
       if (_stallWatchdogTicks == 1) {
         DiagnosticLog.add(
@@ -8469,7 +13160,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
     if (isDirectHealthySource &&
-        !libVlcFrozenPlaybackClock &&
         noProgressElapsed < _transientPlaybackRecoveryGrace) {
       if (_stallWatchdogTicks == 1) {
         DiagnosticLog.add(
@@ -8480,29 +13170,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
 
-    if (libVlcStillWarmingUp) {
-      DiagnosticLog.add(
-        'native libvlc warmup waiting provider=${_activeSource?.providerId} elapsed=${libVlcWarmupElapsed.inSeconds}s duration=${controller.duration.inSeconds}s position=${position.inSeconds}s',
-      );
-      _showPlaybackWaitMessage(
-        'Warming up video engine...',
-        reason: 'libvlc_warmup_stall',
-        pausePlayback: false,
-      );
-      return;
-    }
-    if (controller.engine == _NativePlaybackEngine.libvlc &&
-        _stallWatchdogTicks < 2) {
-      DiagnosticLog.add(
-        'native libvlc stall grace provider=${_activeSource?.providerId} tick=$_stallWatchdogTicks position=${position.inSeconds}s',
-      );
-      _showPlaybackWaitMessage(
-        'Checking stream...',
-        reason: 'libvlc_stall_grace',
-        pausePlayback: false,
-      );
-      return;
-    }
     final stallRecoveryTickLimit =
         _stallRecoveryTickLimitForSource(_activeSource);
     if (_stallWatchdogTicks < stallRecoveryTickLimit) {
@@ -8518,24 +13185,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     if (_stallWatchdogTicks >= stallRecoveryTickLimit &&
         AppState.playerBehaviorSettings.value.autoSwitchOnStall) {
-      if (libVlcFrozenPlaybackClock) {
-        DiagnosticLog.add(
-          'native libvlc frozen playback clock recovery queued provider=${_activeSource?.providerId} samples=$_libVlcFrozenClockSamples position=${position.inSeconds}s action=advance_source',
-        );
-        _showPlaybackWaitMessage(
-          'Recovering playback...',
-          reason: 'libvlc_frozen_clock_recovery',
-        );
-        unawaited(
-          _recoverFromPlaybackStall(
-            _effectiveRecoveryPosition(position),
-            skipSameSource: true,
-            skipProvider: false,
-            forceSourceAdvance: true,
-          ),
-        );
-        return;
-      }
       _showPlaybackWaitMessage(
         'Recovering playback...',
         reason: 'stall_recovery',
@@ -8577,9 +13226,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     final trustedControllerClock =
         controller.isPlaying && !controller.isBuffering;
-    final staleStateButVisibleProgress =
-        !trustedControllerClock &&
-            _shouldTrustVisibleProgressClock(controller, position);
+    final staleStateButVisibleProgress = !trustedControllerClock &&
+        _shouldTrustVisibleProgressClock(controller, position);
     if (!trustedControllerClock && !staleStateButVisibleProgress) {
       if (position.inSeconds != _untrustedClockProgressSkipLogSecond) {
         _untrustedClockProgressSkipLogSecond = position.inSeconds;
@@ -8613,9 +13261,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (position.inSeconds < 3) return false;
     final movingForward = position > _lastKnownPlaybackPosition;
     if (!movingForward) return false;
-    final boundedForwardStep =
-        _lastKnownPlaybackPosition <= Duration.zero ||
-            position - _lastKnownPlaybackPosition <= const Duration(seconds: 12);
+    final boundedForwardStep = _lastKnownPlaybackPosition <= Duration.zero ||
+        position - _lastKnownPlaybackPosition <= const Duration(seconds: 12);
     if (!boundedForwardStep) return false;
     if (_resumeProgressAnchorPosition > Duration.zero &&
         position <
@@ -8639,6 +13286,59 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return true;
   }
 
+  bool _shouldTrustLibVlcContinuousTsProgress(
+    _NativePlaybackController? controller,
+    Duration position,
+  ) {
+    if (controller == null) return false;
+    if (controller.engine != _NativePlaybackEngine.libvlc) return false;
+    if (!_libVlcContinuousTsActive ||
+        !_libVlcContinuousTsRelayProofReady ||
+        _libVlcContinuousTsTimelineOffset <= Duration.zero) {
+      return false;
+    }
+    if (!controller.isInitialized ||
+        controller.hasError ||
+        !controller.isPlaying ||
+        controller.isBuffering) {
+      return false;
+    }
+    if (position < _libVlcContinuousTsTimelineOffset) return false;
+    if (!_hasSustainedLibVlcContinuousTsPlaybackProof(controller)) {
+      return false;
+    }
+    final previous = _lastKnownPlaybackPosition;
+    if (previous > Duration.zero &&
+        position < previous - const Duration(seconds: 3)) {
+      return false;
+    }
+    return true;
+  }
+
+  bool _shouldResetLibVlcContinuousTsIntegrityBaseline(
+    _NativePlaybackController controller,
+    Duration position,
+  ) {
+    if (!_shouldTrustLibVlcContinuousTsProgress(controller, position)) {
+      return false;
+    }
+    final previous = _lastIntegrityPosition;
+    final previousAt = _lastIntegritySampleAt;
+    if (previous == null || previousAt == null) return true;
+    if (position <= previous) return false;
+    final wallDeltaMs = DateTime.now().difference(previousAt).inMilliseconds;
+    final positionDelta = position - previous;
+    if (positionDelta <= const Duration(seconds: 2)) return false;
+    if (wallDeltaMs <= 1500) return false;
+    final proofSeconds = _libVlcContinuousTsPlaybackProofSeconds(controller);
+    if (proofSeconds < 8) return false;
+    final maxExpectedForward = Duration(
+      seconds: proofSeconds + 18,
+    );
+    if (positionDelta > maxExpectedForward) return false;
+    return true;
+  }
+
   void _maybeReloadSkipSegmentsWithDuration(Duration duration) {
     if (!_skipSegmentsSupported ||
         duration <= Duration.zero ||
@@ -8654,46 +13354,59 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     unawaited(_loadSkipSegments());
   }
 
+  Duration _libVlcContinuousTsAbsolutePosition(
+    _NativePlaybackController? controller,
+  ) {
+    final rawPosition = controller?.position ?? Duration.zero;
+    if (controller?.engine != _NativePlaybackEngine.libvlc ||
+        !_libVlcContinuousTsActive ||
+        _libVlcContinuousTsTimelineOffset <= Duration.zero) {
+      return rawPosition;
+    }
+    final activeTimeline = _activeMobileLibVlcSessionTimeline;
+    if (activeTimeline != null) {
+      return activeTimeline.absolutePlaybackPosition;
+    }
+    return _libVlcContinuousTsTimelineOffset + rawPosition;
+  }
+
   Duration _resumeAnchoredPlaybackPosition(
     _NativePlaybackController? controller,
   ) {
-    final controllerPosition = controller?.position ?? Duration.zero;
-    if (controller == null || _resumeProgressAnchorPosition <= Duration.zero) {
-      if (controller?.engine == _NativePlaybackEngine.libvlc &&
-          _libVlcContinuousTsActive &&
-          _libVlcContinuousTsTimelineOffset > Duration.zero &&
-          controllerPosition <
-              _libVlcContinuousTsTimelineOffset -
-                  const Duration(seconds: 10)) {
-        return _libVlcContinuousTsTimelineOffset + controllerPosition;
-      }
+    final rawControllerPosition = controller?.position ?? Duration.zero;
+    final controllerPosition = _libVlcContinuousTsAbsolutePosition(controller);
+    if (controller == null) {
       return controllerPosition;
     }
-    if (controller.engine == _NativePlaybackEngine.libvlc &&
-        _libVlcContinuousTsActive &&
-        _libVlcContinuousTsTimelineOffset > Duration.zero &&
-        controllerPosition <
-            _libVlcContinuousTsTimelineOffset - const Duration(seconds: 10)) {
-      final anchoredPosition =
-          _libVlcContinuousTsTimelineOffset + controllerPosition;
-      if (controllerPosition.inSeconds != _resumeProgressAnchorLogSecond) {
-        _resumeProgressAnchorLogSecond = controllerPosition.inSeconds;
+    final usesLibVlcContinuousTsLocalClock =
+        controller.engine == _NativePlaybackEngine.libvlc &&
+            _libVlcContinuousTsActive &&
+            _libVlcContinuousTsTimelineOffset > Duration.zero;
+    if (_resumeProgressAnchorPosition <= Duration.zero) {
+      return controllerPosition;
+    }
+    if (usesLibVlcContinuousTsLocalClock) {
+      if (rawControllerPosition.inSeconds != _resumeProgressAnchorLogSecond) {
+        _resumeProgressAnchorLogSecond = rawControllerPosition.inSeconds;
         DiagnosticLog.add(
-          'native libvlc continuous-ts timeline anchored raw=${controllerPosition.inSeconds}s offset=${_libVlcContinuousTsTimelineOffset.inSeconds}s absolute=${anchoredPosition.inSeconds}s',
+          'native libvlc continuous-ts timeline anchored raw=${rawControllerPosition.inSeconds}s offset=${_libVlcContinuousTsTimelineOffset.inSeconds}s absolute=${controllerPosition.inSeconds}s',
         );
       }
-      if (anchoredPosition >=
-          _resumeProgressAnchorPosition - const Duration(seconds: 10)) {
-        _resumeProgressAnchorPosition = Duration.zero;
-        _resumeProgressAnchorLogSecond = -1;
+      if (controllerPosition < _resumeProgressAnchorPosition) {
+        return _resumeProgressAnchorPosition;
       }
-      return anchoredPosition;
-    }
-    if (controllerPosition >=
-        _resumeProgressAnchorPosition - const Duration(seconds: 10)) {
       _resumeProgressAnchorPosition = Duration.zero;
       _resumeProgressAnchorLogSecond = -1;
       return controllerPosition;
+    }
+    if (controllerPosition >= _resumeProgressAnchorPosition) {
+      _resumeProgressAnchorPosition = Duration.zero;
+      _resumeProgressAnchorLogSecond = -1;
+      return controllerPosition;
+    }
+    if (controllerPosition >=
+        _resumeProgressAnchorPosition - const Duration(seconds: 10)) {
+      return _resumeProgressAnchorPosition;
     }
     if (controllerPosition <= const Duration(seconds: 10) &&
         controllerPosition.inSeconds != _resumeProgressAnchorLogSecond) {
@@ -8709,8 +13422,31 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _NativePlaybackController? controller,
     Duration duration,
   ) {
-    final rawControllerPosition = controller?.position ?? Duration.zero;
-    final controllerPosition = _resumeAnchoredPlaybackPosition(controller);
+    var controllerPosition = _resumeAnchoredPlaybackPosition(controller);
+    Duration? acceptedSeekPosition;
+    if (controller?.engine == _NativePlaybackEngine.libvlc &&
+        _libVlcContinuousTsActive &&
+        _libVlcSeekSettlementBarrier.isSettling) {
+      final nativePosition = controllerPosition;
+      controllerPosition = _libVlcSeekSettlementBarrier.acceptedPosition(
+        nativePosition: nativePosition,
+        observedAt: DateTime.now(),
+      );
+      acceptedSeekPosition = controllerPosition;
+      if (controllerPosition != nativePosition &&
+          _libVlcSeekSettlementLoggedGeneration !=
+              _libVlcSeekSettlementBarrier.generation) {
+        _libVlcSeekSettlementLoggedGeneration =
+            _libVlcSeekSettlementBarrier.generation;
+        DiagnosticLog.add(
+          'native libvlc seek settlement held stale clock '
+          'seekSettlementGeneration=${_libVlcSeekSettlementBarrier.generation} '
+          'surfaceGeneration=${_mobileLibVlcCoordinator?.generation ?? -1} '
+          'raw=${nativePosition.inSeconds}s '
+          'anchor=${controllerPosition.inSeconds}s',
+        );
+      }
+    }
     final controllerClockTrusted = controller == null ||
         (controller.isInitialized &&
             !controller.hasError &&
@@ -8718,24 +13454,39 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             !controller.isBuffering);
     final waitingForResumeSeek = controller != null &&
         _resumeProgressAnchorPosition > Duration.zero &&
-        rawControllerPosition <
+        controllerPosition <
             _resumeProgressAnchorPosition - const Duration(seconds: 10);
     final visibleProgressClockTrusted = controller != null &&
         _shouldTrustVisibleProgressClock(controller, controllerPosition);
-    var position =
-        (controllerClockTrusted || visibleProgressClockTrusted) &&
-                controllerPosition > Duration.zero
+    final libVlcContinuousTsProgressTrusted =
+        _shouldTrustLibVlcContinuousTsProgress(controller, controllerPosition);
+    var position = (controllerClockTrusted ||
+                visibleProgressClockTrusted ||
+                libVlcContinuousTsProgressTrusted) &&
+            controllerPosition > Duration.zero
         ? controllerPosition
         : waitingForResumeSeek
             ? Duration.zero
             : _lastKnownPlaybackPosition;
     if (!waitingForResumeSeek &&
+        !libVlcContinuousTsProgressTrusted &&
         _lastKnownPlaybackPosition > Duration.zero &&
         (position <= Duration.zero ||
             _lastKnownPlaybackPosition > position ||
             (position - _lastKnownPlaybackPosition).abs() >
                 const Duration(seconds: 10))) {
       position = _lastKnownPlaybackPosition;
+    }
+    if (acceptedSeekPosition != null) {
+      position = _libVlcSeekSettlementBarrier.constrainComputedPosition(
+        computedPosition: position,
+        acceptedNativePosition: acceptedSeekPosition,
+      );
+      if (!_libVlcSeekSettlementBarrier.isSettling) {
+        _lastKnownPlaybackPosition = position;
+        _lastCrediblePlaybackPosition = position;
+        _lastCrediblePlaybackPositionAt = DateTime.now();
+      }
     }
     if (duration > const Duration(seconds: 20) &&
         position >= duration - const Duration(seconds: 1)) {
@@ -8759,9 +13510,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     final item = _progressItem;
     if (item == null) return Duration.zero;
-    return Duration(
-      seconds: item.type.isPlayableSeries ? 10 * 60 * 60 : 45 * 60,
-    );
+    return const Duration(minutes: 45);
   }
 
   Duration _qualitySwitchResumePosition() {
@@ -8777,11 +13526,53 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   void _resetPlaybackIntegritySample() {
     _lastIntegritySampleAt = null;
     _lastIntegrityPosition = null;
+    _media3RendererClockProofWasPending = false;
+  }
+
+  void _clearMedia3ResumeSeekSettleWindow() {
+    _media3ResumeSeekSettleAnchor = Duration.zero;
+    _media3ResumeSeekSettleUntil = null;
+    _media3ResumeSeekSettleDrifts = 0;
   }
 
   void _resetCrediblePlaybackAnchor() {
     _lastCrediblePlaybackPosition = Duration.zero;
     _lastCrediblePlaybackPositionAt = null;
+  }
+
+  void _clearUnprovedResumePlaybackState({required String reason}) {
+    final resumeAnchor = _resumeProgressAnchorPosition;
+    final knownPosition = _lastKnownPlaybackPosition;
+    final crediblePosition = _lastCrediblePlaybackPosition;
+    final savedSecond = _lastSavedSecond;
+    final integrityPosition = _lastIntegrityPosition;
+    _resumeProgressAnchorPosition = Duration.zero;
+    _resumeProgressAnchorLogSecond = -1;
+    _deferredResumeSeekPosition = null;
+    _deferredResumeSeekProviderId = null;
+    _deferredResumeSeekAttempts = 0;
+    _deferredResumeSeekInFlight = false;
+    _deferredResumeSeekRequiresVisualProof = false;
+    _lastKnownPlaybackPosition = Duration.zero;
+    _lastCrediblePlaybackPosition = Duration.zero;
+    _lastCrediblePlaybackPositionAt = null;
+    _lastIntegrityPosition = null;
+    _lastIntegritySampleAt = null;
+    _media3RendererClockProofWasPending = false;
+    _lastCadencePosition = Duration.zero;
+    _lastCadenceSampleAt = null;
+    _lastWatchdogPosition = Duration.zero;
+    _lastSavedSecond = -1;
+    _rendererRecoveryAnchorPosition = Duration.zero;
+    _rendererRecoveryAnchorUntil = null;
+    _clearMedia3ResumeSeekSettleWindow();
+    _media3ResumeAnchorHadStartupVisualProof = false;
+    DiagnosticLog.add(
+      'native resume state cleared reason=$reason '
+      'anchor=${resumeAnchor.inSeconds}s known=${knownPosition.inSeconds}s '
+      'credible=${crediblePosition.inSeconds}s saved=$savedSecond '
+      'integrity=${integrityPosition?.inSeconds ?? 0}s',
+    );
   }
 
   void _rememberCrediblePlaybackAnchor(
@@ -8852,7 +13643,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
 
-    if (!controller.isPlaying || controller.isBuffering) {
+    final libVlcContinuousTsProgressTrusted =
+        _shouldTrustLibVlcContinuousTsProgress(controller, position);
+    if ((!controller.isPlaying || controller.isBuffering) &&
+        !libVlcContinuousTsProgressTrusted) {
       final heldPosition = _heldPlaybackAnchor(fallback: position);
       _lastIntegritySampleAt = DateTime.now();
       _lastIntegrityPosition = heldPosition;
@@ -8864,7 +13658,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       }
       return;
     }
-    if (_media3RendererClockIsUnproven(controller)) {
+    final media3RendererClockUnproven =
+        _media3RendererClockIsUnproven(controller);
+    if (media3RendererClockUnproven && !libVlcContinuousTsProgressTrusted) {
+      _media3RendererClockProofWasPending = true;
       final heldPosition = _heldPlaybackAnchor(fallback: position);
       _lastIntegritySampleAt = DateTime.now();
       _lastIntegrityPosition = heldPosition;
@@ -8874,6 +13671,37 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           'native progress anchor skipped reason=media3_renderer_unproven_clock position=${position.inSeconds}s stable=${heldPosition.inSeconds}s playing=${controller.isPlaying} buffering=${controller.isBuffering}',
         );
       }
+      return;
+    }
+    if (_media3RendererClockProofWasPending &&
+        controller.engine == _NativePlaybackEngine.exoplayer) {
+      _media3RendererClockProofWasPending = false;
+      _lastIntegritySampleAt = DateTime.now();
+      _lastIntegrityPosition = position;
+      _untrustedClockProgressSkipLogSecond = -1;
+      _rememberCrediblePlaybackAnchor(
+        position,
+        reason: 'media3_renderer_proof_trusted',
+      );
+      DiagnosticLog.add(
+        'native progress integrity reset reason=media3_renderer_proof_trusted position=${position.inSeconds}s',
+      );
+      return;
+    }
+    _media3RendererClockProofWasPending = false;
+
+    if (_shouldResetLibVlcContinuousTsIntegrityBaseline(controller, position)) {
+      _lastIntegritySampleAt = DateTime.now();
+      _lastIntegrityPosition = position;
+      _lastKnownPlaybackPosition = position;
+      _untrustedClockProgressSkipLogSecond = -1;
+      _rememberCrediblePlaybackAnchor(
+        position,
+        reason: 'libvlc_continuous_ts_progress_trusted',
+      );
+      DiagnosticLog.add(
+        'native progress integrity reset reason=libvlc_continuous_ts_progress_trusted position=${position.inSeconds}s',
+      );
       return;
     }
 
@@ -9156,6 +13984,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }
 
   Duration _effectiveRecoveryPosition(Duration reportedPosition) {
+    final translatedLibVlcPosition =
+        _libVlcContinuousTsRecoveryPositionFromController();
     final stablePosition = _stableProgressClockPosition(
       reportedPosition,
       reason: 'recovery_anchor',
@@ -9184,12 +14014,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         );
       }
       recoveryPosition = _newerRecoveryAnchor(recoveryPosition, stablePosition);
+      recoveryPosition =
+          _newerRecoveryAnchor(recoveryPosition, translatedLibVlcPosition);
       return recoveryPosition;
     }
     var recoveryPosition = stablePosition;
     if (hasRendererRecoveryAnchor) {
       return _newerRecoveryAnchor(
-        Duration.zero,
+        translatedLibVlcPosition,
         _rendererRecoveryAnchorPosition,
       );
     }
@@ -9204,7 +14036,19 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     recoveryPosition =
         _newerRecoveryAnchor(recoveryPosition, _lastCrediblePlaybackPosition);
+    recoveryPosition =
+        _newerRecoveryAnchor(recoveryPosition, translatedLibVlcPosition);
     return recoveryPosition;
+  }
+
+  Duration _libVlcContinuousTsRecoveryPositionFromController() {
+    final controller = _controller;
+    if (controller == null ||
+        controller.engine != _NativePlaybackEngine.libvlc ||
+        !_libVlcContinuousTsActive) {
+      return Duration.zero;
+    }
+    return _resumeAnchoredPlaybackPosition(controller);
   }
 
   Duration _currentPlaybackResumeAnchor() {
@@ -9220,10 +14064,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     required String reason,
   }) {
     if (position < const Duration(seconds: 3)) return;
+    final now = DateTime.now();
     _lastKnownPlaybackPosition = position;
     _rememberCrediblePlaybackAnchor(position, reason: reason);
+    _lastIntegritySampleAt = now;
+    _lastIntegrityPosition = position;
     _lastWatchdogPosition = position;
     _lastCadencePosition = position;
+    _lastCadenceSampleAt = now;
     _resumeProgressAnchorPosition = position;
     _resumeProgressAnchorLogSecond = -1;
     _beginRendererRecoveryAnchorWindow(position, reason: reason);
@@ -9247,6 +14095,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     required bool repairedSameSource,
     required bool severeRendererDrift,
     required Duration unstableFor,
+    required double ratio,
   }) {
     if (_playerClosing ||
         !mounted ||
@@ -9268,15 +14117,76 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _resumeProgressAnchorPosition >= const Duration(seconds: 5) ||
         _lastSavedSecond >= 5;
     if (!hasRuntimeProof) return false;
+    final sourceKey = _playbackSourceRuntimeKey(source);
+    final holdCount = _media3RendererDriftHoldSourceKey == sourceKey
+        ? _media3RendererDriftHoldCountForSource
+        : 0;
+    final repeatedMedia3DirectHlsDrift = severeRendererDrift &&
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        holdCount >= 1;
+    if (repeatedMedia3DirectHlsDrift) {
+      return false;
+    }
+    final repeatedDirectHlsSessionDrift =
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+            source.sourceClass == PlaybackSourceClass.direct &&
+            _isHlsSource(source) &&
+            _media3DirectHlsRendererDriftHoldCount >= 1 &&
+            ratio >= 2.25;
+    if (repeatedDirectHlsSessionDrift) {
+      return false;
+    }
+    final severeAutoMedia3DirectHlsDrift = severeRendererDrift &&
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        _shouldAvoidLibVlcRendererDriftEscalation(source);
+    if (severeAutoMedia3DirectHlsDrift) {
+      return false;
+    }
+    final earlyMedia3DirectHlsResumeDrift = severeRendererDrift &&
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        _media3ResumeAnchorHadStartupVisualProof &&
+        _resumeProgressAnchorPosition >= const Duration(seconds: 5) &&
+        !_hasLongVisibleMedia3SessionProof(controller) &&
+        _sourceCredibleWatchSeconds < 45;
+    if (earlyMedia3DirectHlsResumeDrift) {
+      return false;
+    }
+    final manualMedia3DirectHlsSevereDrift = severeRendererDrift &&
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+        _effectivePlaybackEngine == _NativePlaybackEngine.exoplayer.id &&
+        _shouldAvoidLibVlcRendererDriftEscalation(source);
+    if (manualMedia3DirectHlsSevereDrift) {
+      return unstableFor < const Duration(seconds: 2) &&
+          _playbackCadenceConsecutiveJumpEvents < 2;
+    }
+    final hasLongVisibleSessionProof =
+        _hasLongVisibleMedia3SessionProof(controller);
+    if (hasLongVisibleSessionProof) {
+      return unstableFor < const Duration(seconds: 12) &&
+          _playbackCadenceConsecutiveJumpEvents < 6;
+    }
     final hasActiveVisualProof =
         controller.engine == _NativePlaybackEngine.exoplayer &&
             controller.isPlaying &&
             !controller.isBuffering &&
             _sourceHasRawVisualPlaybackProof(controller);
     if (hasActiveVisualProof) {
+      if (severeRendererDrift) {
+        return unstableFor < const Duration(seconds: 5) &&
+            _playbackCadenceConsecutiveJumpEvents < 4;
+      }
       return true;
     }
     if (severeRendererDrift && unstableFor >= const Duration(seconds: 3)) {
+      return false;
+    }
+    if (holdCount >= 1) {
       return false;
     }
     if (_playbackCadenceConsecutiveJumpEvents >= 3) {
@@ -9292,6 +14202,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return unstableFor < holdWindow;
   }
 
+  bool _hasLongVisibleMedia3SessionProof(
+    _NativePlaybackController controller,
+  ) {
+    return controller.engine == _NativePlaybackEngine.exoplayer &&
+        controller.isPlaying &&
+        !controller.isBuffering &&
+        (_activeSourceVerifiedForSession ||
+            _sourceCredibleWatchSeconds >=
+                const Duration(seconds: 45).inSeconds ||
+            _lastKnownPlaybackPosition >= const Duration(seconds: 45) ||
+            _lastCrediblePlaybackPosition >= const Duration(seconds: 45) ||
+            _lastSavedSecond >= 45);
+  }
+
   void _holdMedia3RendererDriftOnCurrentSource(
     _NativePlaybackController controller,
     PlaybackSource source, {
@@ -9301,6 +14225,19 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     required double ratio,
     required Duration unstableFor,
   }) {
+    final sourceKey = _playbackSourceRuntimeKey(source);
+    if (_media3RendererDriftHoldSourceKey == sourceKey) {
+      _media3RendererDriftHoldCountForSource += 1;
+    } else {
+      _media3RendererDriftHoldSourceKey = sourceKey;
+      _media3RendererDriftHoldCountForSource = 1;
+    }
+    if (controller.engine == _NativePlaybackEngine.exoplayer &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source)) {
+      _recordMedia3DirectHlsRendererDriftRisk(source);
+      _media3DirectHlsRendererDriftHoldCount += 1;
+    }
     _anchorNativeRecoveryProgress(
       anchor,
       reason: 'media3_renderer_drift_hold_current_source',
@@ -9309,13 +14246,45 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _stallWatchdogTicks = 0;
     _deadPauseTicks = 0;
     _lastWatchdogPosition = anchor;
-    _lastCadencePosition = observedPosition;
+    final shouldCorrectVisibleClock =
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+            source.sourceClass == PlaybackSourceClass.direct &&
+            _isHlsSource(source) &&
+            !_hasLongVisibleMedia3SessionProof(controller) &&
+            observedPosition - anchor > const Duration(seconds: 2) &&
+            !_recoveringFromMedia3RendererDrift &&
+            !_recoveringFromStall &&
+            mounted &&
+            !_playerClosing &&
+            identical(_controller, controller);
+    if (shouldCorrectVisibleClock) {
+      _lastCadencePosition = anchor;
+      unawaited(
+        _seekControllerToPlaybackPosition(
+          controller,
+          anchor,
+          reason: 'media3_renderer_drift_clock_correction',
+          fromPosition: observedPosition,
+          allowContinuousTsReopen: false,
+        ).then((sameController) {
+          DiagnosticLog.add(
+            'native playback cadence renderer drift clock corrected provider=${source.providerId} observed=${observedPosition.inSeconds}s anchor=${anchor.inSeconds}s sameController=$sameController action=seek_back_to_anchor',
+          );
+        }).catchError((Object error) {
+          DiagnosticLog.add(
+            'native playback cadence renderer drift clock correction failed provider=${source.providerId} observed=${observedPosition.inSeconds}s anchor=${anchor.inSeconds}s errorType=${error.runtimeType}',
+          );
+        }),
+      );
+    } else {
+      _lastCadencePosition = observedPosition;
+    }
     _playbackCadenceConsecutiveJumpEvents = 0;
     _clearTransientBufferingWaitMessage(
       reason: 'media3_renderer_drift_hold_current_source',
     );
     DiagnosticLog.add(
-      'native playback cadence renderer drift held current source provider=${source.providerId} engine=${controller.engine.id} observed=${observedPosition.inSeconds}s stable=${heldPosition.inSeconds}s anchor=${anchor.inSeconds}s ratio=${ratio.toStringAsFixed(2)} unstableFor=${unstableFor.inSeconds}s action=hold_current_source_after_renderer_drift',
+      'native playback cadence renderer drift held current source provider=${source.providerId} engine=${controller.engine.id} observed=${observedPosition.inSeconds}s stable=${heldPosition.inSeconds}s anchor=${anchor.inSeconds}s ratio=${ratio.toStringAsFixed(2)} unstableFor=${unstableFor.inSeconds}s holds=$_media3RendererDriftHoldCountForSource directHlsSessionHolds=$_media3DirectHlsRendererDriftHoldCount action=hold_current_source_after_renderer_drift',
     );
   }
 
@@ -9337,6 +14306,48 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         now.difference(lastRepairAt) >= const Duration(seconds: 4);
   }
 
+  bool _shouldPreemptSustainedMedia3DirectHlsClockDrift(
+    _NativePlaybackController controller,
+    PlaybackSource source,
+    DateTime now,
+  ) {
+    if (!_playbackCadenceClockUnstable ||
+        controller.engine != _NativePlaybackEngine.exoplayer ||
+        !controller.isInitialized ||
+        !controller.isPlaying ||
+        controller.isBuffering ||
+        controller.hasError ||
+        !_shouldAvoidLibVlcRendererDriftEscalation(source) ||
+        !_media3RendererDriftActiveSourceMatches(source)) {
+      return false;
+    }
+    if (_recoveringFromMedia3RendererDrift ||
+        _recoveringFromStall ||
+        _playerClosing ||
+        !mounted) {
+      return false;
+    }
+    final startedAt = _playbackCadenceUnstableWindowStartedAt;
+    if (startedAt == null) return false;
+    final unstableFor = now.difference(startedAt);
+    if (_hasLongVisibleMedia3SessionProof(controller) &&
+        (unstableFor < const Duration(seconds: 12) ||
+            _playbackCadenceConsecutiveJumpEvents < 6)) {
+      return false;
+    }
+    final hasPostStartupVisualProof = controller.hasRenderedVideoFrame &&
+        controller.duration > Duration.zero &&
+        controller.size != Size.zero &&
+        !_activeSourceHasZeroClockMetadata &&
+        (_activeSourceVerifiedForSession || _sourceCredibleWatchSeconds >= 20);
+    final minimumUnstableFor = hasPostStartupVisualProof
+        ? const Duration(seconds: 3)
+        : const Duration(seconds: 4);
+    final minimumUnstableEvents = hasPostStartupVisualProof ? 2 : 2;
+    return unstableFor >= minimumUnstableFor &&
+        _playbackCadenceUnstableEvents >= minimumUnstableEvents;
+  }
+
   bool _canStartMedia3RendererDriftEscalation({
     required PlaybackSource source,
     required Duration anchor,
@@ -9351,12 +14362,160 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _effectivePlaybackEngine != 'auto' ||
         _libvlcUnavailableForAppSession ||
         _libvlcUnavailableForCurrentPass ||
+        _shouldAvoidLibVlcRendererDriftEscalation(source) ||
         !_media3RendererDriftActiveSourceMatches(source)) {
       return false;
     }
     final lastEscalationAt = _lastMedia3RendererDriftEscalationAt;
     return lastEscalationAt == null ||
         now.difference(lastEscalationAt) >= const Duration(seconds: 20);
+  }
+
+  bool _shouldAvoidLibVlcRendererDriftEscalation(PlaybackSource source) {
+    return source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        _libVlcCrashGuardActive;
+  }
+
+  bool _isMedia3DirectHlsRendererDriftCandidate(PlaybackSource source) {
+    return source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source);
+  }
+
+  bool _shouldEscapeRepeatedDirectHlsRendererDrift(PlaybackSource source) {
+    final repeatedDrift = _media3RendererDriftRepairCountForSource >= 2;
+    if (_shouldProtectVisiblyPlayingSource(
+          source,
+          _NativePlaybackEngine.exoplayer,
+        ) &&
+        !repeatedDrift) {
+      return false;
+    }
+    return _shouldAvoidLibVlcRendererDriftEscalation(source) && repeatedDrift;
+  }
+
+  bool _shouldSkipProviderAfterMedia3DirectHlsRendererDrift(
+    PlaybackSource source,
+  ) {
+    if (!_shouldAvoidLibVlcRendererDriftEscalation(source)) return false;
+    if (_qualityPreferenceMode == 'advanced') return false;
+    return _effectivePlaybackEngine == 'auto' ||
+        _effectivePlaybackEngine == _NativePlaybackEngine.exoplayer.id;
+  }
+
+  bool _sourceHasMedia3DirectHlsRendererDriftRepair(PlaybackSource source) {
+    return _shouldAvoidLibVlcRendererDriftEscalation(source) &&
+        _media3RendererDriftRepairSourceKey ==
+            _playbackSourceRuntimeKey(source) &&
+        _media3RendererDriftRepairCountForSource > 0;
+  }
+
+  Future<void> _advanceFromMedia3DirectHlsRendererDrift({
+    required PlaybackSource source,
+    required Duration anchor,
+    required String reason,
+  }) async {
+    final startupProofRecovery =
+        reason == 'media3_direct_hls_startup_proof_unavailable';
+    if (_recoveringFromMedia3RendererDrift ||
+        (_recoveringFromStall && !startupProofRecovery)) {
+      DiagnosticLog.add(
+        'native playback cadence renderer drift advance ignored provider=${source.providerId} reason=$reason action=already_recovering',
+      );
+      return;
+    }
+    if (startupProofRecovery && _recoveringFromStall) {
+      DiagnosticLog.add(
+        'native playback cadence renderer drift startup proof recovery taking over stall recovery provider=${source.providerId} anchor=${anchor.inSeconds}s reason=$reason',
+      );
+      _recoveringFromStall = false;
+    }
+    _recoveringFromMedia3RendererDrift = true;
+    _activeSourceVerifiedForSession = false;
+    _anchorNativeRecoveryProgress(anchor, reason: '${reason}_advance');
+    final directHlsRendererDrift =
+        _isMedia3DirectHlsRendererDriftCandidate(source);
+    final nextMedia3SourceIndex = directHlsRendererDrift
+        ? _nextSourceIndexAfterHardFailure(
+            _activeSources,
+            _sourceIndex,
+            _NativePlaybackEngine.exoplayer,
+          )
+        : null;
+    if (nextMedia3SourceIndex != null) {
+      DiagnosticLog.add(
+        'native playback cadence renderer drift trying known media3 source provider=${source.providerId} sourceIndex=$_sourceIndex nextSourceIndex=$nextMedia3SourceIndex anchor=${anchor.inSeconds}s reason=$reason action=advance_media3_before_cross_engine',
+      );
+      final recovered = await _tryKnownMedia3RecoverySourceAtIndex(
+        nextMedia3SourceIndex,
+        anchor,
+        reason: 'media3_renderer_drift_alternate_source',
+      );
+      if (recovered || !mounted || _playerClosing) {
+        _recoveringFromMedia3RendererDrift = false;
+        return;
+      }
+      _recoveringFromMedia3RendererDrift = true;
+    }
+    final shouldTryLibVlcRelay = directHlsRendererDrift &&
+        _effectivePlaybackEngine == 'auto' &&
+        !_manualLibVlcConfigured &&
+        !_libvlcUnavailableForCurrentPass &&
+        !_libvlcUnavailableForAppSession &&
+        _canUseLibVlcHlsRelaySource(source, _NativePlaybackEngine.libvlc);
+    if (shouldTryLibVlcRelay) {
+      DiagnosticLog.add(
+        'native playback cadence renderer drift trying libvlc relay provider=${source.providerId} anchor=${anchor.inSeconds}s reason=$reason action=override_media3_drift_to_libvlc',
+      );
+      final recovered = await _retrySourceWithLibVlcAfterExoVisualFailure(
+        source,
+        anchor,
+        statusMessage: 'Switching video engine...',
+        reason: reason,
+      );
+      if (recovered || !mounted || _playerClosing) {
+        _recoveringFromMedia3RendererDrift = false;
+        return;
+      }
+      DiagnosticLog.add(
+        'native playback cadence renderer drift libvlc relay failed provider=${source.providerId} anchor=${anchor.inSeconds}s reason=$reason action=advance_source_at_anchor',
+      );
+    }
+    if (_controller != null) {
+      await _disposeCurrentController(
+        updateUi: false,
+        awaitLibVlcRelease: true,
+        saveProgress: false,
+      );
+      if (!mounted) return;
+    }
+    if (_shouldSkipProviderAfterMedia3DirectHlsRendererDrift(source) &&
+        _providerIndex < _requests.length - 1) {
+      DiagnosticLog.add(
+        'native playback cadence renderer drift skipping direct hls provider provider=${source.providerId} providerIndex=$_providerIndex anchor=${anchor.inSeconds}s reason=$reason action=advance_provider_at_anchor',
+      );
+      _providerIndex += 1;
+      _sourceIndex = 0;
+      _activeSource = null;
+      _activeSources = const <PlaybackSource>[];
+      _sameSourceRecoveryAttempts = 0;
+      _recoveringFromStall = false;
+      _recoveringFromMedia3RendererDrift = false;
+      await _openNextAvailableSource(resumePositionOverride: anchor);
+      return;
+    }
+    final nextSourceIndex =
+        _nextSourceIndexAfterHardFailure(_activeSources, _sourceIndex) ??
+            _sourceIndex + 1;
+    DiagnosticLog.add(
+      'native playback cadence renderer drift advancing source provider=${source.providerId} sourceIndex=$_sourceIndex nextSourceIndex=$nextSourceIndex anchor=${anchor.inSeconds}s reason=$reason action=advance_source_at_anchor',
+    );
+    _sourceIndex = nextSourceIndex;
+    _sameSourceRecoveryAttempts = 0;
+    _activeSource = null;
+    _recoveringFromStall = false;
+    _recoveringFromMedia3RendererDrift = false;
+    await _openNextAvailableSource(resumePositionOverride: anchor);
   }
 
   bool _shouldReopenForMedia3RendererDrift(
@@ -9375,6 +14534,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (_playbackCadenceClockUnstable ||
         _playbackCadenceConsecutiveJumpEvents >= 2) {
       return true;
+    }
+    if (_shouldProtectVisiblyPlayingSource(source, currentController.engine)) {
+      return false;
     }
 
     final hasStableAnchor = anchor >= const Duration(seconds: 5) ||
@@ -9413,7 +14575,37 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _media3RendererDriftRepairSourceKey = sourceKey;
       _media3RendererDriftRepairCountForSource = 1;
     }
+    if (_shouldEscapeRepeatedDirectHlsRendererDrift(source)) {
+      DiagnosticLog.add(
+        'native playback cadence renderer drift escaping repeated direct hls provider=${source.providerId} observed=${observedPosition.inSeconds}s held=${heldPosition.inSeconds}s anchor=${anchor.inSeconds}s repairs=$_media3RendererDriftRepairCountForSource action=advance_source_at_anchor',
+      );
+      await _advanceFromMedia3DirectHlsRendererDrift(
+        source: source,
+        anchor: anchor,
+        reason: 'media3_repeated_direct_hls_renderer_drift',
+      );
+      return;
+    }
+    if (source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source)) {
+      _recordMedia3DirectHlsRendererDriftRisk(source);
+    }
     final currentController = _controller;
+    final earlyDirectHlsDrift =
+        _shouldAvoidLibVlcRendererDriftEscalation(source) &&
+            (currentController == null ||
+                !_hasLongVisibleMedia3SessionProof(currentController));
+    if (earlyDirectHlsDrift) {
+      DiagnosticLog.add(
+        'native playback cadence renderer drift advancing early direct hls provider=${source.providerId} observed=${observedPosition.inSeconds}s held=${heldPosition.inSeconds}s anchor=${anchor.inSeconds}s repairs=$_media3RendererDriftRepairCountForSource action=advance_source_at_anchor reason=media3_direct_hls_early_renderer_drift',
+      );
+      await _advanceFromMedia3DirectHlsRendererDrift(
+        source: source,
+        anchor: anchor,
+        reason: 'media3_direct_hls_early_renderer_drift',
+      );
+      return;
+    }
     if (!_shouldReopenForMedia3RendererDrift(
       currentController,
       source,
@@ -9454,10 +14646,30 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       DiagnosticLog.add(
         'native playback cadence renderer drift repair completed provider=${source.providerId} anchor=${anchor.inSeconds}s reopened=$opened action=repair_renderer_at_anchor',
       );
+      if (!opened && _shouldAvoidLibVlcRendererDriftEscalation(source)) {
+        DiagnosticLog.add(
+          'native playback cadence renderer drift repair open failed provider=${source.providerId} anchor=${anchor.inSeconds}s action=advance_source_at_anchor reason=direct_hls_repair_open_failed',
+        );
+        await _advanceFromMedia3DirectHlsRendererDrift(
+          source: source,
+          anchor: anchor,
+          reason: 'media3_direct_hls_renderer_drift_repair_open_failed',
+        );
+      }
     } catch (error) {
       DiagnosticLog.add(
         'native playback cadence renderer drift repair failed provider=${source.providerId} anchor=${anchor.inSeconds}s errorType=${error.runtimeType} action=repair_renderer_at_anchor',
       );
+      if (_shouldAvoidLibVlcRendererDriftEscalation(source)) {
+        DiagnosticLog.add(
+          'native playback cadence renderer drift repair exception provider=${source.providerId} anchor=${anchor.inSeconds}s action=advance_source_at_anchor reason=direct_hls_repair_exception',
+        );
+        await _advanceFromMedia3DirectHlsRendererDrift(
+          source: source,
+          anchor: anchor,
+          reason: 'media3_direct_hls_renderer_drift_repair_exception',
+        );
+      }
     } finally {
       _recoveringFromMedia3RendererDrift = false;
     }
@@ -9482,6 +14694,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _lastMedia3RendererDriftEscalationAt = now;
     _anchorNativeRecoveryProgress(anchor,
         reason: 'media3_renderer_drift_escalation_start');
+    _recordMedia3DirectHlsRendererDriftRisk(source);
     DiagnosticLog.add(
       'native playback cadence renderer drift escalation starting provider=${source.providerId} observed=${observedPosition.inSeconds}s held=${heldPosition.inSeconds}s anchor=${anchor.inSeconds}s action=escalate_renderer_route_at_anchor',
     );
@@ -9509,6 +14722,34 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _firstControllerErrorAt = null;
     _lastControllerErrorDescription = null;
     _controllerErrorGraceLogs = 0;
+  }
+
+  bool _controllerErrorRecoveryAlreadyQueued(
+    _NativePlaybackController controller, {
+    required Duration recoveryPosition,
+    required String reason,
+  }) {
+    final source = _activeSource;
+    final key = [
+      _providerRunId,
+      source?.providerId ?? 'none',
+      controller.engine.id,
+      recoveryPosition.inSeconds,
+      controller.errorDescription,
+    ].join('|');
+    final now = DateTime.now();
+    final previousAt = _lastControllerErrorRecoveryAt;
+    if (_lastControllerErrorRecoveryKey == key &&
+        previousAt != null &&
+        now.difference(previousAt) < const Duration(seconds: 8)) {
+      DiagnosticLog.add(
+        'native playback error recovery coalesced reason=$reason provider=${source?.providerId} engine=${controller.engine.id} recoveryPosition=${recoveryPosition.inSeconds}s error=${controller.errorDescription}',
+      );
+      return true;
+    }
+    _lastControllerErrorRecoveryKey = key;
+    _lastControllerErrorRecoveryAt = now;
+    return false;
   }
 
   bool _shouldDeferControllerErrorRecovery(
@@ -9627,6 +14868,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final source = _activeSource;
     if (source == null) return false;
     if (controller.engine != _NativePlaybackEngine.exoplayer) return false;
+    if (_isMedia3HardSourceHttpError(controller.errorDescription)) {
+      return false;
+    }
     if (_shouldKeepCurrentSourceAfterMedia3RendererRepairError(
       controller,
       recoveryPosition,
@@ -9661,6 +14905,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (source == null) return false;
     if (controller.engine != _NativePlaybackEngine.exoplayer) return false;
     if (!controller.hasError) return false;
+    if (_isMedia3HardSourceHttpError(controller.errorDescription)) {
+      return false;
+    }
     if (_isLiveTvMode || source.sourceClass == PlaybackSourceClass.p2p) {
       return false;
     }
@@ -9690,7 +14937,23 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return description.contains('source error') ||
         description.contains('exoplaybackexception') ||
         description.contains('videoerror') ||
+        description.contains('network_connection_timeout') ||
+        description.contains('network connection timeout') ||
+        description.contains('connection timeout') ||
+        description.contains('sockettimeout') ||
+        description.contains('io_network') ||
         _isMedia3AnchorRepairTerminalError(description);
+  }
+
+  bool _isMedia3HardSourceHttpError(String description) {
+    final normalized = description.toLowerCase();
+    return normalized.contains('error_code_io_bad_http_status') ||
+        normalized.contains('bad_http_status') ||
+        normalized.contains('bad http status') ||
+        normalized.contains('http status 4') ||
+        normalized.contains('http status 5') ||
+        normalized.contains('response code: 4') ||
+        normalized.contains('response code: 5');
   }
 
   bool _isMedia3AnchorRepairTerminalError(String description) {
@@ -9766,12 +15029,28 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
     if (source.sourceClass == PlaybackSourceClass.p2p) return false;
+    if (controller.engine == _NativePlaybackEngine.exoplayer &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        !_isHlsSource(source) &&
+        (controller.duration <= Duration.zero ||
+            controller.size == Size.zero)) {
+      return false;
+    }
     if (recoveryPosition < const Duration(seconds: 5)) return false;
     if (_shouldHoldProvenMedia3PersistentBuffering(
-      controller,
-      source,
-      recoveryPosition,
-    )) {
+          controller,
+          source,
+          recoveryPosition,
+        ) &&
+        _media3HasPersistentBufferingHoldProof(controller, source)) {
+      if (_isHlsSource(source) &&
+          _bufferingWatchdogTicks >=
+              _bufferingRecoveryTickLimitForSource(source)) {
+        DiagnosticLog.add(
+          'native media3 proven buffering hold expired provider=${source.providerId} tick=$_bufferingWatchdogTicks reason=hls_clock_stall_repair',
+        );
+        return true;
+      }
       return false;
     }
     final hasStableAnchor =
@@ -9830,7 +15109,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           controller,
           source,
           recoveryPosition,
-        )) {
+        ) &&
+        _media3HasPersistentBufferingHoldProof(controller, source)) {
       if (_bufferingWatchdogTicks >= escapeTickLimit) {
         DiagnosticLog.add(
           'native buffering watchdog provider=${source?.providerId} tick=$_bufferingWatchdogTicks limit=$escapeTickLimit position=${recoveryPosition.inSeconds}s action=escape reason=verified_media3_buffering_anchor_expired',
@@ -9849,11 +15129,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (_bufferingWatchdogTicks >= quietTickLimit) {
       return false;
     }
-    return _shouldRepairPersistentControllerBuffering(
+    if (_shouldRepairPersistentControllerBuffering(
       controller,
       source,
       recoveryPosition,
-    );
+    )) {
+      return false;
+    }
+    return false;
   }
 
   bool _shouldKeepVisualControllerBufferingQuiet(
@@ -9873,9 +15156,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
     if (source.sourceClass == PlaybackSourceClass.p2p) return false;
+    if (controller.engine == _NativePlaybackEngine.exoplayer &&
+        source.sourceClass == PlaybackSourceClass.direct &&
+        !_isHlsSource(source) &&
+        (controller.duration <= Duration.zero ||
+            controller.size == Size.zero)) {
+      return false;
+    }
     if (recoveryPosition < const Duration(seconds: 5)) return false;
-    return _playbackCadenceClockUnstable ||
-        _activeSourceVerifiedForSession ||
+    final hasCurrentSourceProof =
+        _activeSourceVerifiedForSession || _sourceCredibleWatchSeconds >= 4;
+    final hasVisibleRuntimeProgress = hasCurrentSourceProof &&
+        controller.hasRenderedVideoFrame &&
+        _lastKnownPlaybackPosition >= const Duration(seconds: 5) &&
+        _lastKnownPlaybackPosition >=
+            recoveryPosition - const Duration(seconds: 3);
+    return hasVisibleRuntimeProgress ||
         _sourceHasRawVisualPlaybackProof(controller) ||
         _sourceHasVisualPlaybackProof(controller);
   }
@@ -9898,6 +15194,43 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
     if (source.sourceClass == PlaybackSourceClass.p2p) return false;
     if (recoveryPosition < const Duration(seconds: 5)) return false;
+    final hasVisualBufferingProof = controller.isPlaying &&
+        controller.hasRenderedVideoFrame &&
+        _sourceHasRawVisualPlaybackProof(controller);
+    if (hasVisualBufferingProof &&
+        _bufferingWatchdogTicks <
+            _persistentBufferingAnchorEscapeTickLimitForSource(source)) {
+      return true;
+    }
+    if (source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        _bufferingWatchdogTicks >=
+            _bufferingRecoveryTickLimitForSource(source) &&
+        !controller.isPlaying) {
+      DiagnosticLog.add(
+        'native media3 proven buffering hold expired provider=${source.providerId} tick=$_bufferingWatchdogTicks reason=hls_clock_stall_repair',
+      );
+      return false;
+    }
+    if (_media3PersistentBufferingNudgedSource(source) &&
+        _media3PersistentBufferingNudgeCountForSource >= 1 &&
+        _bufferingWatchdogTicks >=
+            _bufferingRecoveryTickLimitForSource(source)) {
+      DiagnosticLog.add(
+        'native media3 proven buffering hold expired provider=${source.providerId} tick=$_bufferingWatchdogTicks reason=post_nudge_resume_hls_escape',
+      );
+      return false;
+    }
+    if (source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source) &&
+        _resumeRecoveryExcludedQualityRanks.isNotEmpty &&
+        _bufferingWatchdogTicks >=
+            _bufferingRecoveryTickLimitForSource(source)) {
+      DiagnosticLog.add(
+        'native media3 proven buffering hold expired provider=${source.providerId} tick=$_bufferingWatchdogTicks reason=resume_quality_recovery_hls_escape',
+      );
+      return false;
+    }
     if (_bufferingWatchdogTicks >=
         _persistentBufferingAnchorEscapeTickLimitForSource(source)) {
       return false;
@@ -9923,6 +15256,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (source.sourceClass == PlaybackSourceClass.p2p) return false;
     if (libVlcZeroMetadataStall) return false;
     if (recoveryPosition < const Duration(seconds: 3)) return false;
+    if (_shouldBypassSoftHoldForMedia3PersistentBuffering(
+      controller,
+      source,
+      recoveryPosition,
+    )) {
+      return false;
+    }
     if (controller.isBuffering &&
         _bufferingWatchdogTicks >=
             _persistentBufferingAnchorEscapeTickLimitForSource(source)) {
@@ -9964,6 +15304,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
     if (source.sourceClass == PlaybackSourceClass.p2p) return false;
     if (libVlcZeroMetadataStall) return false;
+    if (_shouldBypassSoftHoldForMedia3PersistentBuffering(
+      controller,
+      source,
+      recoveryPosition,
+    )) {
+      return false;
+    }
     if (controller.isBuffering &&
         _bufferingWatchdogTicks >=
             _persistentBufferingAnchorEscapeTickLimitForSource(source)) {
@@ -10008,6 +15355,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
     if (source.sourceClass == PlaybackSourceClass.p2p) return false;
     if (libVlcZeroMetadataStall) return false;
+    if (_shouldBypassSoftHoldForMedia3PersistentBuffering(
+      controller,
+      source,
+      recoveryPosition,
+    )) {
+      return false;
+    }
     if (controller.isBuffering &&
         _bufferingWatchdogTicks >=
             _persistentBufferingAnchorEscapeTickLimitForSource(source)) {
@@ -10035,6 +15389,48 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return hasRuntimeProof && controllerIsSoftRecoverable;
   }
 
+  bool _shouldHoldVisiblyAliveMedia3DirectHlsRecovery(
+    _NativePlaybackController controller,
+    PlaybackSource? source,
+    Duration recoveryPosition, {
+    required bool allowSourceReload,
+    required bool forceSourceAdvance,
+    required bool skipProvider,
+    required bool libVlcZeroMetadataStall,
+  }) {
+    if (!allowSourceReload || forceSourceAdvance || skipProvider) return false;
+    if (source == null || libVlcZeroMetadataStall) return false;
+    if (controller.engine != _NativePlaybackEngine.exoplayer) return false;
+    if (source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source)) {
+      return false;
+    }
+    final activeSource = _activeSource;
+    if (activeSource == null ||
+        activeSource.url != source.url ||
+        activeSource.providerId != source.providerId) {
+      return false;
+    }
+    if (!controller.isInitialized ||
+        controller.hasError ||
+        !controller.isPlaying ||
+        controller.isBuffering ||
+        !controller.hasRenderedVideoFrame ||
+        controller.duration <= Duration.zero ||
+        controller.size == Size.zero ||
+        _activeSourceHasZeroClockMetadata) {
+      return false;
+    }
+    if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
+    final hasRuntimeAnchor = recoveryPosition >= const Duration(seconds: 5) ||
+        _lastKnownPlaybackPosition >= const Duration(seconds: 5) ||
+        _lastCrediblePlaybackPosition >= const Duration(seconds: 5) ||
+        _lastSavedSecond >= 5 ||
+        _sourceCredibleWatchSeconds >= 3 ||
+        _credibleWatchSeconds >= 5;
+    return hasRuntimeAnchor;
+  }
+
   bool _shouldHoldForcedSourceAdvanceOnHealthySource(
     _NativePlaybackController controller,
     PlaybackSource? source,
@@ -10046,14 +15442,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }) {
     if (!allowSourceReload || !forceSourceAdvance) return false;
     if (skipProvider || libVlcZeroMetadataStall) return false;
-    if (controller.engine == _NativePlaybackEngine.libvlc &&
-        _libVlcFrozenClockSamples >= 8) {
-      return false;
-    }
     if (source == null) return false;
     if (!controller.isInitialized || controller.hasError) return false;
     if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
     if (source.sourceClass == PlaybackSourceClass.p2p) return false;
+    if (_shouldBypassSoftHoldForMedia3PersistentBuffering(
+      controller,
+      source,
+      recoveryPosition,
+    )) {
+      return false;
+    }
     if (controller.isBuffering &&
         _bufferingWatchdogTicks >=
             _persistentBufferingAnchorEscapeTickLimitForSource(source)) {
@@ -10081,6 +15480,43 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             !_playbackCadenceClockUnstable &&
             !_sourceHasVisualPlaybackProof(controller);
     return !zeroVisualWithoutProof;
+  }
+
+  bool _shouldBypassSoftHoldForMedia3PersistentBuffering(
+    _NativePlaybackController controller,
+    PlaybackSource? source,
+    Duration recoveryPosition,
+  ) {
+    if (source == null) return false;
+    if (controller.engine != _NativePlaybackEngine.exoplayer) return false;
+    if (!controller.isInitialized ||
+        !controller.isBuffering ||
+        controller.hasError) {
+      return false;
+    }
+    if (source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source)) {
+      return false;
+    }
+    if (recoveryPosition < const Duration(seconds: 5)) return false;
+    final minimumTicks = math.max(
+      2,
+      _bufferingRecoveryTickLimitForSourceAtPosition(
+            source,
+            recoveryPosition,
+          ) ~/
+          2,
+    );
+    if (!_hadRecentMedia3PersistentBufferingForSource(
+      source,
+      minimumTicks: minimumTicks,
+    )) {
+      return false;
+    }
+    DiagnosticLog.add(
+      'native soft hold bypassed provider=${source.providerId} position=${recoveryPosition.inSeconds}s reason=recent_media3_persistent_buffering action=continue_recovery_at_anchor',
+    );
+    return true;
   }
 
   bool _shouldHoldSoftWatchdogRecovery(
@@ -10156,6 +15592,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   ) {
     if (source == null) return false;
     if (!controller.isInitialized || controller.hasError) return false;
+    if (controller.engine == _NativePlaybackEngine.libvlc) return false;
 
     final shouldHoldChurn = _shouldHoldForegroundSourceChurn(
       controller,
@@ -10198,13 +15635,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final source = _activeSource;
     if (source == null) return;
     final controller = _controller;
-    if (_libVlcContinuousTsPlaybackActive(controller)) {
-      DiagnosticLog.add(
-        'native black video recovery skipped reason=libvlc_continuous_ts_playing provider=${source.providerId} watched=${_lastSavedSecond}s position=${controller?.position.inSeconds ?? 0}s',
-      );
-      return;
-    }
-    final recoveryPosition = _effectiveRecoveryPosition(resumePosition);
+    if (controller?.engine == _NativePlaybackEngine.libvlc) return;
+    var recoveryPosition = _effectiveRecoveryPosition(resumePosition);
     if (controller != null &&
         _shouldHoldBlackVideoSurfaceRefresh(
           controller,
@@ -10221,135 +15653,21 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     resumePosition = recoveryPosition;
     _recoveringFromStall = true;
     _blackVideoWatchdogTicks = 0;
-    if (controller?.engine == _NativePlaybackEngine.libvlc) {
-      if (_manualLibVlcStrictForSource(source)) {
-        if (_advanceLibVlcProfileForSource(
-          source,
-          reason: 'black_video_manual_libvlc',
-        )) {
-          _manualLibVlcNoProofOpensByUrl.remove(source.url);
-          final profile = _libVlcProfileForSource(source);
-          DiagnosticLog.add(
-            'native black video libvlc fallback provider=${source.providerId} action=try_libvlc_profile profile=${profile.id} reason=manual_libvlc_locked',
-          );
-          if (mounted) {
-            const status = 'Trying another libVLC profile...';
-            _pauseActivePlaybackForLoading(
-              'black_video_manual_libvlc_profile_retry',
-            );
-            _logPlaybackStatus(
-              status,
-              reason: 'black_video_manual_libvlc_profile_retry',
-            );
-            setState(() {
-              _loading = true;
-              _controlsVisible = true;
-              _settingsExpanded = false;
-              _statusMessage = status;
-            });
-          }
-          await _disposeCurrentController(
-            awaitLibVlcRelease: false,
-            saveProgress: true,
-          );
-          if (!mounted) return;
-          _activeSource = null;
-          _recoveringFromStall = false;
-          final recovered = await _openSource(
-            source,
-            resumePosition: resumePosition,
-            statusMessage: 'Trying another libVLC profile...',
-            engineOverride: _NativePlaybackEngine.libvlc,
-          );
-          if (recovered) return;
-          _recoveringFromStall = true;
-        } else {
-          DiagnosticLog.add(
-            'native black video libvlc fallback provider=${source.providerId} action=profile_ladder_exhausted position=${resumePosition.inSeconds}s reason=manual_libvlc_locked',
-          );
-        }
-        final nextSourceIndex =
-            _nextSourceIndexAfterHardFailure(_activeSources, _sourceIndex) ??
-                _sourceIndex + 1;
-        DiagnosticLog.add(
-          'native black video libvlc fallback provider=${source.providerId} action=try_next_libvlc_source position=${resumePosition.inSeconds}s nextSourceIndex=$nextSourceIndex reason=manual_libvlc_locked',
-        );
-        _sourceIndex = nextSourceIndex;
-        _sameSourceRecoveryAttempts = 0;
-        if (mounted) {
-          const status = 'Trying next libVLC stream...';
-          _pauseActivePlaybackForLoading('black_video_libvlc_next_source');
-          _logPlaybackStatus(status, reason: 'black_video_libvlc_next_source');
-          setState(() {
-            _loading = true;
-            _controlsVisible = true;
-            _settingsExpanded = false;
-            _statusMessage = status;
-          });
-        }
-        await _disposeCurrentController(
-          awaitLibVlcRelease: false,
-          saveProgress: true,
-        );
-        _activeSource = null;
-        _recoveringFromStall = false;
-        await _openNextAvailableSource(resumePositionOverride: resumePosition);
-        return;
-      }
+    if (controller?.engine == _NativePlaybackEngine.exoplayer &&
+        controller?.media3 != null) {
+      final nextSourceIndex =
+          _nextSourceIndexAfterHardFailure(_activeSources, _sourceIndex) ??
+              _sourceIndex + 1;
       DiagnosticLog.add(
-        'native black video libvlc fallback provider=${source.providerId} action=switch-engine position=${resumePosition.inSeconds}s',
+        'native media3 platform view black video provider=${source.providerId} action=try_next_source position=${resumePosition.inSeconds}s nextSourceIndex=$nextSourceIndex reason=avoid_legacy_surface_fallback',
       );
-      DiagnosticLog.add(
-        'native verified source cache retained provider=${source.providerId} '
-        'reason=libvlc_black_video_engine_fallback url=[hidden]',
-      );
-      _libvlcUnavailableForSession = true;
-      _switchPlaybackEngineToAutoAfterLibVlcFailure(source.providerId);
-      _sourceIndex = _activeSources.indexWhere(
-        (candidate) => candidate.url == source.url,
-      );
-      if (_sourceIndex < 0) _sourceIndex = 0;
+      _blackVideoRecoveredUrls.add(source.url);
+      _sourceIndex = nextSourceIndex;
       _sameSourceRecoveryAttempts = 0;
       if (mounted) {
-        const status = 'Switching video engine...';
-        _pauseActivePlaybackForLoading('black_video_engine_fallback');
-        _logPlaybackStatus(status, reason: 'black_video_engine_fallback');
-        setState(() {
-          _loading = true;
-          _controlsVisible = true;
-          _settingsExpanded = false;
-          _statusMessage = status;
-        });
-      }
-      await _disposeCurrentController(
-        awaitLibVlcRelease: false,
-        saveProgress: true,
-      );
-      if (!mounted) return;
-      final recovered = await _retrySourceWithExoPlayerAfterLibVlcFailure(
-        source,
-        resumePosition,
-        statusMessage: 'Switching video engine...',
-        reason: 'libvlc_visual_surface',
-      );
-      _recoveringFromStall = false;
-      if (recovered) return;
-      _recoveringFromStall = true;
-      await _openNextAvailableSource(resumePositionOverride: resumePosition);
-      _recoveringFromStall = false;
-      return;
-    }
-    if (controller?.engine == _NativePlaybackEngine.exoplayer &&
-        controller?.media3 != null &&
-        !_media3NativeFallbackUrls.contains(source.url)) {
-      DiagnosticLog.add(
-        'native media3 surface fallback provider=${source.providerId} action=retry_texture reason=black_video_platform_view position=${resumePosition.inSeconds}s',
-      );
-      _media3NativeFallbackUrls.add(source.url);
-      if (mounted) {
-        const status = 'Refreshing video surface...';
-        _pauseActivePlaybackForLoading('media3_native_surface_fallback');
-        _logPlaybackStatus(status, reason: 'media3_native_surface_fallback');
+        final status = _nextSourceStatusFor(skipProvider: false);
+        _pauseActivePlaybackForLoading('media3_platform_view_next_source');
+        _logPlaybackStatus(status, reason: 'media3_platform_view_next_source');
         setState(() {
           _loading = true;
           _controlsVisible = true;
@@ -10364,14 +15682,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       if (!mounted) return;
       _activeSource = null;
       _recoveringFromStall = false;
-      final recovered = await _openSource(
-        source,
-        resumePosition: resumePosition,
-        statusMessage: 'Refreshing video surface...',
-        engineOverride: _NativePlaybackEngine.exoplayer,
-      );
-      if (recovered) return;
-      _recoveringFromStall = true;
+      await _openNextAvailableSource(resumePositionOverride: resumePosition);
+      return;
     }
     final alreadyRefreshed = !_blackVideoRecoveredUrls.add(source.url);
     if (alreadyRefreshed) {
@@ -10503,102 +15815,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
   }
 
-  Future<void> _recoverLibVlcContinuousTsNoVisual(
-    Duration resumePosition, {
-    required String reason,
-  }) async {
-    if (_playerClosing) return;
-    if (_settingsExpanded || _optionSheetOpen) return;
-    if (_recoveringFromStall) return;
-    final source = _activeSource;
-    if (source == null) return;
-    final controller = _controller;
-    final position = controller?.position ?? resumePosition;
-    final duration = controller?.duration ?? Duration.zero;
-    final size = controller?.size ?? Size.zero;
-    _recoveringFromStall = true;
-    DiagnosticLog.add(
-      'native libvlc continuous-ts visual stalled provider=${source.providerId} position=${position.inSeconds}s duration=${duration.inSeconds}s size=${size.width.toInt()}x${size.height.toInt()} streamed=${_countDiagnosticBucket(_libVlcContinuousTsStreamedSegments)} reason=$reason action=recover',
-    );
-    if (mounted) {
-      const status = 'Recovering playback...';
-      _pauseActivePlaybackForLoading('libvlc_continuous_ts_no_visual');
-      _logPlaybackStatus(status, reason: 'libvlc_continuous_ts_no_visual');
-      setState(() {
-        _loading = true;
-        _controlsVisible = true;
-        _settingsExpanded = false;
-        _statusMessage = status;
-        _playbackWaitMessage = null;
-        _playbackWaitMessagePausedPlayback = false;
-      });
-    }
-    await _disposeCurrentController(
-      updateUi: false,
-      awaitLibVlcRelease: false,
-      saveProgress: true,
-    );
-    if (!mounted) return;
-    if (_manualLibVlcStrictForSource(source)) {
-      if (_advanceLibVlcProfileForSource(
-        source,
-        reason: 'continuous_ts_no_visual',
-      )) {
-        _manualLibVlcNoProofOpensByUrl.remove(source.url);
-        final profile = _libVlcProfileForSource(source);
-        DiagnosticLog.add(
-          'native libvlc continuous-ts visual stalled provider=${source.providerId} action=try_libvlc_profile profile=${profile.id} reason=manual_libvlc_locked',
-        );
-        _logPlaybackStatus(
-          'Trying another libVLC profile...',
-          reason: 'continuous_ts_no_visual_profile_retry',
-        );
-        _activeSource = null;
-        _recoveringFromStall = false;
-        final recovered = await _openSource(
-          source,
-          resumePosition: resumePosition,
-          statusMessage: 'Trying another libVLC profile...',
-          engineOverride: _NativePlaybackEngine.libvlc,
-        );
-        if (recovered) return;
-        _recoveringFromStall = true;
-      } else {
-        DiagnosticLog.add(
-          'native libvlc continuous-ts visual stalled provider=${source.providerId} action=profile_ladder_exhausted reason=manual_libvlc_locked',
-        );
-      }
-      _markRuntimeSourceFailure(source, 'libvlc_continuous_ts_no_visual');
-      _failedSourceAttempts[source.url] =
-          (_failedSourceAttempts[source.url] ?? 0) + 1;
-      final nextSourceIndex =
-          _nextSourceIndexAfterHardFailure(_activeSources, _sourceIndex) ??
-              _sourceIndex + 1;
-      DiagnosticLog.add(
-        'native libvlc continuous-ts visual stalled provider=${source.providerId} action=try_next_libvlc_source nextSourceIndex=$nextSourceIndex reason=manual_libvlc_locked',
-      );
-      _sourceIndex = nextSourceIndex;
-      _sameSourceRecoveryAttempts = 0;
-      _activeSource = null;
-      _recoveringFromStall = false;
-      await _openNextAvailableSource(resumePositionOverride: resumePosition);
-      return;
-    }
-    _libvlcUnavailableForSession = true;
-    _switchPlaybackEngineToAutoAfterLibVlcFailure(source.providerId);
-    final recovered = await _retrySourceWithExoPlayerAfterLibVlcFailure(
-      source,
-      resumePosition,
-      statusMessage: 'Switching video engine...',
-      reason: 'libvlc_continuous_ts_no_visual',
-    );
-    _recoveringFromStall = false;
-    if (recovered) return;
-    _recoveringFromStall = true;
-    await _openNextAvailableSource(resumePositionOverride: resumePosition);
-    _recoveringFromStall = false;
-  }
-
   Future<void> _recoverFromPlaybackStall(
     Duration stalledPosition, {
     bool skipSameSource = false,
@@ -10608,6 +15824,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }) async {
     if (_playerClosing) return;
     final controller = _controller;
+    if (controller?.engine == _NativePlaybackEngine.libvlc) return;
     final sourceBeforeRecovery = _activeSource;
     final recoveryPosition = _effectiveRecoveryPosition(stalledPosition);
     final shouldEscapeRepeatedMedia3AnchorRepairError = controller != null &&
@@ -10663,17 +15880,6 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     if (_settingsExpanded || _optionSheetOpen) return;
     if (_recoveringFromStall) return;
-    final libVlcFrozenClockRecovery = controller != null &&
-        controller.engine == _NativePlaybackEngine.libvlc &&
-        _libVlcFrozenClockSamples >= 8;
-    if (_libVlcContinuousTsPlaybackActive(controller) &&
-        !forceSourceAdvance &&
-        !libVlcFrozenClockRecovery) {
-      DiagnosticLog.add(
-        'native stall recovery skipped reason=libvlc_continuous_ts_playing provider=${_activeSource?.providerId} watched=${_lastSavedSecond}s position=${controller?.position.inSeconds ?? stalledPosition.inSeconds}s',
-      );
-      return;
-    }
     if (controller != null &&
         _shouldAutoplayNextEpisodeAtTail(
           controller,
@@ -10698,9 +15904,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return;
     }
-    final libVlcZeroMetadataStall = controller != null &&
-        controller.engine == _NativePlaybackEngine.libvlc &&
-        _activeSourceHasZeroClockMetadata;
+    const libVlcZeroMetadataStall = false;
     _anchorNativeRecoveryProgress(
       recoveryPosition,
       reason: 'recover_from_stall_start',
@@ -10716,6 +15920,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _playbackCadenceClockUnstable ||
         _lastCrediblePlaybackPosition >= const Duration(seconds: 5) ||
         _resumeProgressAnchorPosition >= const Duration(seconds: 5);
+    if (await _restorePendingSourceSelectionRollback(
+      failedSource: sourceBeforeRecovery,
+      recoveryPosition: recoveryPosition,
+      reason: 'runtime_recovery',
+    )) {
+      _recoveringFromStall = false;
+      return;
+    }
     final sourceLooksTransientHealthy = !libVlcZeroMetadataStall &&
         sourceBeforeRecovery != null &&
         controller != null &&
@@ -10741,9 +15953,32 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         controller.size != Size.zero;
     final verifiedBufferingHold =
         controller != null && controller.isBuffering && !controller.hasError;
-    final persistentBufferingRecoveryEscaped =
-        verifiedBufferingHold && _persistentBufferingRecoveryEscapeArmed;
+    final persistentBufferingRecoveryEscaped = verifiedBufferingHold &&
+        (_persistentBufferingRecoveryEscapeArmed ||
+            _shouldBypassSoftHoldForMedia3PersistentBuffering(
+              controller,
+              sourceBeforeRecovery,
+              recoveryPosition,
+            ));
     if (persistentBufferingRecoveryEscaped) {
+      if (controller != null &&
+          _shouldHoldVisiblyAliveMedia3DirectHlsRecovery(
+            controller,
+            sourceBeforeRecovery,
+            recoveryPosition,
+            allowSourceReload: allowSourceReload,
+            forceSourceAdvance: forceSourceAdvance,
+            skipProvider: skipProvider,
+            libVlcZeroMetadataStall: libVlcZeroMetadataStall,
+          )) {
+        _persistentBufferingRecoveryEscapeArmed = false;
+        _holdSoftWatchdogRecovery(
+          controller,
+          recoveryPosition,
+          'reason=visibly_alive_media3_direct_hls_hold',
+        );
+        return;
+      }
       DiagnosticLog.add(
         'native stall recovery continuing past buffering holds provider=${sourceBeforeRecovery?.providerId} position=${recoveryPosition.inSeconds}s reason=persistent_buffering_anchor_expired',
       );
@@ -10764,6 +15999,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         !libVlcZeroMetadataStall &&
         sourceBeforeRecovery != null &&
         recoveryPosition >= const Duration(seconds: 3) &&
+        !_shouldBypassSoftHoldForMedia3PersistentBuffering(
+          controller,
+          sourceBeforeRecovery,
+          recoveryPosition,
+        ) &&
         (_playbackCadenceClockUnstable || hasRecentPlaybackAnchor);
     if (verifiedBufferingHold) {
       _verifiedTransientBufferingHolds += 1;
@@ -10926,6 +16166,32 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
 
+    if (libVlcZeroMetadataStall &&
+        controller != null &&
+        _shouldHoldLibVlcContinuousTsStartupLead(
+          controller,
+          sourceBeforeRecovery,
+        )) {
+      _stallWatchdogTicks = 0;
+      _deadPauseTicks = 0;
+      _bufferingWatchdogTicks = 0;
+      _noProgressFirstSeenAt = DateTime.now();
+      _lastWatchdogPosition = recoveryPosition;
+      _anchorNativeRecoveryProgress(
+        recoveryPosition,
+        reason: 'libvlc_continuous_ts_startup_lead_hold',
+      );
+      if (mounted) {
+        _clearPlaybackWaitMessage(
+          reason: 'libvlc_continuous_ts_startup_lead_hold',
+        );
+      }
+      DiagnosticLog.add(
+        'native libvlc zero-metadata recovery held provider=${sourceBeforeRecovery?.providerId} position=${recoveryPosition.inSeconds}s action=hold_current_source reason=libvlc_continuous_ts_startup_lead_hold',
+      );
+      return;
+    }
+
     _recoveringFromStall = true;
     _showPlaybackWaitMessage(
       'Recovering playback...',
@@ -10935,6 +16201,25 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       'native playback stalled provider=${_activeSource?.providerId} position=${stalledPosition.inSeconds}s skipSameSource=$skipSameSource skipProvider=$skipProvider allowSourceReload=$allowSourceReload',
     );
     _sendPlaybackFeedback('stall');
+
+    if (sourceBeforeRecovery != null &&
+        controller != null &&
+        controller.engine == _NativePlaybackEngine.exoplayer &&
+        _media3ResumeAnchorHadStartupVisualProof &&
+        (persistentBufferingRecoveryEscaped ||
+            skipSameSource ||
+            skipProvider ||
+            controller.hasError)) {
+      if (await _restartFromBeginningAfterResumeAnchorFailures(
+        source: sourceBeforeRecovery,
+        controller: controller,
+        recoveryPosition: recoveryPosition,
+        reason: 'media3_resume_anchor_stall_after_startup_proof',
+      )) {
+        _recoveringFromStall = false;
+        return;
+      }
+    }
 
     if (libVlcZeroMetadataStall && _zeroClockSkipEnabled) {
       final providerId = _activeSource?.providerId;
@@ -10959,41 +16244,93 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         if (!mounted) return;
       }
       if (sourceBeforeRecovery != null) {
-        if (_manualLibVlcStrictForSource(sourceBeforeRecovery)) {
-          if (_advanceLibVlcProfileForSource(
-            sourceBeforeRecovery,
-            reason: 'zero_metadata_manual_libvlc',
-          )) {
-            _manualLibVlcNoProofOpensByUrl.remove(sourceBeforeRecovery.url);
-            final profile = _libVlcProfileForSource(sourceBeforeRecovery);
-            DiagnosticLog.add(
-              'native libvlc zero-metadata stall provider=${sourceBeforeRecovery.providerId} action=try_libvlc_profile profile=${profile.id} reason=manual_libvlc_locked',
-            );
-            _logPlaybackStatus(
-              'Trying another libVLC profile...',
-              reason: 'libvlc_zero_metadata_profile_retry',
-            );
-            _activeSource = null;
+        if (sourceBeforeRecovery.sourceClass == PlaybackSourceClass.direct &&
+            _isHlsSource(sourceBeforeRecovery) &&
+            recoveryPosition >= const Duration(seconds: 5)) {
+          final previousSourceIndex = _sourceIndex;
+          final previousActiveSources = _activeSources;
+          _anchorNativeRecoveryProgress(
+            recoveryPosition,
+            reason: 'libvlc_zero_metadata_fresh_session_before_fallback',
+          );
+          DiagnosticLog.add(
+            'native libvlc zero-metadata stall '
+            'provider=${sourceBeforeRecovery.providerId} '
+            'position=${recoveryPosition.inSeconds}s '
+            'action=refresh_provider_session '
+            'reason=libvlc_zero_metadata_fresh_session_before_fallback',
+          );
+          final refreshed = await _tryFreshProviderResolve(
+            recoveryPosition,
+            recoverySourceOverride: sourceBeforeRecovery,
+            requireStartupPlaybackProof: true,
+          );
+          if (!mounted || _playerClosing) return;
+          if (refreshed) {
             _recoveringFromStall = false;
-            final recovered = await _openSource(
-              sourceBeforeRecovery,
-              resumePosition: recoveryPosition,
-              statusMessage: 'Trying another libVLC profile...',
-              engineOverride: _NativePlaybackEngine.libvlc,
-            );
-            if (recovered) return;
-            _recoveringFromStall = true;
-          } else {
-            DiagnosticLog.add(
-              'native libvlc zero-metadata stall provider=${sourceBeforeRecovery.providerId} action=profile_ladder_exhausted reason=manual_libvlc_locked',
-            );
+            return;
+          }
+          _sourceIndex = previousSourceIndex;
+          _activeSources = previousActiveSources;
+          _activeSource = null;
+          _recoveringFromStall = true;
+        }
+        if (_manualLibVlcStrictForSource(sourceBeforeRecovery)) {
+          if (_shouldAdvanceLibVlcZeroMetadataResumeHlsSiblingFirst(
+            sourceBeforeRecovery,
+          )) {
+            final nextSourceIndex = _nextSourceIndexAfterHardFailure(
+                  _activeSources,
+                  _sourceIndex,
+                  _NativePlaybackEngine.libvlc,
+                ) ??
+                _sourceIndex + 1;
+            if (nextSourceIndex < _activeSources.length) {
+              _markRuntimeSourceFailure(
+                sourceBeforeRecovery,
+                'libvlc_zero_metadata',
+              );
+              DiagnosticLog.add(
+                'native libvlc zero-metadata stall provider=${sourceBeforeRecovery.providerId} action=try_next_libvlc_source_before_profile nextSourceIndex=$nextSourceIndex reason=manual_libvlc_resume_hls_sibling_first',
+              );
+              if (await _tryKnownLibVlcRecoverySourceAtIndex(
+                nextSourceIndex,
+                recoveryPosition,
+                reason: 'manual_libvlc_resume_hls_sibling_first',
+              )) {
+                return;
+              }
+              _recoveringFromStall = true;
+            }
           }
           _markRuntimeSourceFailure(
             sourceBeforeRecovery,
             'libvlc_zero_metadata',
           );
-          _failedSourceAttempts[sourceBeforeRecovery.url] =
-              (_failedSourceAttempts[sourceBeforeRecovery.url] ?? 0) + 1;
+          _libvlcUnavailableForSession = true;
+          _switchPlaybackEngineToAutoAfterLibVlcFailure(
+            sourceBeforeRecovery.providerId,
+          );
+          if (_hasMedia3DirectHlsRendererDriftRisk(sourceBeforeRecovery)) {
+            final nextSourceIndex = _nextSourceIndexAfterHardFailure(
+                    _activeSources, _sourceIndex) ??
+                _sourceIndex + 1;
+            DiagnosticLog.add(
+              'native libvlc zero-metadata stall provider=${sourceBeforeRecovery.providerId} action=skip_exoplayer_retry_after_media3_drift nextSourceIndex=$nextSourceIndex reason=avoid_engine_ping_pong',
+            );
+            _sourceIndex = nextSourceIndex;
+            _sameSourceRecoveryAttempts = 0;
+            _activeSource = null;
+            _recoveringFromStall = false;
+            await _openNextAvailableSource(
+              resumePositionOverride: recoveryPosition,
+            );
+            return;
+          }
+          const recoveredWithMedia3 = false;
+          _recoveringFromStall = false;
+          if (recoveredWithMedia3) return;
+          _recoveringFromStall = true;
           final nextSourceIndex =
               _nextSourceIndexAfterHardFailure(_activeSources, _sourceIndex) ??
                   _sourceIndex + 1;
@@ -11010,39 +16347,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           return;
         } else {
           if (_effectivePlaybackEngine == 'auto') {
-            if (_advanceLibVlcProfileForSource(
-              sourceBeforeRecovery,
-              reason: 'zero_metadata_auto_libvlc',
-            )) {
-              final profile = _libVlcProfileForSource(sourceBeforeRecovery);
-              DiagnosticLog.add(
-                'native libvlc zero-metadata stall provider=${sourceBeforeRecovery.providerId} action=try_libvlc_profile profile=${profile.id} reason=auto_engine',
-              );
-              _logPlaybackStatus(
-                'Trying another libVLC profile...',
-                reason: 'libvlc_zero_metadata_auto_profile_retry',
-              );
-              _activeSource = null;
-              _recoveringFromStall = false;
-              final recovered = await _openSource(
-                sourceBeforeRecovery,
-                resumePosition: recoveryPosition,
-                statusMessage: 'Trying another libVLC profile...',
-                engineOverride: _NativePlaybackEngine.libvlc,
-              );
-              if (recovered) return;
-              _recoveringFromStall = true;
-            } else {
-              DiagnosticLog.add(
-                'native libvlc zero-metadata stall provider=${sourceBeforeRecovery.providerId} action=profile_ladder_exhausted reason=auto_engine',
-              );
-            }
             _markRuntimeSourceFailure(
               sourceBeforeRecovery,
               'libvlc_zero_metadata',
             );
-            _failedSourceAttempts[sourceBeforeRecovery.url] =
-                (_failedSourceAttempts[sourceBeforeRecovery.url] ?? 0) + 1;
             final nextSourceIndex = _nextSourceIndexAfterHardFailure(
               _activeSources,
               _sourceIndex,
@@ -11078,12 +16386,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           _switchPlaybackEngineToAutoAfterLibVlcFailure(
             sourceBeforeRecovery.providerId,
           );
-          final recovered = await _retrySourceWithExoPlayerAfterLibVlcFailure(
-            sourceBeforeRecovery,
-            recoveryPosition,
-            statusMessage: 'Refreshing stream...',
-            reason: 'libvlc_zero_metadata',
-          );
+          if (_hasMedia3DirectHlsRendererDriftRisk(sourceBeforeRecovery)) {
+            DiagnosticLog.add(
+              'native libvlc zero-metadata stall provider=${sourceBeforeRecovery.providerId} action=skip_media3_retry reason=media3_renderer_drift_route_risk',
+            );
+            _sourceIndex = _activeSources.length;
+            _sameSourceRecoveryAttempts = 0;
+            _activeSource = null;
+            _recoveringFromStall = false;
+            await _openNextAvailableSource(
+              resumePositionOverride: recoveryPosition,
+            );
+            return;
+          }
+          const recovered = false;
           _recoveringFromStall = false;
           if (recovered) return;
           _recoveringFromStall = true;
@@ -11254,46 +16570,21 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
     }
 
-    if (!skipProvider &&
-        source != null &&
-        controller != null &&
-        controller.engine == _NativePlaybackEngine.exoplayer &&
-        _effectivePlaybackEngine == 'auto' &&
-        _media3NativeFallbackUrls.contains(source.url)) {
-      DiagnosticLog.add(
-        'native stall exoplayer fallback provider=${source.providerId} action=switch-engine reason=media3_texture_stall_after_platform_view_black_video position=${stalledPosition.inSeconds}s',
-      );
-      if (mounted) {
-        const status = 'Switching video engine...';
-        _pauseActivePlaybackForLoading('stall_exoplayer_libvlc');
-        _logPlaybackStatus(status, reason: 'stall_exoplayer_libvlc');
-        setState(() {
-          _loading = true;
-          _controlsVisible = true;
-          _settingsExpanded = false;
-          _statusMessage = status;
-          _playbackWaitMessage = null;
-          _playbackWaitMessagePausedPlayback = false;
-        });
-      }
-      final recovered = await _retrySourceWithLibVlcAfterExoVisualFailure(
-        source,
-        recoveryPosition,
-        statusMessage: 'Switching video engine...',
-        reason: 'media3_texture_stall_after_platform_view_black_video',
-      );
-      _recoveringFromStall = false;
-      if (recovered) return;
-      _recoveringFromStall = true;
-      DiagnosticLog.add(
-        'native stall exoplayer fallback provider=${source.providerId} action=libvlc_unavailable_try_next_source reason=media3_texture_stall_after_platform_view_black_video',
-      );
-    }
     if (persistentBufferingRecoveryEscaped &&
         !skipProvider &&
         source != null &&
         controller.engine == _NativePlaybackEngine.exoplayer &&
         _effectivePlaybackEngine == 'auto') {
+      if (_media3ResumeAnchorHadStartupVisualProof &&
+          await _restartFromBeginningAfterResumeAnchorFailures(
+            source: source,
+            controller: controller,
+            recoveryPosition: recoveryPosition,
+            reason: 'media3_resume_anchor_buffering_after_startup_proof',
+          )) {
+        _recoveringFromStall = false;
+        return;
+      }
       DiagnosticLog.add(
         'native stall exoplayer fallback provider=${source.providerId} action=switch-engine reason=media3_persistent_buffering position=${recoveryPosition.inSeconds}s',
       );
@@ -11319,8 +16610,83 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _recoveringFromStall = false;
       if (recovered) return;
       _recoveringFromStall = true;
+      final libVlcBlockedForDirectHlsResume =
+          _shouldRejectLibVlcDirectHlsResume(
+        source,
+        _NativePlaybackEngine.libvlc,
+        recoveryPosition,
+      );
+      if (libVlcBlockedForDirectHlsResume) {
+        _markRuntimeSourceFailure(
+          source,
+          'media3_persistent_buffering_libvlc_direct_hls_guard',
+        );
+        _excludeResumeRecoveryQualityAfterRuntimeFailure(
+          source,
+          engine: controller.engine,
+          recoveryPosition: recoveryPosition,
+        );
+        if (await _restartFromBeginningAfterResumeAnchorFailures(
+          source: source,
+          controller: controller,
+          recoveryPosition: recoveryPosition,
+          reason: 'media3_persistent_buffering_libvlc_direct_hls_guard',
+        )) {
+          _recoveringFromStall = false;
+          return;
+        }
+        if (_limitToFirstQualityPass) {
+          DiagnosticLog.add(
+            'native resume direct hls source failed; escaping saved provider '
+            'provider=${source.providerId} position=${recoveryPosition.inSeconds}s '
+            'reason=media3_persistent_buffering_libvlc_direct_hls_guard '
+            'action=fresh_provider_recovery',
+          );
+          await _disposeCurrentController(
+            updateUi: false,
+            awaitLibVlcRelease: true,
+            saveProgress: false,
+          );
+          _activeSource = null;
+          _sameSourceRecoveryAttempts = 0;
+          _recoveringFromStall = false;
+          if (await _switchProviderToAutoTemporarilyIfNeeded(_providerRunId)) {
+            return;
+          }
+          _recoveringFromStall = true;
+        }
+        DiagnosticLog.add(
+          'native stall media3 persistent buffering bounded reload provider=${source.providerId} sourceIndex=$_sourceIndex reason=libvlc_direct_hls_crash_guard position=${recoveryPosition.inSeconds}s action=reload_current_source',
+        );
+        await _disposeCurrentController(
+          updateUi: false,
+          awaitLibVlcRelease: true,
+          saveProgress: false,
+        );
+        _activeSource = null;
+        _sameSourceRecoveryAttempts = 0;
+        _recoveringFromStall = false;
+        final reloadedWithMedia3 = await _openSource(
+          source,
+          resumePosition: recoveryPosition,
+          statusMessage: 'Refreshing playback...',
+          engineOverride: _NativePlaybackEngine.exoplayer,
+          requireStartupPlaybackProof: true,
+        );
+        if (reloadedWithMedia3) return;
+        DiagnosticLog.add(
+          'native stall media3 persistent buffering reload failed provider=${source.providerId} reason=libvlc_direct_hls_crash_guard_no_more_reloads action=finish_no_source',
+        );
+        await _finishWithNoWorkingSource();
+        return;
+      }
+      await _disposeCurrentController(
+        updateUi: false,
+        awaitLibVlcRelease: true,
+        saveProgress: false,
+      );
       DiagnosticLog.add(
-        'native stall exoplayer fallback provider=${source.providerId} action=libvlc_unavailable_try_next_source reason=media3_persistent_buffering',
+        'native stall exoplayer fallback provider=${source.providerId} action=libvlc_unavailable_try_next_source reason=media3_persistent_buffering staleController=disposed',
       );
     }
 
@@ -11349,7 +16715,18 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       final failedSource = _activeSource;
       final failedProviderId = failedSource?.providerId;
       if (failedSource != null) {
-        _markRuntimeSourceFailure(failedSource, 'runtime_error');
+        final runtimeFailureReason =
+            controller?.engine == _NativePlaybackEngine.exoplayer &&
+                    failedSource.sourceClass == PlaybackSourceClass.direct &&
+                    _isHlsSource(failedSource)
+                ? 'media3_runtime_error'
+                : 'runtime_error';
+        _markRuntimeSourceFailure(failedSource, runtimeFailureReason);
+        _excludeResumeRecoveryQualityAfterRuntimeFailure(
+          failedSource,
+          engine: controller?.engine,
+          recoveryPosition: recoveryPosition,
+        );
       }
       final nextHardSourceIndex = _nextSourceIndexAfterHardFailure(
         _activeSources,
@@ -11386,6 +16763,23 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         );
       }
       await _disposeCurrentController(awaitLibVlcRelease: true);
+      if (_shouldSkipSameProviderRefreshAfterResumeRuntimeError(
+        failedSource,
+        recoveryPosition,
+      )) {
+        DiagnosticLog.add(
+          'native hard recovery skipped provider=${failedProviderId ?? 'unknown'} '
+          'reason=resume_direct_hls_runtime_error action=fresh_provider_recovery',
+        );
+        _activeSource = null;
+        _activeSources = const <PlaybackSource>[];
+        _sameSourceRecoveryAttempts = 0;
+        _recoveringFromStall = false;
+        if (await _switchProviderToAutoTemporarilyIfNeeded(_providerRunId)) {
+          return;
+        }
+        _recoveringFromStall = true;
+      }
       final recovered = await _tryFreshProviderResolve(recoveryPosition);
       if (recovered) {
         _recoveringFromStall = false;
@@ -11409,6 +16803,23 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         controller,
         recoveryPosition,
         'reason=soft_watchdog_recovery_hold_before_source_advance',
+      );
+      return;
+    }
+    if (controller != null &&
+        _shouldHoldVisiblyAliveMedia3DirectHlsRecovery(
+          controller,
+          source,
+          recoveryPosition,
+          allowSourceReload: allowSourceReload,
+          forceSourceAdvance: forceSourceAdvance,
+          skipProvider: skipProvider,
+          libVlcZeroMetadataStall: libVlcZeroMetadataStall,
+        )) {
+      _holdSoftWatchdogRecovery(
+        controller,
+        recoveryPosition,
+        'reason=visibly_alive_media3_direct_hls_hold_before_source_advance',
       );
       return;
     }
@@ -11452,17 +16863,97 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (persistentBufferingRecoveryEscaped &&
         source != null &&
         _activeSources.length > 1) {
+      _markRuntimeSourceFailure(
+        source,
+        'media3_persistent_buffering_source_escape',
+      );
+      _markDirectHlsRouteRiskRecovery(
+        source,
+        anchor: recoveryPosition,
+        reason: 'media3_persistent_buffering_source_escape',
+      );
+      final deprioritizedSources = _excludeFailedMidplayRecoverySources(
+        _deprioritizeFailedSources(_activeSources),
+      );
+      final hasLowerQualityCandidate =
+          _hasLowerQualityOrAdaptiveRecoveryCandidate(
+        deprioritizedSources,
+        source,
+        controller,
+      );
+      if (!hasLowerQualityCandidate) {
+        DiagnosticLog.add(
+          'native persistent buffering exhausted quality floor provider=${source.providerId} quality=${_qualityLabel(source)} action=next_source_then_fresh',
+        );
+        if (await _restartFromBeginningAfterResumeAnchorFailures(
+          source: source,
+          controller: controller,
+          recoveryPosition: recoveryPosition,
+          reason: 'media3_persistent_buffering_quality_floor_exhausted',
+        )) {
+          _recoveringFromStall = false;
+          return;
+        }
+        final refreshed = await _tryFreshProviderResolve(
+          recoveryPosition,
+          recoverySourceOverride: source,
+        );
+        if (refreshed) {
+          _recoveringFromStall = false;
+          return;
+        }
+        final routeRefreshed = await _tryFreshRouteResolve(recoveryPosition);
+        if (routeRefreshed) {
+          _recoveringFromStall = false;
+          return;
+        }
+        await _disposeCurrentController(awaitLibVlcRelease: true);
+        final prioritizedResolvedRecovery =
+            _prioritizeResolvedMidPlaybackRecoveryRequests(
+          failedSource: source,
+        );
+        if (!prioritizedResolvedRecovery) {
+          _providerIndex += 1;
+          _sourceIndex = 0;
+        }
+        _activeSource = null;
+        _sameSourceRecoveryAttempts = 0;
+        await _openNextAvailableSource(
+          resumePositionOverride: recoveryPosition,
+        );
+        _recoveringFromStall = false;
+        return;
+      }
       final flooredSources = _currentOrLowerQualityRecoverySources(
-        _activeSources,
+        deprioritizedSources,
         source,
         qualityFloorHeight: controller.size.height.toInt(),
         preferLowerThanCurrent: true,
-        reason: 'persistent_buffering_prefer_lower_quality',
+        preferAdaptiveBeforeLower: true,
+        reason: 'persistent_buffering_prefer_adaptive_hls',
+      );
+      _armMedia3RecoveryQualityCeiling(
+        controller,
+        source,
+        reason: 'persistent_buffering_quality_floor',
       );
       _activeSources = flooredSources;
       _sourceIndex = 0;
       _activeSource = null;
       persistentBufferingEscapedToFlooredSource = true;
+    }
+    if (persistentBufferingRecoveryEscaped &&
+        controller != null &&
+        _controller == controller) {
+      await _disposeCurrentController(
+        updateUi: false,
+        awaitLibVlcRelease: true,
+        saveProgress: false,
+      );
+      _activeSource = null;
+      DiagnosticLog.add(
+        'native persistent buffering disposed failed controller provider=${source?.providerId} reason=media3_hls_clock_stall_recovery',
+      );
     }
     if (mounted) {
       final status = _nextSourceStatusFor(skipProvider: skipProvider);
@@ -11483,6 +16974,23 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         DiagnosticLog.add(
           'native stall recovery using floored source provider=${source?.providerId} sourceIndex=$_sourceIndex reason=persistent_buffering_quality_floor',
         );
+        _sameSourceRecoveryAttempts = 0;
+        await _openNextAvailableSource(
+            resumePositionOverride: recoveryPosition);
+        _recoveringFromStall = false;
+        return;
+      } else if (persistentBufferingRecoveryEscaped &&
+          _activeSource == null &&
+          _activeSources.isNotEmpty) {
+        DiagnosticLog.add(
+          'native stall recovery exhausted singleton buffering source provider=${source?.providerId} sourceCount=${_activeSources.length} reason=persistent_buffering_singleton_escape action=continue_provider_ladder',
+        );
+        _sourceIndex = _activeSources.length;
+        _recoveringFromStall = false;
+        await _openNextAvailableSource(
+          resumePositionOverride: recoveryPosition,
+        );
+        return;
       } else if (_activeSource == null || _activeSources.isEmpty) {
         DiagnosticLog.add(
           'native stall recovery reset source index reason=no_active_source',
@@ -11523,6 +17031,89 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _recoveringFromStall = false;
   }
 
+  bool _hasLowerQualityOrAdaptiveRecoveryCandidate(
+    List<PlaybackSource> sources,
+    PlaybackSource currentSource,
+    _NativePlaybackController controller,
+  ) {
+    final currentRank = math.max(
+      _qualityRank(_qualityLabel(currentSource)),
+      _qualityRank(
+        '${_normalizedPlaybackQualityHeight(controller.size.height.toInt())}P',
+      ),
+    );
+    if (currentRank <= 0) return false;
+    for (final candidate in sources) {
+      if (candidate.url == currentSource.url) continue;
+      if (!_nativeSourceClassIsPlayable(candidate)) continue;
+      if (_isFailedMidplayRecoverySource(candidate)) continue;
+      if (_shouldSkipSourceForSession(candidate, controller.engine)) continue;
+      if (_isAdaptiveHlsAutoSource(candidate)) return true;
+      final candidateRank = _qualityRank(_qualityLabel(candidate));
+      if (candidateRank > 0 && candidateRank < currentRank) return true;
+    }
+    return false;
+  }
+
+  void _excludeResumeRecoveryQualityAfterRuntimeFailure(
+    PlaybackSource source, {
+    required _NativePlaybackEngine? engine,
+    required Duration recoveryPosition,
+  }) {
+    if (engine != _NativePlaybackEngine.exoplayer ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source) ||
+        recoveryPosition <= Duration.zero) {
+      return;
+    }
+    final qualityRank = _qualityRank(_qualityLabel(source));
+    if (qualityRank <= 0) {
+      _resumeRecoveryUnrankedDirectHlsFailures += 1;
+      _ignoreSavedQualityForResumeRecovery = true;
+      DiagnosticLog.add(
+        'native resume runtime source error excluding unranked direct hls '
+        'provider=${source.providerId} resume=${recoveryPosition.inSeconds}s '
+        'failures=$_resumeRecoveryUnrankedDirectHlsFailures '
+        'reason=resume_seek_runtime_source_error',
+      );
+      return;
+    }
+    final added = _resumeRecoveryExcludedQualityRanks.add(qualityRank);
+    if (!added) return;
+    _ignoreSavedQualityForResumeRecovery = true;
+    DiagnosticLog.add(
+      'native resume runtime source error excluding quality rank=$qualityRank provider=${source.providerId} resume=${recoveryPosition.inSeconds}s reason=resume_seek_runtime_source_error',
+    );
+  }
+
+  bool _shouldSkipSameProviderRefreshAfterResumeRuntimeError(
+    PlaybackSource? source,
+    Duration recoveryPosition,
+  ) {
+    if (source == null ||
+        !_limitToFirstQualityPass ||
+        source.sourceClass != PlaybackSourceClass.direct ||
+        !_isHlsSource(source) ||
+        recoveryPosition < const Duration(seconds: 30)) {
+      return false;
+    }
+    return _resumeRecoveryExcludedQualityRanks.isNotEmpty;
+  }
+
+  Future<bool> _restartFromBeginningAfterResumeAnchorFailures({
+    required PlaybackSource source,
+    required _NativePlaybackController controller,
+    required Duration recoveryPosition,
+    required String reason,
+  }) async {
+    DiagnosticLog.add(
+      'native resume anchor fallback disabled provider=${source.providerId} '
+      'engine=${controller.engine.id} anchor=${recoveryPosition.inSeconds}s '
+      'reason=$reason action=preserve_resume_anchor',
+    );
+    return false;
+  }
+
   int? _nextSourceIndexAfterHardFailure(
     List<PlaybackSource> sources,
     int sourceIndex, [
@@ -11559,8 +17150,136 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return false;
     }
     final source = sources[sourceIndex];
+    if (engine == _NativePlaybackEngine.exoplayer &&
+        _isFailedMidplayRecoverySource(source)) {
+      return false;
+    }
+    final qualityRank = _qualityRank(_qualityLabel(source));
+    if (_resumeRecoveryExcludedQualityRanks.contains(qualityRank)) {
+      return false;
+    }
+    if (_shouldSkipUnknownResumeRecoveryQuality(source)) {
+      return false;
+    }
     return _nativeSourceClassIsPlayable(source) &&
         (engine == null || !_shouldSkipSourceForSession(source, engine));
+  }
+
+  bool _shouldSkipUnknownResumeRecoveryQuality(PlaybackSource source) {
+    if (_resumeRecoveryExcludedQualityRanks.isEmpty) return false;
+    if (source.sourceClass != PlaybackSourceClass.direct) return false;
+    if (!_isHlsSource(source)) return false;
+    if (_isAdaptiveHlsAutoSource(source)) {
+      return false;
+    }
+    final qualityRank = _qualityRank(_qualityLabel(source));
+    if (qualityRank > 0) return false;
+    DiagnosticLog.add(
+      'native resume recovery unknown quality skipped provider=${source.providerId} reason=known_direct_hls_qualities_excluded',
+    );
+    return true;
+  }
+
+  bool _shouldAdvanceLibVlcZeroMetadataResumeHlsSiblingFirst(
+    PlaybackSource source,
+  ) {
+    if (!_manualLibVlcStrictForSource(source)) return false;
+    if (!_hasSavedResumeProgressForRoute) return false;
+    if (!_isHlsSource(source)) return false;
+    if (!_canUseLibVlcHlsRelaySource(source, _NativePlaybackEngine.libvlc)) {
+      return false;
+    }
+    return true;
+  }
+
+  Future<bool> _tryKnownLibVlcRecoverySourceAtIndex(
+    int sourceIndex,
+    Duration recoveryPosition, {
+    required String reason,
+  }) async {
+    if (sourceIndex < 0 || sourceIndex >= _activeSources.length) {
+      return false;
+    }
+    final source = _activeSources[sourceIndex];
+    if (!_nativeSourceClassIsPlayable(source) ||
+        _shouldSkipSourceForSession(source, _NativePlaybackEngine.libvlc)) {
+      return false;
+    }
+    _sourceIndex = sourceIndex;
+    _sameSourceRecoveryAttempts = 0;
+    _activeSource = null;
+    _recoveringFromStall = false;
+    const status = 'Trying another stream...';
+    if (mounted) {
+      _logPlaybackStatus(status, reason: reason);
+      setState(() {
+        _loading = true;
+        _controlsVisible = true;
+        _settingsExpanded = false;
+        _statusMessage = status;
+      });
+    }
+    DiagnosticLog.add(
+      'native libvlc recovery opening known source provider=${source.providerId} sourceIndex=$sourceIndex quality=${_qualityLabel(source)} reason=$reason action=open_known_source',
+    );
+    final opened = await _openSource(
+      source,
+      resumePosition: recoveryPosition,
+      statusMessage: status,
+      engineOverride: _NativePlaybackEngine.libvlc,
+      requireStartupPlaybackProof: true,
+    );
+    if (opened) return true;
+    _recoveringFromStall = true;
+    DiagnosticLog.add(
+      'native libvlc recovery known source failed provider=${source.providerId} sourceIndex=$sourceIndex quality=${_qualityLabel(source)} reason=$reason',
+    );
+    return false;
+  }
+
+  Future<bool> _tryKnownMedia3RecoverySourceAtIndex(
+    int sourceIndex,
+    Duration recoveryPosition, {
+    required String reason,
+  }) async {
+    if (sourceIndex < 0 || sourceIndex >= _activeSources.length) {
+      return false;
+    }
+    final source = _activeSources[sourceIndex];
+    if (!_nativeSourceClassIsPlayable(source) ||
+        _shouldSkipSourceForSession(source, _NativePlaybackEngine.exoplayer)) {
+      return false;
+    }
+    _sourceIndex = sourceIndex;
+    _sameSourceRecoveryAttempts = 0;
+    _activeSource = null;
+    _recoveringFromStall = false;
+    const status = 'Trying another stream...';
+    if (mounted) {
+      _logPlaybackStatus(status, reason: reason);
+      setState(() {
+        _loading = true;
+        _controlsVisible = true;
+        _settingsExpanded = false;
+        _statusMessage = status;
+      });
+    }
+    DiagnosticLog.add(
+      'native media3 recovery opening known source provider=${source.providerId} sourceIndex=$sourceIndex quality=${_qualityLabel(source)} reason=$reason action=open_known_source',
+    );
+    final opened = await _openSource(
+      source,
+      resumePosition: recoveryPosition,
+      statusMessage: status,
+      engineOverride: _NativePlaybackEngine.exoplayer,
+      requireStartupPlaybackProof: true,
+    );
+    if (opened) return true;
+    _recoveringFromStall = true;
+    DiagnosticLog.add(
+      'native media3 recovery known source failed provider=${source.providerId} sourceIndex=$sourceIndex quality=${_qualityLabel(source)} reason=$reason',
+    );
+    return false;
   }
 
   int? _nextRawSourceIndexAfterHardFailure(
@@ -11585,8 +17304,242 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return null;
   }
 
-  Future<bool> _tryFreshProviderResolve(Duration resumePosition) async {
-    final recoverySource = _activeSource;
+  Future<bool> _tryFreshRouteResolve(Duration resumePosition) async {
+    final resolver = _resolveFreshRequests;
+    if (resolver == null ||
+        _routeWideFreshRecoveryAttempted ||
+        resumePosition <= Duration.zero ||
+        !mounted) {
+      return false;
+    }
+    _routeWideFreshRecoveryAttempted = true;
+    final runId = _providerRunId;
+    final previousRequests = _requests;
+    final previousProviderIndex = _providerIndex;
+    final previousSourceIndex = _sourceIndex;
+    final previousEnginePassIndex = _enginePassIndex;
+    final previousQualityPassIndex = _qualityPassIndex;
+    final previousActiveSources = _activeSources;
+
+    const status = 'Finding another playable stream...';
+    _logPlaybackStatus(status, reason: 'route_wide_fresh_recovery');
+    setState(() {
+      _loading = true;
+      _controlsVisible = true;
+      _settingsExpanded = false;
+      _statusMessage = status;
+    });
+    DiagnosticLog.add(
+      'native fresh route recovery start '
+      'position=${resumePosition.inSeconds}s requests=${previousRequests.length}',
+    );
+
+    try {
+      final resolvedRequests =
+          await _runCancelableProviderWork<List<NativePlaybackRequest>>(
+        timeout: const Duration(seconds: 12),
+        operation: resolver,
+      );
+      if (!mounted || runId != _providerRunId) return false;
+      final freshRequests = mobilePrioritizeExplicitLibVlcRequestsByTransport(
+        _prioritizeResolvedFreshRequests(
+          resolvedRequests
+              .where((request) => request.sources.isNotEmpty)
+              .toList(growable: false),
+        ),
+        explicitLibVlc: _manualLibVlcConfigured,
+      );
+      if (freshRequests.isEmpty) {
+        DiagnosticLog.add(
+          'native fresh route recovery unavailable reason=no_resolved_requests',
+        );
+        return false;
+      }
+
+      final freshProviderIds =
+          freshRequests.map((request) => request.providerId).toSet();
+      final mergedRequests = <NativePlaybackRequest>[
+        ...freshRequests,
+        ...previousRequests.where(
+          (request) => !freshProviderIds.contains(request.providerId),
+        ),
+      ];
+      var candidateCount = 0;
+      for (var requestIndex = 0;
+          requestIndex < freshRequests.length;
+          requestIndex += 1) {
+        if (!mounted || runId != _providerRunId) return false;
+        final request = freshRequests[requestIndex];
+        final freshSources = _excludeFailedMidplayRecoverySources(
+          _deprioritizeFailedSources(
+            _prioritizePreferredQuality(
+              await _expandQualitySources(request.sources),
+            ),
+          ),
+        );
+        final playableSources = _nativePlayableSources(freshSources);
+        if (playableSources.isEmpty) continue;
+
+        _requests = mergedRequests;
+        _providerIndex = requestIndex;
+        _activeSources = freshSources;
+        for (final source in playableSources) {
+          if (!mounted || runId != _providerRunId) return false;
+          candidateCount += 1;
+          _sourceIndex = freshSources.indexWhere(
+            (candidate) => candidate.url == source.url,
+          );
+          if (_sourceIndex < 0) _sourceIndex = 0;
+          final opened = await _openSource(
+            source,
+            resumePosition: resumePosition,
+            statusMessage: status,
+            saveProgressBeforeOpen: false,
+            requireStartupPlaybackProof: true,
+            allowResumeRecoveryEscalation: false,
+          );
+          DiagnosticLog.add(
+            'native fresh route candidate '
+            'provider=${source.providerId} '
+            'quality=${_qualityLabel(source)} opened=$opened',
+          );
+          if (opened) {
+            DiagnosticLog.add(
+              'native fresh route recovery opened '
+              'provider=${source.providerId} '
+              'quality=${_qualityLabel(source)} '
+              'position=${resumePosition.inSeconds}s '
+              'candidates=$candidateCount',
+            );
+            return true;
+          }
+        }
+      }
+      DiagnosticLog.add(
+        'native fresh route recovery exhausted candidates=$candidateCount',
+      );
+      return false;
+    } catch (error) {
+      DiagnosticLog.add(
+        'native fresh route recovery failed '
+        'error=${_safeDiagnosticError(error)}',
+      );
+      return false;
+    } finally {
+      if (_controller == null && mounted && runId == _providerRunId) {
+        _requests = previousRequests;
+        _providerIndex = previousProviderIndex;
+        _sourceIndex = previousSourceIndex;
+        _enginePassIndex = previousEnginePassIndex;
+        _qualityPassIndex = previousQualityPassIndex;
+        _activeSources = previousActiveSources;
+        _activeSource = null;
+      }
+    }
+  }
+
+  void _showMobileLibVlcFindingAnotherSourceStatus() {
+    if (!mounted || _playerClosing) return;
+    const status = 'Finding another playable stream...';
+    _logPlaybackStatus(
+      status,
+      reason: 'libvlc_auth_session_recovery',
+    );
+    setState(() {
+      _loading = true;
+      _controlsVisible = true;
+      _settingsExpanded = false;
+      _statusMessage = status;
+    });
+  }
+
+  void _beginLibVlcLaunchGeneration({required String reason}) {
+    _openingSourceToken += 1;
+    _libVlcSeekOwner?.dispose();
+    _libVlcSeekOwner = null;
+    _libVlcSourceSwitchOwner?.dispose();
+    _libVlcSourceSwitchOwner = null;
+    _routeStartupOwner.dispose();
+    _routeStartupOwner = MobilePlaybackRouteStartupOwner(
+      generation: ++_routeStartupGeneration,
+      startedAt: DateTime.now(),
+    );
+    _routeStartupTerminalStarted = false;
+    _libVlcLaunchGeneration = _libVlcLaunchRejectionCircuit.beginLaunch();
+    _libVlcLaunchStartupDeadline = _routeStartupOwner.workCutoff;
+    _manualLibVlcNoProofOpensByUrl.clear();
+    _libVlcSoftVerifiedCacheUrls.clear();
+    _pendingLibVlcOpenSuccessStartupMsByUrl.clear();
+    _blackVideoRecoveredUrls.clear();
+    _failedMidplayRecoverySourceAttempts.clear();
+    _failedLibVlcHlsSourceAttemptsForRoute.clear();
+    _failedSourceAttempts.clear();
+    _manualLibVlcOpensWithoutProof = 0;
+    _libvlcUnavailableForSession = false;
+    DiagnosticLog.add(
+      'native libvlc launch circuits reset generation=$_libVlcLaunchGeneration '
+      'reason=$reason',
+    );
+  }
+
+  MobilePlaybackRouteStartupOwner _beginLibVlcSourceSwitchGeneration() {
+    _libVlcSourceSwitchOwner?.dispose();
+    final owner = MobilePlaybackRouteStartupOwner(
+      generation: ++_routeStartupGeneration,
+      startedAt: DateTime.now(),
+    );
+    _libVlcSourceSwitchOwner = owner;
+    return owner;
+  }
+
+  MobilePlaybackRouteStartupOwner _beginLibVlcSeekGeneration() {
+    _libVlcSeekOwner?.dispose();
+    final owner = MobilePlaybackRouteStartupOwner(
+      generation: ++_routeStartupGeneration,
+      startedAt: DateTime.now(),
+    );
+    _libVlcSeekOwner = owner;
+    return owner;
+  }
+
+  void _invalidateOpeningSourceAttempt() {
+    _openingSourceToken += 1;
+    _openingSource = false;
+    _openingGuardTimer?.cancel();
+    final controller = _controller;
+    if (controller == null) return;
+    _detachControllerUpdateListener(controller);
+    _controller = null;
+    unawaited(controller.dispose());
+  }
+
+  Future<bool> _tryFreshProviderResolve(
+    Duration resumePosition, {
+    PlaybackSource? recoverySourceOverride,
+    bool requireStartupPlaybackProof = false,
+  }) {
+    final active = _freshProviderResolveInFlight;
+    if (active != null) return active;
+    late final Future<bool> operation;
+    operation = _tryFreshProviderResolveOwned(
+      resumePosition,
+      recoverySourceOverride: recoverySourceOverride,
+      requireStartupPlaybackProof: requireStartupPlaybackProof,
+    ).whenComplete(() {
+      if (identical(_freshProviderResolveInFlight, operation)) {
+        _freshProviderResolveInFlight = null;
+      }
+    });
+    _freshProviderResolveInFlight = operation;
+    return operation;
+  }
+
+  Future<bool> _tryFreshProviderResolveOwned(
+    Duration resumePosition, {
+    PlaybackSource? recoverySourceOverride,
+    bool requireStartupPlaybackProof = false,
+  }) async {
+    final recoverySource = recoverySourceOverride ?? _activeSource;
     final providerId = recoverySource?.providerId;
     if (providerId == null || providerId.isEmpty) return false;
 
@@ -11614,9 +17567,19 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
 
     try {
-      final refreshedSources = _deprioritizeFailedSources(
-        _prioritizePreferredQuality(
-          await _expandQualitySources(await _resolveProvider(providerId)),
+      final timeout = _providerResolveTimeoutFor(providerId);
+      final expandedFreshSources = await _expandQualitySources(
+        await _runCancelableProviderWork<List<PlaybackSource>>(
+          timeout: timeout,
+          operation: (cancellation) =>
+              _resolveRecoveryProvider(providerId, cancellation),
+        ),
+      );
+      final refreshedSources = _excludeFailedMidplayRecoverySources(
+        _deprioritizeFailedSources(
+          _prioritizePreferredQuality(
+            expandedFreshSources,
+          ),
         ),
       );
       final freshSources = _currentOrLowerQualityRecoverySources(
@@ -11630,27 +17593,32 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
       _activeSources = freshSources;
       final playableFreshSources = _nativePlayableSources(freshSources);
-      final playableFreshSource =
-          playableFreshSources.isEmpty ? null : playableFreshSources.first;
-      if (playableFreshSource == null) {
+      if (playableFreshSources.isEmpty) {
         DiagnosticLog.add(
           'native hard recovery skipped provider=$providerId reason=source_class_not_native',
         );
         return false;
       }
-      _sourceIndex = freshSources.indexWhere(
-        (source) => source.url == playableFreshSource.url,
-      );
-      if (_sourceIndex < 0) _sourceIndex = 0;
-      final opened = await _openSource(
-        playableFreshSource,
-        resumePosition: resumePosition,
-        statusMessage: 'Refreshing stream...',
-      );
-      DiagnosticLog.add(
-        'native hard recovery reopen provider=$providerId opened=$opened',
-      );
-      return opened;
+      for (final playableFreshSource in playableFreshSources) {
+        if (!mounted) return false;
+        _sourceIndex = freshSources.indexWhere(
+          (source) => source.url == playableFreshSource.url,
+        );
+        if (_sourceIndex < 0) _sourceIndex = 0;
+        final opened = await _openSource(
+          playableFreshSource,
+          resumePosition: resumePosition,
+          statusMessage: 'Refreshing stream...',
+          allowResumeRecoveryEscalation: false,
+          requireStartupPlaybackProof: requireStartupPlaybackProof,
+        );
+        DiagnosticLog.add(
+          'native hard recovery reopen provider=$providerId '
+          'quality=${_qualityLabel(playableFreshSource)} opened=$opened',
+        );
+        if (opened) return true;
+      }
+      return false;
     } catch (error) {
       DiagnosticLog.add(
         'native hard recovery failed provider=$providerId error=${_safeDiagnosticError(error)}',
@@ -11661,31 +17629,48 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
   List<PlaybackSource> _currentOrLowerQualityRecoverySources(
     List<PlaybackSource> sources,
-    PlaybackSource? currentSource,
-    {
+    PlaybackSource? currentSource, {
     int? qualityFloorHeight,
     bool preferLowerThanCurrent = false,
+    bool preferAdaptiveBeforeLower = false,
     String reason = 'hard_recovery_quality_floor',
   }) {
     if (sources.length < 2 || currentSource == null) return sources;
     final labelRank = _qualityRank(_qualityLabel(currentSource));
     final floorRank = qualityFloorHeight == null || qualityFloorHeight <= 0
         ? 0
-        : _qualityRank('${_normalizedPlaybackQualityHeight(qualityFloorHeight)}P');
+        : _qualityRank(
+            '${_normalizedPlaybackQualityHeight(qualityFloorHeight)}P');
     final currentRank = math.max(labelRank, floorRank);
     if (currentRank <= 0) return sources;
 
     final exact = <PlaybackSource>[];
     final lower = <PlaybackSource>[];
+    final adaptive = <PlaybackSource>[];
     final unknown = <PlaybackSource>[];
+    var skippedExcluded = 0;
+    var skippedUnknownAfterResumeExclusion = 0;
     var skippedHigher = 0;
     for (final candidate in sources) {
+      if (_isFailedMidplayRecoverySource(candidate)) {
+        continue;
+      }
       final candidateRank = _qualityRank(_qualityLabel(candidate));
+      if (_resumeRecoveryExcludedQualityRanks.contains(candidateRank)) {
+        skippedExcluded += 1;
+        continue;
+      }
+      if (_shouldSkipUnknownResumeRecoveryQuality(candidate)) {
+        skippedUnknownAfterResumeExclusion += 1;
+        continue;
+      }
       if (candidateRank > currentRank) {
         skippedHigher += 1;
         continue;
       }
-      if (candidateRank == currentRank) {
+      if (_isAdaptiveHlsAutoSource(candidate)) {
+        adaptive.add(candidate);
+      } else if (candidateRank == currentRank) {
         exact.add(candidate);
       } else if (candidateRank > 0) {
         lower.add(candidate);
@@ -11693,18 +17678,25 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         unknown.add(candidate);
       }
     }
-    if (exact.isEmpty && lower.isEmpty && unknown.isEmpty) return sources;
+    if (exact.isEmpty && lower.isEmpty && adaptive.isEmpty && unknown.isEmpty) {
+      return sources;
+    }
     lower.sort(
       (a, b) => _qualityRank(
         _qualityLabel(b),
       ).compareTo(_qualityRank(_qualityLabel(a))),
     );
-    final ordered = preferLowerThanCurrent && lower.isNotEmpty
-        ? <PlaybackSource>[...lower, ...exact, ...unknown]
-        : <PlaybackSource>[...exact, ...lower, ...unknown];
-    if (skippedHigher > 0 || (preferLowerThanCurrent && lower.isNotEmpty)) {
+    final ordered = preferAdaptiveBeforeLower && adaptive.isNotEmpty
+        ? <PlaybackSource>[...adaptive, ...lower, ...exact, ...unknown]
+        : preferLowerThanCurrent && lower.isNotEmpty
+            ? <PlaybackSource>[...lower, ...exact, ...adaptive, ...unknown]
+            : <PlaybackSource>[...exact, ...lower, ...adaptive, ...unknown];
+    if (skippedHigher > 0 ||
+        skippedExcluded > 0 ||
+        skippedUnknownAfterResumeExclusion > 0 ||
+        (preferLowerThanCurrent && lower.isNotEmpty)) {
       DiagnosticLog.add(
-        'native hard recovery source order adjusted reason=$reason currentQuality=${_qualityLabel(currentSource)} floorHeight=${qualityFloorHeight ?? 0} skippedHigher=$skippedHigher preferredLower=${preferLowerThanCurrent && lower.isNotEmpty} kept=${ordered.length}',
+        'native hard recovery source order adjusted reason=$reason currentQuality=${_qualityLabel(currentSource)} floorHeight=${qualityFloorHeight ?? 0} skippedHigher=$skippedHigher skippedExcluded=$skippedExcluded skippedUnknown=$skippedUnknownAfterResumeExclusion preferredLower=${preferLowerThanCurrent && lower.isNotEmpty} kept=${ordered.length}',
       );
     }
     return ordered;
@@ -11716,8 +17708,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (sources.length < 2 || _failedSourceAttempts.isEmpty) return sources;
     final sorted = sources.toList(growable: false)
       ..sort((a, b) {
-        final aAttempts = _failedSourceAttempts[a.url] ?? 0;
-        final bAttempts = _failedSourceAttempts[b.url] ?? 0;
+        final aAttempts = _failedSourceAttemptCount(a);
+        final bAttempts = _failedSourceAttemptCount(b);
         if (aAttempts != bAttempts) return aAttempts.compareTo(bAttempts);
         return 0;
       });
@@ -11748,11 +17740,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   String _sourceActionLabel() {
     final groups = _displaySourceEntries(_activeSources);
     if (groups.isEmpty) return 'No sources';
+    final transport = _sourceTransportDisplayLabel(_activeSource);
     if (groups.length == 1 && groups.first.variants.length > 1) {
-      return '${groups.first.variants.length} mirrors';
+      return '$transport · ${groups.first.variants.length} mirrors';
     }
-    if (groups.length == 1) return '1 source';
-    return '${groups.length} sources';
+    if (groups.length == 1) return '$transport · 1 source';
+    return '$transport · ${groups.length} sources';
   }
 
   void _togglePlayback({bool ignoreOptionSheet = false}) {
@@ -11810,7 +17803,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (controller == null || !controller.isInitialized) return;
     final shouldPlay = controller.isPlaying;
     final duration = _bestKnownProgressDuration(controller);
-    final current = _bestKnownProgressPosition(controller, duration);
+    final usesLibVlcSeekSettlement =
+        controller.engine == _NativePlaybackEngine.libvlc &&
+            _libVlcContinuousTsActive;
+    final current =
+        usesLibVlcSeekSettlement && _libVlcSeekSettlementBarrier.isSettling
+            ? _libVlcSeekSettlementBarrier.nextSeekBase
+            : _bestKnownProgressPosition(controller, duration);
     final next = current + offset;
     final clamped = next < Duration.zero
         ? Duration.zero
@@ -11819,18 +17818,28 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             : next;
     _lastWatchdogPosition = clamped;
     _resetTransientPlaybackDebounce();
+    if (usesLibVlcSeekSettlement) {
+      _libVlcSeekSettlementBarrier.begin(
+        from: current,
+        target: clamped,
+        observedAt: DateTime.now(),
+      );
+      _markManualSeekForIntegrity(current, clamped, reason: 'skip_button');
+    }
     final sameController = await _seekControllerToPlaybackPosition(
       controller,
       clamped,
       fromPosition: current,
       reason: 'skip_button',
-      markManualSeek: true,
+      markManualSeek: !usesLibVlcSeekSettlement,
     );
     if (!sameController) {
       _scheduleControlsHide();
       return;
     }
-    _markManualSeekForIntegrity(current, clamped, reason: 'skip_button');
+    if (!usesLibVlcSeekSettlement) {
+      _markManualSeekForIntegrity(current, clamped, reason: 'skip_button');
+    }
     if (mounted && identical(_controller, controller)) {
       setState(() {});
     }
@@ -11846,20 +17855,33 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final duration = _bestKnownProgressDuration(controller);
     final current = _bestKnownProgressPosition(controller, duration);
     final target = duration * fraction.clamp(0, 1);
+    final usesLibVlcSeekSettlement =
+        controller.engine == _NativePlaybackEngine.libvlc &&
+            _libVlcContinuousTsActive;
     _lastWatchdogPosition = target;
     _resetTransientPlaybackDebounce();
+    if (usesLibVlcSeekSettlement) {
+      _libVlcSeekSettlementBarrier.begin(
+        from: current,
+        target: target,
+        observedAt: DateTime.now(),
+      );
+      _markManualSeekForIntegrity(current, target, reason: 'seekbar');
+    }
     final sameController = await _seekControllerToPlaybackPosition(
       controller,
       target,
       fromPosition: current,
       reason: 'seekbar',
-      markManualSeek: true,
+      markManualSeek: !usesLibVlcSeekSettlement,
     );
     if (!sameController) {
       _scheduleControlsHide();
       return;
     }
-    _markManualSeekForIntegrity(current, target, reason: 'seekbar');
+    if (!usesLibVlcSeekSettlement) {
+      _markManualSeekForIntegrity(current, target, reason: 'seekbar');
+    }
     if (mounted && identical(_controller, controller)) {
       setState(() {});
     }
@@ -11902,6 +17924,219 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }());
   }
 
+  Future<bool> _reopenMobileLibVlcAt({
+    required _NativePlaybackController controller,
+    required Duration target,
+    required Duration rollbackAnchor,
+    required bool wasPlaying,
+    required String reason,
+  }) async {
+    final coordinator = _mobileLibVlcCoordinator;
+    if (coordinator == null) {
+      DiagnosticLog.add(
+        'native libvlc continuous-ts seek rejected reason=session_unavailable source=$reason',
+      );
+      return false;
+    }
+    await coordinator.cancelRuntimeRecoveryForExplicitAction(anchor: target);
+    if (!mounted ||
+        _playerClosing ||
+        !identical(_mobileLibVlcCoordinator, coordinator)) {
+      return false;
+    }
+    final candidate = coordinator.currentCandidate;
+    final source = _activeSource;
+    if (candidate == null || source == null) {
+      DiagnosticLog.add(
+        'native libvlc continuous-ts seek rejected reason=session_unavailable source=$reason',
+      );
+      return false;
+    }
+
+    final seekRouteOwner = _beginLibVlcSeekGeneration();
+    var seekGeneration = -1;
+    final reopening = seekRouteOwner.runWork<MobileLibVlcOpenResult>(
+      (_) => coordinator.reopenCurrentSourceAt(
+        anchor: target,
+        wasPlaying: wasPlaying,
+        isLive: widget.liveMode,
+        onGenerationOwned: (generation) async {
+          seekGeneration = generation;
+          if (!mounted ||
+              _playerClosing ||
+              !identical(_mobileLibVlcCoordinator, coordinator) ||
+              generation != coordinator.generation) {
+            throw StateError('The libVLC seek ownership was superseded.');
+          }
+          _removeStaleMobileLibVlcSeekSurfaces(generation);
+          _mobileLibVlcSeekAbsoluteFloor = target;
+          _mobileLibVlcSeekOwnerGeneration = generation;
+          setState(() {
+            _loading = true;
+            _mobileLibVlcSeekPreparing = true;
+            _mobileLibVlcSeekNeedsVisibleFallback = false;
+            _controlsVisible = true;
+            _statusMessage = 'Seeking...';
+          });
+        },
+        onBeforePreviousDispose: (result) async {
+          if (!mounted ||
+              _playerClosing ||
+              !identical(_mobileLibVlcCoordinator, coordinator) ||
+              result.generation != seekGeneration ||
+              result.generation != coordinator.generation) {
+            throw StateError('The libVLC seek promotion was superseded.');
+          }
+          if (!result.driver.hasVisualProof) {
+            throw StateError('The libVLC seek candidate has no visual proof.');
+          }
+          final reopenedDriver = coordinator.currentDriver;
+          if (reopenedDriver is! _MobileLibVlcDriverAdapter) {
+            throw StateError('The proved libVLC seek driver is unavailable.');
+          }
+          final reopenedController = reopenedDriver.controller;
+          final stagedController =
+              _stagedMobileLibVlcControllers[result.generation];
+          if (!identical(reopenedController, stagedController)) {
+            throw StateError('The proved libVLC seek surface is unavailable.');
+          }
+          await reopenedController.setVolume(_volumePreview);
+          if (!mounted ||
+              _playerClosing ||
+              result.generation != coordinator.generation) {
+            throw StateError('The libVLC seek promotion was superseded.');
+          }
+          final oldController = _controller;
+          if (oldController != null &&
+              !identical(oldController, reopenedController)) {
+            _detachControllerUpdateListener(oldController);
+          }
+          _detachControllerUpdateListener(reopenedController);
+          _activeMobileLibVlcSessionTimeline = reopenedDriver.timeline;
+          _controller = reopenedController;
+          _attachControllerUpdateListener(reopenedController);
+          _removeStagedMobileLibVlcController(
+            result.generation,
+            reopenedController,
+          );
+        },
+      ),
+    );
+    try {
+      final result = await reopening;
+      if (!mounted ||
+          _playerClosing ||
+          !identical(_mobileLibVlcCoordinator, coordinator) ||
+          result.generation != seekGeneration ||
+          result.generation != coordinator.generation ||
+          result.candidate.attemptIdentity != candidate.attemptIdentity ||
+          coordinator.currentCandidate?.attemptIdentity !=
+              candidate.attemptIdentity) {
+        return false;
+      }
+      final reopenedDriver = coordinator.currentDriver;
+      final reopenedController = reopenedDriver is _MobileLibVlcDriverAdapter
+          ? reopenedDriver.controller
+          : null;
+      if (reopenedController == null) {
+        throw StateError('The proved libVLC seek controller is unavailable.');
+      }
+
+      if (!identical(_controller, reopenedController)) {
+        throw StateError('The proved libVLC seek surface was not promoted.');
+      }
+      _activeSourceVerifiedForSession = true;
+      _nativeWallClockStartedAt = DateTime.now();
+      _applyStagedMobileLibVlcTransportMetadata(
+        result.candidate,
+        result.generation,
+        source,
+      );
+      await _adoptMobileLibVlcTransport(
+        coordinator.currentTransport,
+        anchor: target,
+        preserveSeekSettlement: true,
+        isStale: () =>
+            _playerClosing ||
+            !mounted ||
+            !identical(_mobileLibVlcCoordinator, coordinator) ||
+            result.generation != coordinator.generation,
+      );
+      if (!mounted ||
+          _playerClosing ||
+          !identical(_mobileLibVlcCoordinator, coordinator) ||
+          result.generation != coordinator.generation) {
+        return false;
+      }
+      _lastWatchdogPosition = target;
+      DiagnosticLog.add(
+        'native libvlc continuous-ts seek proved target=${target.inSeconds}s '
+        'surfaceGeneration=$seekGeneration '
+        'seekSettlementGeneration=${_libVlcSeekSettlementBarrier.generation} '
+        'source=$reason',
+      );
+      setState(() {
+        _loading = false;
+        _mobileLibVlcSeekPreparing = false;
+        _mobileLibVlcSeekNeedsVisibleFallback = false;
+        _controlsVisible = true;
+        _statusMessage = null;
+        _playbackWaitMessage = null;
+        _playbackWaitMessagePausedPlayback = false;
+      });
+      _saveNativeProgress(force: true);
+      _ensureSubtitlesLoading();
+      _scheduleControlsHide();
+      return true;
+    } catch (error) {
+      if (seekGeneration >= 0) {
+        _removeStagedMobileLibVlcController(
+          seekGeneration,
+        );
+        _stagedMobileLibVlcTransportMetadata.remove(
+          (candidate, seekGeneration),
+        );
+      }
+      if (!mounted ||
+          _playerClosing ||
+          !identical(_mobileLibVlcCoordinator, coordinator) ||
+          seekGeneration != coordinator.generation) {
+        return false;
+      }
+      _libVlcSeekSettlementBarrier.clear();
+      _markManualSeekForIntegrity(
+        target,
+        rollbackAnchor,
+        reason: 'libvlc_same_source_seek_rollback',
+      );
+      _mobileLibVlcSeekAbsoluteFloor = rollbackAnchor;
+      _mobileLibVlcSeekOwnerGeneration = coordinator.generation;
+      final retainedSnapshot = coordinator.currentDriver?.snapshot;
+      final needsVisibleFallback = controller.isEnded ||
+          retainedSnapshot == null ||
+          !retainedSnapshot.hasVisualProof;
+      DiagnosticLog.add(
+        'native libvlc continuous-ts seek rejected; proved controller retained anchor=${rollbackAnchor.inSeconds}s source=$reason errorType=${error.runtimeType}',
+      );
+      setState(() {
+        _loading = false;
+        _mobileLibVlcSeekPreparing = false;
+        _mobileLibVlcSeekNeedsVisibleFallback = needsVisibleFallback;
+        _controlsVisible = true;
+        _statusMessage = "Couldn't seek. Playback continued.";
+        _playbackWaitMessage = needsVisibleFallback
+            ? "Couldn't seek. Choose another position."
+            : null;
+      });
+      return false;
+    } finally {
+      if (identical(_libVlcSeekOwner, seekRouteOwner)) {
+        _libVlcSeekOwner = null;
+      }
+      seekRouteOwner.dispose();
+    }
+  }
+
   Future<bool> _seekControllerToPlaybackPosition(
     _NativePlaybackController controller,
     Duration target, {
@@ -11920,7 +18155,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           'native libvlc continuous-ts seek translated target=${target.inSeconds}s local=${localTarget.inSeconds}s offset=${_libVlcContinuousTsTimelineOffset.inSeconds}s reason=$reason',
         );
       }
-      await controller.seekTo(localTarget);
+      final coordinator = _mobileLibVlcCoordinator;
+      if (controller.engine == _NativePlaybackEngine.libvlc &&
+          coordinator != null) {
+        await coordinator.seekTo(target);
+      } else {
+        await controller.seekTo(localTarget);
+      }
       return true;
     }
 
@@ -11944,28 +18185,45 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         'native libvlc continuous-ts seek reopen provider=${source.providerId} target=${target.inSeconds}s offset=${_libVlcContinuousTsTimelineOffset.inSeconds}s reason=libvlc_continuous_ts_seek_reopen source=$reason',
       );
       final wasPlaying = controller.isPlaying;
-      final opened = await _openSource(
-        source,
-        resumePosition: target,
-        statusMessage: 'Seeking...',
-        engineOverride: _NativePlaybackEngine.libvlc,
-        saveProgressBeforeOpen: false,
-        libVlcManualSeekReopen: true,
-      );
-      if (opened && !wasPlaying) {
-        await _controller?.pause();
-      }
-      if (mounted && !_playerClosing) {
-        setState(() {
-          _controlsVisible = true;
-          _loading = false;
-          _statusMessage = null;
-        });
+      final seekRouteOwner = _beginLibVlcSeekGeneration();
+      try {
+        final opened = await seekRouteOwner.runWork<bool>(
+          (_) => _openSource(
+            source,
+            resumePosition: target,
+            statusMessage: 'Seeking...',
+            engineOverride: _NativePlaybackEngine.libvlc,
+            saveProgressBeforeOpen: false,
+            libVlcManualSeekReopen: true,
+          ),
+        );
+        if (opened && !wasPlaying) {
+          await _controller?.pause();
+        }
+        if (mounted && !_playerClosing) {
+          setState(() {
+            _controlsVisible = true;
+            _loading = false;
+            _mobileLibVlcSeekPreparing = false;
+            _statusMessage = null;
+          });
+        }
+      } finally {
+        if (identical(_libVlcSeekOwner, seekRouteOwner)) {
+          _libVlcSeekOwner = null;
+        }
+        seekRouteOwner.dispose();
       }
       return false;
     }
 
-    await controller.seekTo(target);
+    final coordinator = _mobileLibVlcCoordinator;
+    if (controller.engine == _NativePlaybackEngine.libvlc &&
+        coordinator != null) {
+      await coordinator.seekTo(target);
+    } else {
+      await controller.seekTo(target);
+    }
     return true;
   }
 
@@ -11974,14 +18232,19 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     Duration target,
   ) {
     if (controller.engine != _NativePlaybackEngine.libvlc ||
-        !_libVlcContinuousTsActive ||
-        _libVlcContinuousTsTimelineOffset <= Duration.zero) {
+        !_libVlcContinuousTsActive) {
       return target;
     }
-    final offset = _libVlcContinuousTsTimelineOffset;
-    if (target < offset - const Duration(seconds: 2)) {
+    if (shouldReopenMobileLibVlcRelayForSeek(
+      continuousTsActive: _libVlcContinuousTsActive,
+      target: target,
+      timelineOffset: _libVlcContinuousTsTimelineOffset,
+      bufferedPosition: _libVlcContinuousTsBufferedPosition,
+      transportSeekable: false,
+    )) {
       return null;
     }
+    final offset = _libVlcContinuousTsTimelineOffset;
     final localTarget = target - offset;
     return localTarget <= Duration.zero ? Duration.zero : localTarget;
   }
@@ -12077,9 +18340,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
 
-    final position = controller.position;
+    final rawPosition = controller.position;
+    final position = _qualitySwitchResumePosition();
+    if (position > Duration.zero) {
+      _anchorNativeRecoveryProgress(
+        position,
+        reason: 'manual_reload_resume_anchor',
+      );
+    }
     DiagnosticLog.add(
-      'native manual playback reload provider=${source.providerId} position=${position.inSeconds}s',
+      'native manual playback reload provider=${source.providerId} position=${position.inSeconds}s raw=${rawPosition.inSeconds}s',
+    );
+    _clearFailedLibVlcHlsSourceForRoute(
+      source,
+      reason: 'manual_reload',
     );
     if (_isPublicIptvSource(source)) {
       await _reopenPublicLiveSource(source, position);
@@ -12241,9 +18515,237 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
   }
 
+  void _applyStagedMobileLibVlcTransportMetadata(
+    MobileLibVlcSourceCandidate candidate,
+    int generation,
+    PlaybackSource source,
+  ) {
+    final metadata =
+        _stagedMobileLibVlcTransportMetadata.remove((candidate, generation));
+    if (metadata == null) return;
+    metadata.committed = true;
+    final duration = metadata.duration;
+    if (duration != null && duration > Duration.zero) {
+      _libVlcContinuousTsDurationAccepted = true;
+      _lastKnownPlaybackDuration = duration;
+      _maybeClearLibVlcContinuousTsWaitMessage(
+        reason: 'libvlc_switch_transport_duration',
+      );
+    }
+    final timelineOffset = metadata.timelineOffset;
+    if (timelineOffset != null) {
+      _libVlcContinuousTsTimelineOffset = timelineOffset;
+    }
+  }
+
+  Future<bool?> _switchMobileLibVlcSelection({
+    required PlaybackSource selected,
+    required Duration position,
+    required bool wasPlaying,
+    required int nextIndex,
+    required String selectedQuality,
+    required String preferenceMode,
+    required String reason,
+  }) async {
+    if (_controller?.engine != _NativePlaybackEngine.libvlc) {
+      return null;
+    }
+    final coordinator = _mobileLibVlcCoordinator;
+    MobileLibVlcSourceCandidate? selectedCandidate;
+    final candidateSources = _mobileLibVlcCandidateSources;
+    if (candidateSources != null) {
+      for (final entry in candidateSources.entries) {
+        if (entry.value.providerId == selected.providerId &&
+            entry.value.url == selected.url) {
+          selectedCandidate = entry.key;
+          break;
+        }
+      }
+    }
+    if (coordinator == null || selectedCandidate == null) {
+      DiagnosticLog.add(
+        'native libvlc selection unavailable '
+        'reason=candidate_mapping_missing action=$reason',
+      );
+      await _resumeAfterOptionSheet(wasPlaying);
+      return false;
+    }
+    final switchRouteOwner = _beginLibVlcSourceSwitchGeneration();
+    _providerRunId += 1;
+    _recoveringFromStall = false;
+    _resetRouteHlsTimeoutsForQualitySwitch(selected);
+    _clearFailedLibVlcHlsSourceForRoute(
+      selected,
+      reason: 'manual_source_selection',
+    );
+    _clearOptionSheetOverlay();
+    _manualLibVlcSelectionProgressAnchor = position;
+    _manualLibVlcSelectionRetainedClockRecoveryPending = false;
+    _manualLibVlcSelectionProofPending = true;
+    DiagnosticLog.add(
+      'native libvlc selection progress quarantined '
+      'anchor=${position.inSeconds}s action=$reason',
+    );
+    try {
+      final result = await coordinator.switchSource(
+        candidate: selectedCandidate,
+        anchor: position,
+        wasPlaying: wasPlaying,
+        isLive: widget.liveMode,
+        routeStartupRemainingBudget: () => switchRouteOwner.remainingWorkBudget,
+        routeStartupCancellation: switchRouteOwner.whenCancelled,
+      );
+      if (!mounted ||
+          _playerClosing ||
+          !switchRouteOwner.ownsAttempt(switchRouteOwner.generation) ||
+          !identical(_mobileLibVlcCoordinator, coordinator)) {
+        return false;
+      }
+      if (result.generation != coordinator.generation ||
+          coordinator.currentCandidate?.attemptIdentity !=
+              result.candidate.attemptIdentity ||
+          result.candidate.attemptIdentity !=
+              selectedCandidate.attemptIdentity) {
+        throw StateError('The proved libVLC switch became stale.');
+      }
+      final switchedDriver = coordinator.currentDriver;
+      if (switchedDriver is! _MobileLibVlcDriverAdapter) {
+        throw StateError('The proved libVLC switch is unavailable.');
+      }
+      final switchedController = switchedDriver.controller;
+
+      final oldController = _controller;
+      if (oldController != null &&
+          !identical(oldController, switchedController)) {
+        _detachControllerUpdateListener(oldController);
+      }
+      _activeMobileLibVlcSessionTimeline = switchedDriver.timeline;
+      _controller = switchedController;
+      _attachControllerUpdateListener(switchedController);
+      _activeSource = selected;
+      if (nextIndex >= 0) {
+        _sourceIndex = nextIndex;
+      }
+      _qualityPreferenceMode = preferenceMode;
+      _preferredQuality =
+          preferenceMode == 'recommended' ? null : selectedQuality;
+      _activeSourceVerifiedForSession = true;
+      _activeSourceHasZeroClockMetadata =
+          switchedController.duration.inMicroseconds <= 0 &&
+              switchedController.size == Size.zero;
+      _rememberCrediblePlaybackAnchor(
+        result.anchor,
+        reason: 'libvlc_selection_proved',
+      );
+      _applyStagedMobileLibVlcTransportMetadata(
+        result.candidate,
+        result.generation,
+        selected,
+      );
+      await _adoptMobileLibVlcTransport(
+        coordinator.currentTransport,
+        anchor: result.anchor,
+        isStale: () =>
+            _playerClosing ||
+            !mounted ||
+            !identical(_mobileLibVlcCoordinator, coordinator) ||
+            result.generation != coordinator.generation,
+      );
+      if (!mounted ||
+          _playerClosing ||
+          !switchRouteOwner.ownsAttempt(switchRouteOwner.generation) ||
+          !identical(_mobileLibVlcCoordinator, coordinator) ||
+          result.generation != coordinator.generation) {
+        return false;
+      }
+      DiagnosticLog.add(
+        'native libvlc selection proved '
+        'quality=$selectedQuality sourceIndex=$_sourceIndex action=$reason',
+      );
+      _manualLibVlcSelectionProofPending = false;
+      _manualLibVlcSelectionRetainedClockRecoveryPending = false;
+      _manualLibVlcSelectionProgressAnchor = Duration.zero;
+      _saveNativeProgress(force: true);
+      setState(() {
+        _loading = false;
+        _statusMessage = null;
+        _playbackWaitMessage = null;
+        _playbackWaitMessagePausedPlayback = false;
+      });
+      _startStallWatchdog();
+      _ensureSubtitlesLoading();
+      await _resumeAfterOptionSheet(wasPlaying);
+      if (!mounted ||
+          _playerClosing ||
+          !switchRouteOwner.ownsAttempt(switchRouteOwner.generation) ||
+          !identical(_mobileLibVlcCoordinator, coordinator) ||
+          result.generation != coordinator.generation) {
+        return false;
+      }
+      return true;
+    } catch (_) {
+      if (!mounted ||
+          _playerClosing ||
+          !switchRouteOwner.ownsAttempt(switchRouteOwner.generation) ||
+          !identical(_mobileLibVlcCoordinator, coordinator)) {
+        return false;
+      }
+      final metadata = _stagedMobileLibVlcTransportMetadata[(
+        selectedCandidate,
+        coordinator.generation
+      )];
+      if (metadata != null && !metadata.committed) {
+        _stagedMobileLibVlcTransportMetadata.remove(
+          (selectedCandidate, coordinator.generation),
+        );
+      }
+      if (!mounted || _playerClosing) return false;
+      DiagnosticLog.add(
+        'native libvlc selection rejected; '
+        'previous proved session retained action=$reason',
+      );
+      final rejectedAnchor = _manualLibVlcSelectionProgressAnchor;
+      if (rejectedAnchor > Duration.zero) {
+        _rememberCrediblePlaybackAnchor(
+          rejectedAnchor,
+          reason: 'libvlc_selection_rejected_anchor_restored',
+        );
+      }
+      _manualLibVlcSelectionProofPending = false;
+      _manualLibVlcSelectionRetainedClockRecoveryPending = true;
+      setState(() {
+        _loading = false;
+        _controlsVisible = true;
+        _statusMessage = "Couldn't open this source.";
+      });
+      await _resumeAfterOptionSheet(wasPlaying);
+      return false;
+    } finally {
+      if (_manualLibVlcSelectionProofPending) {
+        final unfinishedAnchor = _manualLibVlcSelectionProgressAnchor;
+        if (unfinishedAnchor > Duration.zero) {
+          _rememberCrediblePlaybackAnchor(
+            unfinishedAnchor,
+            reason: 'libvlc_selection_rejected_anchor_restored',
+          );
+        }
+        _manualLibVlcSelectionProofPending = false;
+        _manualLibVlcSelectionRetainedClockRecoveryPending =
+            mounted && !_playerClosing;
+        if (!_manualLibVlcSelectionRetainedClockRecoveryPending) {
+          _manualLibVlcSelectionProgressAnchor = Duration.zero;
+        }
+      }
+      if (identical(_libVlcSourceSwitchOwner, switchRouteOwner)) {
+        _libVlcSourceSwitchOwner = null;
+      }
+      switchRouteOwner.dispose();
+      _routeStartupOwner.completeSuccessfully();
+    }
+  }
+
   Future<void> _showQualitySheet() async {
     if (_locked || _activeSources.isEmpty) return;
-    final position = _qualitySwitchResumePosition();
     final wasPlaying = _openOptionSheetWithoutPause();
     final selected = await showModalBottomSheet<Object>(
       context: context,
@@ -12260,46 +18762,74 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       await _resumeAfterOptionSheet(wasPlaying);
       return;
     }
+    final position = _qualitySwitchResumePosition();
 
     if (selected is _QualityAutoSelection) {
       final previousSource = _activeSource;
       final previousSourceIndex = _sourceIndex;
       final previousPreferredQuality = _preferredQuality;
       final previousQualityPreferenceMode = _qualityPreferenceMode;
-      setState(() {
-        _preferredQuality = null;
-        _qualityPreferenceMode = 'recommended';
-      });
-      _saveNativeProgress(force: true);
-      DiagnosticLog.add('native quality selected auto');
       final source = _bestAutoQualitySource(
         _nativePlayableSources(_activeSources),
       );
-      if (source == null || source.url == _activeSource?.url) {
+      if (source == null) {
         await _resumeAfterOptionSheet(wasPlaying);
         return;
       }
       final nextIndex = _activeSources.indexWhere(
         (candidate) => candidate.url == source.url,
       );
+      if (source.url == _activeSource?.url) {
+        setState(() {
+          _preferredQuality = null;
+          _qualityPreferenceMode = 'recommended';
+        });
+        await _resumeAfterOptionSheet(wasPlaying);
+        return;
+      }
+      final libVlcHandled = await _switchMobileLibVlcSelection(
+        selected: source,
+        position: position,
+        wasPlaying: wasPlaying,
+        nextIndex: nextIndex,
+        selectedQuality: 'Auto',
+        preferenceMode: 'recommended',
+        reason: 'quality_auto',
+      );
+      if (libVlcHandled != null) return;
+
+      setState(() {
+        _preferredQuality = null;
+        _qualityPreferenceMode = 'recommended';
+      });
+      _saveNativeProgress(force: true);
+      DiagnosticLog.add('native quality selected auto');
       if (nextIndex >= 0) {
         _sourceIndex = nextIndex;
       }
       _resetRouteHlsTimeoutsForQualitySwitch(source);
       _clearOptionSheetOverlay();
-      final opened = await _openSource(source, resumePosition: position);
+      _armSourceSelectionRollback(
+        previousSource: previousSource,
+        selectedSource: source,
+        wasPlaying: wasPlaying,
+        previousSourceIndex: previousSourceIndex,
+        previousPreferredQuality: previousPreferredQuality,
+        previousQualityPreferenceMode: previousQualityPreferenceMode,
+      );
+      final opened = await _openSource(
+        source,
+        resumePosition: position,
+        requireStartupPlaybackProof: true,
+      );
       if (!mounted) return;
       if (opened && !wasPlaying) {
         await _controller?.pause();
       }
       if (!opened && mounted) {
-        final restored = await _restorePreviousSourceAfterSelectionFailure(
-          previousSource: previousSource,
-          resumePosition: position,
-          wasPlaying: wasPlaying,
-          previousSourceIndex: previousSourceIndex,
-          previousPreferredQuality: previousPreferredQuality,
-          previousQualityPreferenceMode: previousQualityPreferenceMode,
+        final restored = await _restorePendingSourceSelectionRollback(
+          failedSource: source,
+          recoveryPosition: position,
           reason: 'quality_auto_selection_failed',
         );
         if (restored) return;
@@ -12325,6 +18855,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final nextIndex = _activeSources.indexWhere(
       (source) => source.url == selected.url,
     );
+    final libVlcHandled = await _switchMobileLibVlcSelection(
+      selected: selected,
+      position: position,
+      wasPlaying: wasPlaying,
+      nextIndex: nextIndex,
+      selectedQuality: _qualityLabel(selected),
+      preferenceMode: 'advanced',
+      reason: 'quality_explicit',
+    );
+    if (libVlcHandled != null) return;
+
     if (nextIndex >= 0) {
       _sourceIndex = nextIndex;
     }
@@ -12335,19 +18876,27 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     );
     _resetRouteHlsTimeoutsForQualitySwitch(selected);
     _clearOptionSheetOverlay();
-    final opened = await _openSource(selected, resumePosition: position);
+    _armSourceSelectionRollback(
+      previousSource: previousSource,
+      selectedSource: selected,
+      wasPlaying: wasPlaying,
+      previousSourceIndex: previousSourceIndex,
+      previousPreferredQuality: previousPreferredQuality,
+      previousQualityPreferenceMode: previousQualityPreferenceMode,
+    );
+    final opened = await _openSource(
+      selected,
+      resumePosition: position,
+      requireStartupPlaybackProof: true,
+    );
     if (!mounted) return;
     if (opened && !wasPlaying) {
       await _controller?.pause();
     }
     if (!opened && mounted) {
-      final restored = await _restorePreviousSourceAfterSelectionFailure(
-        previousSource: previousSource,
-        resumePosition: position,
-        wasPlaying: wasPlaying,
-        previousSourceIndex: previousSourceIndex,
-        previousPreferredQuality: previousPreferredQuality,
-        previousQualityPreferenceMode: previousQualityPreferenceMode,
+      final restored = await _restorePendingSourceSelectionRollback(
+        failedSource: selected,
+        recoveryPosition: position,
         reason: 'quality_selection_failed',
       );
       if (restored) return;
@@ -12366,8 +18915,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }
 
   Future<void> _showSourceSheet() async {
+    DiagnosticLog.add(
+      'native source sheet requested locked=$_locked sourceCount=${_activeSources.length} activeQuality=${_qualityLabel(_activeSource)} controlsVisible=$_controlsVisible loading=$_loading',
+    );
     if (_locked || _activeSources.length < 2) return;
-    final position = _qualitySwitchResumePosition();
     final wasExhausted = _nativeProvidersExhausted;
     final wasPlaying = _openOptionSheetWithoutPause();
     final selected = await showModalBottomSheet<PlaybackSource>(
@@ -12384,6 +18935,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       await _resumeAfterOptionSheet(wasPlaying);
       return;
     }
+    final position = _qualitySwitchResumePosition();
 
     final previousSource = _activeSource;
     final previousSourceIndex = _sourceIndex;
@@ -12392,39 +18944,64 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     final nextIndex = _activeSources.indexWhere(
       (source) => source.url == selected.url,
     );
-    if (nextIndex >= 0) {
-      _sourceIndex = nextIndex;
-    }
     final displayEntries = _displaySourceEntries(_activeSources);
     final selectedDisplayIndex = displayEntries.indexWhere(
       (entry) => entry.variants.any((source) => source.url == selected.url),
     );
     final selectedQuality = _qualityLabel(selected);
-    _qualityPreferenceMode =
-        selectedQuality == 'Auto' ? 'recommended' : 'advanced';
-    _preferredQuality = selectedQuality == 'Auto' ? null : selectedQuality;
     DiagnosticLog.add(
       'native source selected provider=${selected.providerId} sourceIndex=$_sourceIndex visibleSourceCount=${displayEntries.length} quality=$selectedQuality qualityBucket=${_sourceQualityBucketForDiagnostics(selected)}',
     );
+
+    if (_controller?.engine == _NativePlaybackEngine.libvlc) {
+      await _switchMobileLibVlcSelection(
+        selected: selected,
+        position: position,
+        wasPlaying: wasPlaying,
+        nextIndex: nextIndex,
+        selectedQuality: selectedQuality,
+        preferenceMode: selectedQuality == 'Auto' ? 'recommended' : 'advanced',
+        reason: 'source_sheet',
+      );
+      return;
+    }
+
+    if (nextIndex >= 0) {
+      _sourceIndex = nextIndex;
+    }
+    _qualityPreferenceMode =
+        selectedQuality == 'Auto' ? 'recommended' : 'advanced';
+    _preferredQuality = selectedQuality == 'Auto' ? null : selectedQuality;
+    _providerRunId += 1;
+    _recoveringFromStall = false;
+    _recoveringFromMedia3RendererDrift = false;
+    DiagnosticLog.add(
+      'native source selection cancelled stale recovery runs provider=${selected.providerId} runId=$_providerRunId',
+    );
     _resetRouteHlsTimeoutsForQualitySwitch(selected);
     _clearOptionSheetOverlay();
+    _armSourceSelectionRollback(
+      previousSource: previousSource,
+      selectedSource: selected,
+      wasPlaying: wasPlaying,
+      previousSourceIndex: previousSourceIndex,
+      previousPreferredQuality: previousPreferredQuality,
+      previousQualityPreferenceMode: previousQualityPreferenceMode,
+    );
     final opened = await _openSource(
       selected,
       resumePosition: position,
       statusMessage:
           'Opening ${_sourceDisplayLabel(selected, index: selectedDisplayIndex >= 0 ? selectedDisplayIndex : 0, total: displayEntries.length)}...',
+      requireStartupPlaybackProof: true,
     );
     if (opened && !wasPlaying) {
       await _controller?.pause();
     }
     if (!opened && mounted) {
-      final restored = await _restorePreviousSourceAfterSelectionFailure(
-        previousSource: previousSource,
-        resumePosition: position,
-        wasPlaying: wasPlaying,
-        previousSourceIndex: previousSourceIndex,
-        previousPreferredQuality: previousPreferredQuality,
-        previousQualityPreferenceMode: previousQualityPreferenceMode,
+      final restored = await _restorePendingSourceSelectionRollback(
+        failedSource: selected,
+        recoveryPosition: position,
         reason: 'source_selection_failed',
       );
       if (restored) return;
@@ -12511,6 +19088,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       previousSource,
       resumePosition: resumePosition,
       statusMessage: status,
+      requireStartupPlaybackProof: true,
     );
     if (!mounted) return false;
     if (!opened) {
@@ -12600,9 +19178,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _statusMessage = 'Opening next episode...';
     });
 
+    _beginLibVlcLaunchGeneration(reason: 'exact_media_launch');
     NativePlayerNextEpisode? next;
     try {
-      next = await resolver();
+      next = await _runCancelableProviderWork<NativePlayerNextEpisode?>(
+        timeout: _routeStartupOwner.remainingWorkBudget,
+        operation: resolver,
+      );
     } catch (error) {
       if (_isTemporaryResolverBlock(error)) {
         _resolverBackoffUntil = DateTime.now().add(_nextEpisodeResolverBackoff);
@@ -12610,16 +19192,57 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           'native next episode resolver backoff reason=temporary_block seconds=${_nextEpisodeResolverBackoff.inSeconds}',
         );
       }
-      rethrow;
+      _routeStartupOwner.completeSuccessfully();
+      await restoreRetainedPlaybackAfterRouteFailure(
+        publishRestoredUi: () {
+          if (!mounted) return;
+          setState(() {
+            _loading = false;
+            _statusMessage = null;
+          });
+        },
+        resumePlayback:
+            currentController != null && currentController.isPlaying == false
+                ? currentController.play
+                : null,
+        onResumeError: (resumeError) {
+          DiagnosticLog.add(
+            'native next episode retained playback resume skipped '
+            'reason=${resumeError.runtimeType}',
+          );
+        },
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Next episode unavailable.')),
+      );
+      return;
     } finally {
       _nextEpisodeOpening = false;
     }
     if (!mounted) return;
     if (next == null) {
-      setState(() {
-        _loading = false;
-        _statusMessage = null;
-      });
+      _routeStartupOwner.completeSuccessfully();
+      await restoreRetainedPlaybackAfterRouteFailure(
+        publishRestoredUi: () {
+          if (!mounted) return;
+          setState(() {
+            _loading = false;
+            _statusMessage = null;
+          });
+        },
+        resumePlayback:
+            currentController != null && currentController.isPlaying == false
+                ? currentController.play
+                : null,
+        onResumeError: (resumeError) {
+          DiagnosticLog.add(
+            'native next episode unavailable retained resume skipped '
+            'reason=${resumeError.runtimeType}',
+          );
+        },
+      );
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Next episode unavailable.')),
       );
@@ -12639,13 +19262,19 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     setState(() {
       _title = resolvedNext.title;
       _resolveProvider = resolvedNext.resolveProvider;
+      _resolveRecoveryProvider =
+          resolvedNext.resolveRecoveryProvider ?? resolvedNext.resolveProvider;
+      _resolveFreshRequests = resolvedNext.resolveFreshRequests;
       _resolveSubtitles = resolvedNext.resolveSubtitles;
       _limitToFirstQualityPass = resolvedNext.limitToFirstQualityPass;
       _logoUrl = resolvedNext.logoUrl;
       _progressItem = resolvedNext.progressItem;
       _playbackKey = resolvedNext.playbackKey;
       _requests = _requestsWithVerifiedSource(
-        resolvedNext.sources,
+        mobilePrioritizeExplicitLibVlcRequestsByTransport(
+          _prioritizeResolvedFreshRequests(resolvedNext.sources),
+          explicitLibVlc: _manualLibVlcConfigured,
+        ),
         playbackKey: resolvedNext.playbackKey,
       );
       _progressSubtitle = resolvedNext.progressSubtitle;
@@ -12657,6 +19286,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _nextEpisodeResolver = resolvedNext.onNextEpisode;
       _nextEpisodeOpening = false;
       _resolverBackoffUntil = null;
+      _routeWideFreshRecoveryAttempted = false;
       _providerResolveFutures.clear();
       _providerIndex = 0;
       _sourceIndex = 0;
@@ -12696,8 +19326,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _skipSegmentLookupDuration = Duration.zero;
       _resumeProgressAnchorPosition = Duration.zero;
       _resumeProgressAnchorLogSecond = -1;
-      _libVlcContinuousTsDurationAccepted = false;
-      _libVlcContinuousTsStreamedSegments = 0;
+      _resetLibVlcContinuousTsProof();
       _nativeWallClockStartedAt = null;
       _sameSourceRecoveryAttempts = 0;
       _hardPlaybackErrors = 0;
@@ -12705,7 +19334,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _hardRecoveryAttemptsByProvider.clear();
       _failedSourceAttempts.clear();
       _media3TerminalFailedUrlsForSession.clear();
-      _libVlcAdaptiveUnsafeUrls.clear();
+      _resumeRecoveryExcludedQualityRanks.clear();
+      _resumeRecoveryUnrankedDirectHlsFailures = 0;
+      _ignoreSavedQualityForResumeRecovery = false;
       _lastSavedSecond = -1;
       _integrityPlaybackKey = null;
       _credibleWatchMilliseconds = 0;
@@ -12950,28 +19581,101 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
   }
 
+  bool _hasCurrentLibVlcProofForSource(PlaybackSource source) {
+    final key = _playbackKey;
+    if (key == null || key.isEmpty || source.url.isEmpty) return false;
+    return AppState.verifiedPlaybackSourcesFor(key).any((cached) {
+      if (_verifiedSourceIsExpired(cached) ||
+          cached.engineId != _NativePlaybackEngine.libvlc.id ||
+          cached.source.url != source.url) {
+        return false;
+      }
+      return cached.confidence >= 12 &&
+          cached.failureCount <= 0 &&
+          _verifiedSourceHasOpenableDescriptor(cached.source);
+    });
+  }
+
   Future<List<PlaybackSource>> _expandQualitySources(
-    List<PlaybackSource> sources,
-  ) async {
+    List<PlaybackSource> sources, {
+    DateTime? deadline,
+  }) async {
+    final routeDeadline = _routeStartupOwner.workCutoff;
+    final effectiveDeadline = _routeStartupOwner.isCompletedSuccessfully
+        ? deadline
+        : deadline == null || routeDeadline.isBefore(deadline)
+            ? routeDeadline
+            : deadline;
     final expanded = <PlaybackSource>[];
-    for (final source in sources) {
+    for (var sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
+      final source = sources[sourceIndex];
       if (!_isHlsSource(source)) {
         expanded.add(source);
         continue;
       }
 
       try {
-        final variants = await _hlsVariantsFor(source);
-        if (variants.isNotEmpty) {
-          expanded.addAll(variants);
-          expanded.add(source);
-          final labels = variants.map(_qualityLabel).join(',');
+        var remaining = effectiveDeadline?.difference(DateTime.now());
+        if (!_routeStartupOwner.isCompletedSuccessfully &&
+            (remaining == null ||
+                _routeStartupOwner.remainingWorkBudget < remaining)) {
+          remaining = _routeStartupOwner.remainingWorkBudget;
+        }
+        if (remaining != null && remaining <= Duration.zero) {
+          if (!_routeStartupOwner.isCompletedSuccessfully) {
+            throw const MobilePlaybackRouteStartupExpired();
+          }
           DiagnosticLog.add(
-            'native quality variants provider=${source.providerId} count=${variants.length} labels=$labels order=variants-first',
+            'native quality variants bounded reason=aggregate_deadline '
+            'remainingSources=${sources.length - sourceIndex}',
+          );
+          expanded.addAll(sources.skip(sourceIndex));
+          break;
+        }
+        final variants = remaining == null
+            ? await _hlsVariantsFor(source)
+            : await _hlsVariantsFor(source).timeout(remaining);
+        if (variants.isNotEmpty) {
+          final labels = variants.map(_qualityLabel).join(',');
+          if (_manualLibVlcStrictForSource(source)) {
+            final libVlcProvenVariants = variants
+                .where(_hasCurrentLibVlcProofForSource)
+                .toList(growable: false);
+            final libVlcUnprovenVariants = variants
+                .where(
+                  (variant) => !_hasCurrentLibVlcProofForSource(variant),
+                )
+                .toList(growable: false);
+            expanded.addAll(libVlcProvenVariants);
+            expanded.add(source.copyWith(quality: 'Auto'));
+            expanded.addAll(libVlcUnprovenVariants);
+            DiagnosticLog.add(
+              'native quality variants provider=${source.providerId} count=${variants.length} labels=$labels provenForLibVlc=${libVlcProvenVariants.length} order=libvlc-proof-then-adaptive-then-unproven',
+            );
+            continue;
+          }
+          expanded.addAll(variants);
+          expanded.add(source.copyWith(quality: 'Auto'));
+          DiagnosticLog.add(
+            'native quality variants provider=${source.providerId} count=${variants.length} labels=$labels order=variants-first adaptive=auto',
           );
           continue;
         }
+      } on TimeoutException {
+        if (!_routeStartupWorkAvailable) {
+          throw const MobilePlaybackRouteStartupExpired();
+        }
+        DiagnosticLog.add(
+          'native quality variants bounded reason=aggregate_deadline '
+          'remainingSources=${sources.length - sourceIndex}',
+        );
+        expanded.addAll(sources.skip(sourceIndex));
+        break;
       } catch (error) {
+        if (error is MobilePlaybackRouteStartupExpired ||
+            !_routeStartupWorkAvailable) {
+          throw const MobilePlaybackRouteStartupExpired();
+        }
         DiagnosticLog.add(
           'native quality variants failed provider=${source.providerId} error=${_safeDiagnosticError(error)}',
         );
@@ -13044,6 +19748,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return recoveryCappedSources;
     }
     final preferredRank = _qualityRank(preferred);
+    if (_resumeRecoveryExcludedQualityRanks.contains(preferredRank)) {
+      DiagnosticLog.add(
+        'native preferred quality fallback bypassed preferred=$preferred reason=resume_quality_excluded',
+      );
+      return recoveryCappedSources;
+    }
     final index = recoveryCappedSources.indexWhere(
       (source) => _qualityLabel(source) == preferred,
     );
@@ -13079,19 +19789,62 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _clearMedia3RecoveryQualityCeiling(reason: 'expired');
       return sources;
     }
-    final capped = [
+    final knownCapped = [
       for (final source in sources)
         if (_qualityRank(_qualityLabel(source)) > 0 &&
-            _qualityRank(_qualityLabel(source)) <= ceilingRank)
+            _qualityRank(_qualityLabel(source)) <= ceilingRank &&
+            !_resumeRecoveryExcludedQualityRanks.contains(
+              _qualityRank(_qualityLabel(source)),
+            ))
           source,
     ];
-    if (capped.isEmpty) return sources;
-    if (capped.length != sources.length) {
-      DiagnosticLog.add(
-        'native media3 recovery quality ceiling applied rank=$ceilingRank skipped=${sources.length - capped.length} kept=${capped.length} reason=${_media3RecoveryQualityCeilingReason ?? 'unknown'}',
-      );
+    final adaptiveFallback = [
+      for (final source in sources)
+        if (_isAdaptiveHlsAutoSource(source)) source,
+    ];
+    if (knownCapped.isNotEmpty) {
+      final keptCount = knownCapped.length + adaptiveFallback.length;
+      if (keptCount != sources.length) {
+        DiagnosticLog.add(
+          'native media3 recovery quality ceiling applied rank=$ceilingRank skipped=${sources.length - keptCount} kept=$keptCount adaptive=${adaptiveFallback.length} reason=${_media3RecoveryQualityCeilingReason ?? 'unknown'}',
+        );
+      }
+      return <PlaybackSource>[...knownCapped, ...adaptiveFallback];
     }
-    return capped;
+    if (_resumeRecoveryExcludedQualityRanks.contains(ceilingRank)) {
+      final fallback = [
+        for (final source in sources)
+          if (!_resumeRecoveryExcludedQualityRanks.contains(
+            _qualityRank(_qualityLabel(source)),
+          ))
+            source,
+      ];
+      final higherFallback = fallback.any(
+        (source) => _qualityRank(_qualityLabel(source)) > ceilingRank,
+      );
+      if (higherFallback) {
+        DiagnosticLog.add(
+          'native media3 recovery quality ceiling bypassed rank=$ceilingRank kept=${fallback.length} reason=ceiling_quality_excluded',
+        );
+        return fallback;
+      }
+    }
+    if (_resumeRecoveryExcludedQualityRanks.isNotEmpty) {
+      final fallback = [
+        for (final source in sources)
+          if (!_resumeRecoveryExcludedQualityRanks.contains(
+            _qualityRank(_qualityLabel(source)),
+          ))
+            source,
+      ];
+      if (fallback.isNotEmpty) {
+        DiagnosticLog.add(
+          'native media3 recovery quality ceiling bypassed rank=$ceilingRank kept=${fallback.length} reason=all_capped_qualities_excluded',
+        );
+        return fallback;
+      }
+    }
+    return sources;
   }
 
   List<PlaybackSource> _moveQualityLabelToFront(
@@ -13112,6 +19865,127 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       ...sources.where((source) => _qualityRank(_qualityLabel(source)) == rank),
       ...sources.where((source) => _qualityRank(_qualityLabel(source)) != rank),
     ];
+  }
+
+  List<PlaybackSource> _preferStableHlsOrderingForAutoPass(
+    List<PlaybackSource> sources,
+    _QualityPass qualityPass, {
+    required _NativePlaybackEngine engine,
+  }) {
+    if (sources.length < 2 || qualityPass.target != null) return sources;
+    final knownHls = <PlaybackSource>[];
+    final adaptive = <PlaybackSource>[];
+    final other = <PlaybackSource>[];
+    for (final source in sources) {
+      if (_isAdaptiveHlsAutoSource(source)) {
+        adaptive.add(source);
+      } else if (_isHlsSource(source) &&
+          _qualityRank(_qualityLabel(source)) > 0) {
+        knownHls.add(source);
+      } else {
+        other.add(source);
+      }
+    }
+    if (knownHls.isNotEmpty && adaptive.isNotEmpty) {
+      knownHls.sort(
+        (a, b) => _stableHlsAutoSortRank(
+          _qualityLabel(a),
+          engine,
+        ).compareTo(_stableHlsAutoSortRank(_qualityLabel(b), engine)),
+      );
+      if (_useLowDriftMedia3HlsResumeOrdering(engine) && other.isNotEmpty) {
+        DiagnosticLog.add(
+          'native stable hls auto ordering known=${knownHls.length} adaptive=${adaptive.length} other=${other.length} reason=resume_non_hls_before_hls',
+        );
+        return <PlaybackSource>[...other, ...knownHls, ...adaptive];
+      }
+      DiagnosticLog.add(
+        'native stable hls auto ordering known=${knownHls.length} adaptive=${adaptive.length} other=${other.length} reason=${_useLowDriftMedia3HlsResumeOrdering(engine) ? 'media3_resume_low_drift_fixed_quality_before_adaptive_auto' : 'fixed_quality_before_adaptive_auto'}',
+      );
+      return <PlaybackSource>[...knownHls, ...adaptive, ...other];
+    }
+    if (knownHls.length > 1 && _useLowDriftMedia3HlsResumeOrdering(engine)) {
+      knownHls.sort(
+        (a, b) => _stableHlsAutoSortRank(
+          _qualityLabel(a),
+          engine,
+        ).compareTo(_stableHlsAutoSortRank(_qualityLabel(b), engine)),
+      );
+      DiagnosticLog.add(
+        'native stable hls auto ordering known=${knownHls.length} adaptive=0 other=${other.length} reason=media3_resume_low_drift_fixed_quality',
+      );
+      if (other.isNotEmpty) {
+        DiagnosticLog.add(
+          'native stable hls auto ordering known=${knownHls.length} adaptive=0 other=${other.length} reason=resume_non_hls_before_hls',
+        );
+        return <PlaybackSource>[...other, ...knownHls];
+      }
+      return <PlaybackSource>[...knownHls, ...other];
+    }
+    if (adaptive.isEmpty) return sources;
+    DiagnosticLog.add(
+      'native adaptive hls auto prioritized count=${adaptive.length} fixed=${other.length} reason=auto_master_first',
+    );
+    return <PlaybackSource>[...adaptive, ...other];
+  }
+
+  bool _useLowDriftMedia3HlsResumeOrdering(_NativePlaybackEngine engine) {
+    return (engine == _NativePlaybackEngine.exoplayer ||
+            engine == _NativePlaybackEngine.libvlc) &&
+        _hasSavedResumeProgressForRoute &&
+        !_isLiveTvMode &&
+        _qualityPassTargetForCurrentSettings() == null &&
+        !_usingHigherAvailableFirst;
+  }
+
+  int _stableHlsAutoSortRank(String label, _NativePlaybackEngine engine) {
+    if (!_useLowDriftMedia3HlsResumeOrdering(engine)) {
+      return _recommendedQualitySortRank(label);
+    }
+    final rank = _qualityRank(label);
+    const order = <int>[
+      1080,
+      720,
+      800,
+      674,
+      534,
+      480,
+      452,
+      360,
+      1440,
+      2160,
+      4320,
+      336,
+      266,
+      240,
+    ];
+    final index = order.indexOf(rank);
+    return index >= 0 ? index : order.length;
+  }
+
+  int _recommendedQualitySortRank(String label) {
+    final rank = _qualityRank(label);
+    const order = <int>[
+      720,
+      1080,
+      800,
+      674,
+      534,
+      480,
+      452,
+      360,
+      336,
+      266,
+      240,
+    ];
+    final index = order.indexOf(rank);
+    return index >= 0 ? index : order.length;
+  }
+
+  bool _isAdaptiveHlsAutoSource(PlaybackSource source) {
+    if (!_isHlsSource(source)) return false;
+    final quality = (source.quality ?? '').trim().toLowerCase();
+    return quality == 'auto' || quality == 'adaptive';
   }
 
   PlaybackSource? _bestAutoQualitySource(List<PlaybackSource> sources) {
@@ -13150,8 +20024,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
 
   int _recommendedQualityIndex(List<PlaybackSource> rankedSources) {
     final preferredRanks = <int>[
-      1080,
       720,
+      1080,
       800,
       674,
       534,
@@ -13171,11 +20045,42 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return 0;
   }
 
+  Future<http.Response> _fetchHlsVariantManifest(
+    PlaybackSource source,
+  ) async {
+    final uri = Uri.parse(source.url);
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      if (!_routeStartupWorkAvailable) {
+        throw const MobilePlaybackRouteStartupExpired();
+      }
+      final client = http.Client();
+      void cancelProbe() => client.close();
+      _routeStartupOwner.cancellation.addListener(cancelProbe);
+      try {
+        return await client
+            .get(uri, headers: source.headers)
+            .timeout(_routeStartupTimeout(_hlsVariantManifestTimeout));
+      } on TimeoutException {
+        if (attempt > 0) rethrow;
+        DiagnosticLog.add(
+          'native quality variants retry provider=${source.providerId} reason=manifest_timeout',
+        );
+        if (!_routeStartupOwner
+            .canChargeOptionalDelay(_hlsVariantManifestRetryDelay)) {
+          throw const MobilePlaybackRouteStartupExpired();
+        }
+        await Future<void>.delayed(_hlsVariantManifestRetryDelay);
+      } finally {
+        _routeStartupOwner.cancellation.removeListener(cancelProbe);
+        client.close();
+      }
+    }
+    throw StateError('HLS variant manifest retry exhausted.');
+  }
+
   Future<List<PlaybackSource>> _hlsVariantsFor(PlaybackSource source) async {
     final uri = Uri.parse(source.url);
-    final response = await http
-        .get(uri, headers: source.headers)
-        .timeout(const Duration(seconds: 2));
+    final response = await _fetchHlsVariantManifest(source);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       return const <PlaybackSource>[];
     }
@@ -13417,15 +20322,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   }
 
   Duration _subtitlePlaybackPosition(_NativePlaybackController controller) {
-    final rawPosition = controller.position;
-    if (controller.engine == _NativePlaybackEngine.libvlc &&
-        _libVlcContinuousTsActive &&
-        _libVlcContinuousTsTimelineOffset > Duration.zero &&
-        rawPosition <
-            _libVlcContinuousTsTimelineOffset - const Duration(seconds: 10)) {
-      return _libVlcContinuousTsTimelineOffset + rawPosition;
-    }
-    return rawPosition;
+    return _resumeAnchoredPlaybackPosition(controller);
   }
 
   void _handleVerticalDrag(DragUpdateDetails details, double width) {
@@ -13789,7 +20686,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return _resumePromptAccepted ? saved : Duration.zero;
     }
     _resumePromptHandled = true;
-    _resumePromptAccepted = await _confirmResumePlayback(saved) ?? true;
+    _resumePromptAccepted = await _confirmResumePlayback(saved) ?? false;
     return _resumePromptAccepted ? saved : Duration.zero;
   }
 
@@ -13828,19 +20725,25 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return Duration.zero;
   }
 
-  Duration _libVlcRelayPreferredResumePosition(
+  Duration _preOpenPreferredResumePosition(
     PlaybackSource source,
     _NativePlaybackEngine engine,
   ) {
-    if (engine != _NativePlaybackEngine.libvlc ||
-        !_manualLibVlcConfigured ||
-        source.sourceClass != PlaybackSourceClass.direct ||
-        !_isHlsSource(source) ||
-        source.headers.isEmpty) {
+    final directHls = source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source);
+    final directMp4 = mobileIsKnownDirectMp4Source(source);
+    final supportsPreOpenResume = (directHls &&
+            (engine == _NativePlaybackEngine.exoplayer ||
+                engine == _NativePlaybackEngine.libvlc)) ||
+        (directMp4 &&
+            (engine == _NativePlaybackEngine.exoplayer ||
+                engine == _NativePlaybackEngine.libvlc));
+    if (!supportsPreOpenResume) {
       return _automaticResumePositionFor(Duration.zero);
     }
     final saved = _savedResumePositionFor(Duration.zero);
     if (saved <= Duration.zero) return Duration.zero;
+    if (_preferSavedResumeOnInitialOpen) return saved;
     final startBehavior = AppState.playerBehaviorSettings.value.startBehavior;
     if (startBehavior == 'restart') return Duration.zero;
     if (startBehavior == 'resume') return saved;
@@ -13916,15 +20819,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return '180m_plus';
   }
 
-  void _scheduleDeferredResumeSeek(
-    Duration position,
-    String providerId,
-    _NativePlaybackController controller,
-  ) {
+  void _scheduleDeferredResumeSeek(Duration position, String providerId,
+      _NativePlaybackController controller,
+      {bool requiresVisualProof = false}) {
     _cancelDeferredResumeSeek();
     _deferredResumeSeekPosition = position;
     _deferredResumeSeekProviderId = providerId;
     _deferredResumeSeekAttempts = 0;
+    _deferredResumeSeekRequiresVisualProof = requiresVisualProof;
     _deferredResumeSeekTimer = Timer.periodic(
       const Duration(milliseconds: 500),
       (_) => unawaited(_tryDeferredResumeSeek(controller)),
@@ -13939,6 +20841,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _deferredResumeSeekProviderId = null;
     _deferredResumeSeekAttempts = 0;
     _deferredResumeSeekInFlight = false;
+    _deferredResumeSeekRequiresVisualProof = false;
   }
 
   Future<void> _tryDeferredResumeSeek(
@@ -13960,10 +20863,21 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         controller.engine == _NativePlaybackEngine.libvlc &&
             controller.isPlaying &&
             _deferredResumeSeekAttempts >= 2;
+    final media3VisualProofSatisfied = controller.hasRenderedVideoFrame &&
+        controller.size != Size.zero &&
+        controller.duration > Duration.zero;
+    final media3DirectHlsNeedsVisualBeforeMetadataLessSeek =
+        (_deferredResumeSeekRequiresVisualProof ||
+                _shouldWaitForMedia3ResumeSeekVisualProof(
+                  controller,
+                  position,
+                )) &&
+            !media3VisualProofSatisfied;
     final canTryMedia3MetadataLessSeek =
         controller.engine == _NativePlaybackEngine.exoplayer &&
             controller.isPlaying &&
-            _deferredResumeSeekAttempts >= 2;
+            _deferredResumeSeekAttempts >= 2 &&
+            !media3DirectHlsNeedsVisualBeforeMetadataLessSeek;
     final canTryMetadataLessSeek =
         canTryLibVlcMetadataLessSeek || canTryMedia3MetadataLessSeek;
     if (nativeClockUnavailable && !canTryMetadataLessSeek) {
@@ -13986,6 +20900,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       DiagnosticLog.add(
         'native resume seek trying metadata-less ${controller.engine.id} provider=$providerId position=${position.inSeconds}s attempts=$_deferredResumeSeekAttempts',
       );
+    }
+    if (media3DirectHlsNeedsVisualBeforeMetadataLessSeek) {
+      if (_deferredResumeSeekAttempts == 2 ||
+          _deferredResumeSeekAttempts == 8 ||
+          _deferredResumeSeekAttempts == 16) {
+        DiagnosticLog.add(
+          'native resume seek waiting provider=$providerId position=${position.inSeconds}s attempts=$_deferredResumeSeekAttempts reason=media3_first_frame_pending',
+        );
+      }
+      final maxAttempts = (_resumeSeekRetryWindow.inMilliseconds / 500).ceil();
+      if (_deferredResumeSeekAttempts < maxAttempts) return;
+      DiagnosticLog.add(
+        'native resume seek abandoned provider=$providerId position=${position.inSeconds}s reason=media3_first_frame_unavailable action=preserve_resume_anchor',
+      );
+      _cancelDeferredResumeSeek();
+      return;
     }
 
     _deferredResumeSeekInFlight = true;
@@ -14012,7 +20942,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     String providerId,
     Duration position,
   ) async {
-    final deadline = DateTime.now().add(const Duration(seconds: 3));
+    final deadline = DateTime.now().add(
+      controller.engine == _NativePlaybackEngine.exoplayer
+          ? _resumeSeekRetryWindow
+          : const Duration(seconds: 3),
+    );
     final lowerBound = position - const Duration(seconds: 3);
     final upperBound = position + const Duration(seconds: 20);
     var stableProofSamples = 0;
@@ -14025,9 +20959,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       final healthyDecoderSample = controller.isPlaying &&
           !controller.isBuffering &&
           !controller.hasError;
+      final media3VisualProofSatisfied = controller.hasRenderedVideoFrame &&
+          controller.size != Size.zero &&
+          controller.duration > Duration.zero;
+      final media3VisualProofRequired =
+          (_deferredResumeSeekRequiresVisualProof ||
+                  _shouldWaitForMedia3ResumeSeekVisualProof(
+                    controller,
+                    position,
+                  )) &&
+              !media3VisualProofSatisfied;
+      final visualProofSatisfied =
+          !media3VisualProofRequired || media3VisualProofSatisfied;
       if (observed >= lowerBound &&
           observed <= upperBound &&
-          healthyDecoderSample) {
+          healthyDecoderSample &&
+          visualProofSatisfied) {
         stableProofSamples += 1;
         if (stableProofSamples >= requiredStableProofSamples) {
           DiagnosticLog.add(
@@ -14038,6 +20985,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             observed,
             reason: 'resume_seek_proved',
           );
+          _lastCadencePosition = observed;
+          _lastCadenceSampleAt = DateTime.now();
+          _resetPlaybackCadenceCorrection();
           _resumeProgressAnchorPosition = Duration.zero;
           _resumeProgressAnchorLogSecond = -1;
           _cancelDeferredResumeSeek();
@@ -14058,6 +21008,268 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       await Future<void>.delayed(const Duration(milliseconds: 250));
     }
     return _ResumeSeekProofResult.timeout;
+  }
+
+  Future<bool> _waitForSourceSwitchStartupProof(
+    _NativePlaybackController controller,
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) async {
+    final patientMedia3ResumeStartupProof =
+        _shouldDelayMedia3ResumeSeekUntilVisualProof(
+      source,
+      engine,
+      _resumeProgressAnchorPosition,
+    );
+    final deadline = DateTime.now().add(
+      patientMedia3ResumeStartupProof
+          ? const Duration(seconds: 14)
+          : _libVlcContinuousTsStartupProofBudget(source, engine),
+    );
+    var lastPosition = controller.position;
+    var stableSamples = 0;
+    while (mounted &&
+        !_playerClosing &&
+        _controller == controller &&
+        DateTime.now().isBefore(deadline)) {
+      if (engine == _NativePlaybackEngine.libvlc &&
+          _isHlsSource(source) &&
+          _libVlcContinuousTsUpstreamErrors > 0 &&
+          !_libVlcContinuousTsStartupLeadReady) {
+        DiagnosticLog.add(
+          'native source switch startup proof ended provider=${source.providerId} engine=${engine.id} action=reject_candidate reason=libvlc_continuous_ts_startup_transport_failed',
+        );
+        return false;
+      }
+      final position = controller.position;
+      final continuousTsPlaybackReady =
+          engine == _NativePlaybackEngine.libvlc &&
+              _hasSustainedLibVlcContinuousTsPlaybackProof(controller);
+      final visuallyReady = controller.isInitialized &&
+          controller.isPlaying &&
+          !controller.hasError &&
+          (controller.hasRenderedVideoFrame || continuousTsPlaybackReady) &&
+          (controller.size != Size.zero || continuousTsPlaybackReady);
+      final clockReady = controller.duration > Duration.zero ||
+          _hasSustainedLibVlcContinuousTsPlaybackProof(controller);
+      final resumeAnchoredSwitch =
+          _resumeProgressAnchorPosition >= const Duration(seconds: 30);
+      final movedSinceLastSample =
+          position > lastPosition + const Duration(milliseconds: 250);
+      final advanced = movedSinceLastSample ||
+          _sourceCredibleWatchSeconds > 0 ||
+          (!resumeAnchoredSwitch && position >= const Duration(seconds: 1));
+      if (visuallyReady && clockReady && advanced) {
+        stableSamples += 1;
+        if (stableSamples >= 2) {
+          DiagnosticLog.add(
+            'native source switch startup proof observed provider=${source.providerId} engine=${engine.id} position=${position.inSeconds}s samples=$stableSamples moved=$movedSinceLastSample resumeAnchored=$resumeAnchoredSwitch',
+          );
+          _lastKnownPlaybackPosition = position;
+          _lastCadencePosition = position;
+          _lastCadenceSampleAt = DateTime.now();
+          _resetPlaybackCadenceCorrection();
+          return true;
+        }
+      } else {
+        stableSamples = 0;
+      }
+      lastPosition = position;
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+    return false;
+  }
+
+  Duration _libVlcContinuousTsStartupProofBudget(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    if (engine == _NativePlaybackEngine.libvlc && _isHlsSource(source)) {
+      return const Duration(seconds: 45);
+    }
+    if (engine == _NativePlaybackEngine.libvlc) {
+      return const Duration(seconds: 10);
+    }
+    return const Duration(seconds: 5);
+  }
+
+  bool _requiresSustainedMedia3DirectHlsOpenProof(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+  ) {
+    if (engine != _NativePlaybackEngine.exoplayer) return false;
+    if (_isLiveTvMode || _isPublicIptvSource(source)) return false;
+    return source.sourceClass == PlaybackSourceClass.direct &&
+        _isHlsSource(source);
+  }
+
+  Future<bool> _waitForSustainedMedia3DirectHlsOpenProof(
+      _NativePlaybackController controller, PlaybackSource source,
+      {Duration resumePosition = Duration.zero}) async {
+    final resumeAnchorProof = resumePosition >= const Duration(seconds: 30);
+    final proofDeadline = resumeAnchorProof
+        ? const Duration(seconds: 16)
+        : const Duration(seconds: 40);
+    final deadline = DateTime.now().add(proofDeadline);
+    final proofStartedAt = DateTime.now();
+    DateTime? firstReadyAt;
+    var previousAt = DateTime.now();
+    var previousPosition = controller.position;
+    var stableSamples = 0;
+    var bufferingSamples = 0;
+    var missingVisualPlayingSamples = 0;
+    var visualStartupSamples = 0;
+    var toleratedResumeStartupDrifts = 0;
+    var toleratedStartupAttachDrifts = 0;
+    DateTime? noVisualStartedAt;
+    if (resumeAnchorProof) {
+      DiagnosticLog.add(
+        'native media3 direct hls startup proof resume budget provider=${source.providerId} quality=${_qualityLabel(source)} anchor=${resumePosition.inSeconds}s timeout=${proofDeadline.inSeconds}s',
+      );
+    }
+    while (mounted &&
+        !_playerClosing &&
+        _controller == controller &&
+        DateTime.now().isBefore(deadline)) {
+      final now = DateTime.now();
+      final position = controller.position;
+      if (!controller.isInitialized || controller.hasError) {
+        return false;
+      }
+      final visuallyReady = controller.isPlaying &&
+          controller.hasRenderedVideoFrame &&
+          controller.duration > Duration.zero &&
+          controller.size != Size.zero &&
+          !_activeSourceHasZeroClockMetadata;
+      if (visuallyReady) {
+        missingVisualPlayingSamples = 0;
+        firstReadyAt ??= now;
+        visualStartupSamples += 1;
+        final wallDeltaMs = now.difference(previousAt).inMilliseconds;
+        final positionDeltaMs =
+            position.inMilliseconds - previousPosition.inMilliseconds;
+        if (wallDeltaMs >= 400 && positionDeltaMs > 0) {
+          final speed = math.max(_playbackSpeed, 1.0);
+          final allowedDeltaMs = (wallDeltaMs * speed * 1.80 + 1600).round();
+          if (!controller.isBuffering && positionDeltaMs > allowedDeltaMs) {
+            final ratio = positionDeltaMs / wallDeltaMs;
+            final resumeSeekSettlingWindow = resumeAnchorProof &&
+                now.difference(proofStartedAt) <= const Duration(seconds: 4) &&
+                position >= resumePosition &&
+                toleratedResumeStartupDrifts < 3;
+            if (resumeSeekSettlingWindow) {
+              toleratedResumeStartupDrifts += 1;
+              DiagnosticLog.add(
+                'native media3 direct hls startup proof tolerated resume seek settling provider=${source.providerId} observed=${position.inSeconds}s previous=${previousPosition.inSeconds}s ratio=${ratio.toStringAsFixed(2)} tolerated=$toleratedResumeStartupDrifts reason=resume_startup_seek_settling',
+              );
+            } else if (now.difference(proofStartedAt) <=
+                    const Duration(seconds: 14) &&
+                toleratedStartupAttachDrifts < 1) {
+              toleratedStartupAttachDrifts += 1;
+              stableSamples = 0;
+              DiagnosticLog.add(
+                'native media3 direct hls startup proof tolerated platform attach drift provider=${source.providerId} observed=${position.inSeconds}s previous=${previousPosition.inSeconds}s ratio=${ratio.toStringAsFixed(2)} tolerated=$toleratedStartupAttachDrifts action=observe_candidate reason=startup_platform_attach_settling',
+              );
+            } else if (!resumeAnchorProof &&
+                now.difference(proofStartedAt) <= const Duration(seconds: 16) &&
+                controller.hasRenderedVideoFrame &&
+                controller.size != Size.zero &&
+                visualStartupSamples >= 3) {
+              stableSamples = 0;
+              DiagnosticLog.add(
+                'native media3 direct hls startup proof deferred early clock drift provider=${source.providerId} observed=${position.inSeconds}s previous=${previousPosition.inSeconds}s ratio=${ratio.toStringAsFixed(2)} visualSamples=$visualStartupSamples action=defer_to_runtime_cadence_guard reason=startup_visual_proof_clock_settling',
+              );
+            } else {
+              DiagnosticLog.add(
+                'native media3 direct hls startup proof rejected provider=${source.providerId} observed=${position.inSeconds}s previous=${previousPosition.inSeconds}s ratio=${ratio.toStringAsFixed(2)} action=reject_candidate reason=startup_clock_drift',
+              );
+              return false;
+            }
+          }
+        }
+        if (controller.isBuffering) {
+          bufferingSamples += 1;
+          stableSamples = 0;
+        } else {
+          stableSamples += 1;
+        }
+        final readyFor = now.difference(firstReadyAt);
+        if (readyFor >= const Duration(seconds: 3) &&
+            visualStartupSamples >= 6 &&
+            controller.hasRenderedVideoFrame &&
+            controller.duration > Duration.zero &&
+            controller.size != Size.zero &&
+            position >= const Duration(milliseconds: 500)) {
+          DiagnosticLog.add(
+            'native media3 direct hls startup visual proof observed provider=${source.providerId} quality=${_qualityLabel(source)} position=${position.inSeconds}s visualSamples=$visualStartupSamples buffering=$bufferingSamples readyFor=${readyFor.inSeconds}s action=${resumeAnchorProof ? 'defer_resume_seek_to_runtime_proof' : 'defer_clock_to_runtime_cadence_guard'}',
+          );
+          _lastKnownPlaybackPosition = position;
+          _lastCadencePosition = position;
+          _lastCadenceSampleAt = now;
+          _resetPlaybackCadenceCorrection();
+          return true;
+        }
+        if (readyFor >= const Duration(seconds: 10) && stableSamples >= 8) {
+          DiagnosticLog.add(
+            'native media3 direct hls startup proof observed provider=${source.providerId} quality=${_qualityLabel(source)} position=${position.inSeconds}s stable=$stableSamples buffering=$bufferingSamples readyFor=${readyFor.inSeconds}s',
+          );
+          _lastKnownPlaybackPosition = position;
+          _lastCadencePosition = position;
+          _lastCadenceSampleAt = now;
+          _resetPlaybackCadenceCorrection();
+          return true;
+        }
+      } else {
+        stableSamples = 0;
+        visualStartupSamples = 0;
+        noVisualStartedAt ??= now;
+        final noVisualFor = now.difference(noVisualStartedAt);
+        final stalledWithoutVisual =
+            position <= previousPosition + const Duration(milliseconds: 250);
+        if (!resumeAnchorProof &&
+            noVisualFor >= const Duration(seconds: 8) &&
+            !controller.hasRenderedVideoFrame &&
+            (controller.isBuffering ||
+                !controller.isPlaying ||
+                stalledWithoutVisual)) {
+          DiagnosticLog.add(
+            'native media3 direct hls startup proof rejected provider=${source.providerId} quality=${_qualityLabel(source)} position=${position.inSeconds}s buffering=${controller.isBuffering} playing=${controller.isPlaying} stalled=$stalledWithoutVisual elapsed=${noVisualFor.inSeconds}s action=reject_candidate reason=startup_no_visual_stalled_clock',
+          );
+          return false;
+        }
+        final noUsableProgress =
+            position < const Duration(seconds: 1) || controller.isBuffering;
+        if (!resumeAnchorProof &&
+            noVisualFor >= const Duration(seconds: 12) &&
+            !controller.hasRenderedVideoFrame &&
+            noUsableProgress) {
+          DiagnosticLog.add(
+            'native media3 direct hls startup proof rejected provider=${source.providerId} quality=${_qualityLabel(source)} position=${position.inSeconds}s buffering=${controller.isBuffering} playing=${controller.isPlaying} elapsed=${noVisualFor.inSeconds}s action=reject_candidate reason=startup_no_visual_progress',
+          );
+          return false;
+        }
+        if (controller.isPlaying &&
+            !controller.isBuffering &&
+            controller.duration > Duration.zero &&
+            position >= const Duration(seconds: 5) &&
+            (!controller.hasRenderedVideoFrame ||
+                controller.size == Size.zero)) {
+          missingVisualPlayingSamples += 1;
+          if (missingVisualPlayingSamples >= 8) {
+            DiagnosticLog.add(
+              'native media3 direct hls startup proof rejected provider=${source.providerId} quality=${_qualityLabel(source)} position=${position.inSeconds}s firstFrame=${controller.hasRenderedVideoFrame} size=${controller.size.width.toStringAsFixed(0)}x${controller.size.height.toStringAsFixed(0)} action=reject_candidate reason=startup_audio_without_visual',
+            );
+            return false;
+          }
+        } else {
+          missingVisualPlayingSamples = 0;
+        }
+      }
+      previousAt = now;
+      previousPosition = position;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
   }
 
   Future<bool> _seekToResumePosition(
@@ -14090,6 +21302,18 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       DiagnosticLog.add(
         'native resume seek applied provider=$providerId position=${target.inSeconds}s',
       );
+      _anchorNativeRecoveryProgress(target, reason: 'resume_seek_applied');
+      if (controller.engine == _NativePlaybackEngine.exoplayer) {
+        _media3ResumeSeekSettleAnchor = target;
+        _media3ResumeSeekSettleUntil =
+            DateTime.now().add(_resumeSeekRetryWindow);
+        _media3ResumeSeekSettleDrifts = 0;
+        _lastCadencePosition = target;
+        _lastCadenceSampleAt = DateTime.now();
+        DiagnosticLog.add(
+          'native media3 resume seek settle armed provider=$providerId position=${target.inSeconds}s timeout=${_resumeSeekRetryWindow.inSeconds}s',
+        );
+      }
       return true;
     } catch (error) {
       DiagnosticLog.add(
@@ -14097,6 +21321,212 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return false;
     }
+  }
+
+  void _toggleControlsFromSurfaceTap() {
+    if (_resumeDialogOpen) return;
+    final ready = _nativeControlsReady(_controller);
+    if (!ready) {
+      DiagnosticLog.add(
+        'native hud surface tap ignored reason=controls_not_ready controlsVisible=$_controlsVisible loading=$_loading opening=$_openingSource wait=${_playbackWaitMessage != null}',
+      );
+      return;
+    }
+    _hideControlsTimer?.cancel();
+    _lastControllerUiRebuildAt = null;
+    if (_locked) {
+      setState(() {
+        _controlsVisible = true;
+        _advanceHudRevealGeneration();
+        _clearGestureHintState();
+      });
+      _scheduleControlsHide();
+      return;
+    }
+    final nextVisible = !_controlsVisible;
+    setState(() {
+      _controlsVisible = nextVisible;
+      if (nextVisible) {
+        _advanceHudRevealGeneration();
+      } else {
+        _clearGestureHintState();
+      }
+    });
+    DiagnosticLog.add(
+      'native hud surface tap toggle applied controlsVisible=$_controlsVisible ready=$ready sources=${_activeSources.length}',
+    );
+    if (nextVisible) {
+      _scheduleControlsHide();
+    }
+  }
+
+  bool _handleForwardedNativeControlTap({
+    required double x,
+    required double y,
+    required double width,
+    required double height,
+  }) {
+    if (!_nativeControlsReady(_controller) ||
+        _optionSheetOpen ||
+        _settingsExpanded ||
+        width <= 0 ||
+        height <= 0) {
+      return false;
+    }
+    final nx = (x / width).clamp(0.0, 1.0);
+    final ny = (y / height).clamp(0.0, 1.0);
+    final inBottomControlBand = ny >= 0.72 && ny <= 0.94;
+    if (!inBottomControlBand) return false;
+    final controlsWereVisible = _controlsVisible;
+    if (!controlsWereVisible) {
+      _hideControlsTimer?.cancel();
+      _lastControllerUiRebuildAt = null;
+      setState(() {
+        _controlsVisible = true;
+        _advanceHudRevealGeneration();
+        _clearGestureHintState();
+      });
+    }
+    if (_activeSources.length > 1 && nx >= 0.56 && nx <= 0.80) {
+      DiagnosticLog.add(
+        'native media3 forwarded tap routed action=sources controlsVisible=$controlsWereVisible nx=${nx.toStringAsFixed(2)} ny=${ny.toStringAsFixed(2)} sources=${_activeSources.length}',
+      );
+      unawaited(_showSourceSheet());
+      return true;
+    }
+    if (nx > 0.80 && nx <= 0.91) {
+      DiagnosticLog.add(
+        'native media3 forwarded tap routed action=settings controlsVisible=$controlsWereVisible nx=${nx.toStringAsFixed(2)} ny=${ny.toStringAsFixed(2)}',
+      );
+      _toggleSettingsPack();
+      return true;
+    }
+    if (!controlsWereVisible) _scheduleControlsHide();
+    return false;
+  }
+
+  void _handlePlayerSurfaceTap() {
+    DiagnosticLog.add(
+      'native hud surface tap received controlsVisible=$_controlsVisible ready=${_nativeControlsReady(_controller)} sources=${_activeSources.length} settings=$_settingsExpanded sheet=$_optionSheetOpen',
+    );
+    _toggleControlsFromSurfaceTap();
+  }
+
+  Future<void> _handleMedia3PlayerChannelCall(MethodCall call) async {
+    if (call.method != 'surfaceTap') return;
+    final args = call.arguments as Map<Object?, Object?>?;
+    final viewId = (args?['viewId'] as num?)?.toInt();
+    final media3 = _controller?.media3;
+    if (media3 == null || viewId == null || media3.attachedViewId != viewId) {
+      DiagnosticLog.add(
+        'native media3 surface tap ignored reason=stale_view viewId=$viewId active=${media3?.attachedViewId}',
+      );
+      return;
+    }
+    DiagnosticLog.add(
+      'native media3 surface tap forwarded viewId=$viewId controlsVisible=$_controlsVisible ready=${_nativeControlsReady(_controller)}',
+    );
+    final x = (args?['x'] as num?)?.toDouble();
+    final y = (args?['y'] as num?)?.toDouble();
+    final width = (args?['width'] as num?)?.toDouble();
+    final height = (args?['height'] as num?)?.toDouble();
+    if (x != null &&
+        y != null &&
+        width != null &&
+        height != null &&
+        _handleForwardedNativeControlTap(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+        )) {
+      return;
+    }
+    _handlePlayerSurfaceTap();
+  }
+
+  bool _resumeStartupSeekProofPending(_NativePlaybackController controller) {
+    if (_resumeProgressAnchorPosition < const Duration(seconds: 3)) {
+      return false;
+    }
+    if (!controller.isInitialized || controller.hasError) return false;
+    return controller.position <
+        _resumeProgressAnchorPosition - const Duration(seconds: 10);
+  }
+
+  bool _shouldDelayMedia3ResumeSeekUntilVisualProof(
+    PlaybackSource source,
+    _NativePlaybackEngine engine,
+    Duration position,
+  ) {
+    if (engine != _NativePlaybackEngine.exoplayer) return false;
+    if (position < const Duration(seconds: 30)) return false;
+    if (_isLiveTvMode || widget.liveMode || _isPublicIptvSource(source)) {
+      return false;
+    }
+    return source.sourceClass == PlaybackSourceClass.p2p ||
+        (source.sourceClass == PlaybackSourceClass.direct &&
+            _isHlsSource(source));
+  }
+
+  bool _shouldWaitForMedia3ResumeSeekVisualProof(
+    _NativePlaybackController controller,
+    Duration position,
+  ) {
+    final source = _activeSource;
+    if (source == null || controller.hasRenderedVideoFrame) return false;
+    return _shouldDelayMedia3ResumeSeekUntilVisualProof(
+      source,
+      controller.engine,
+      position,
+    );
+  }
+
+  bool _shouldRejectUnprovedMedia3ResumeStartup(
+    PlaybackSource source,
+    _NativePlaybackController controller,
+    Duration resumePosition,
+  ) {
+    if (controller.engine != _NativePlaybackEngine.exoplayer) return false;
+    if (resumePosition < const Duration(seconds: 5)) return false;
+    if (_isLiveTvMode || widget.liveMode || _isPublicIptvSource(source)) {
+      return false;
+    }
+    if (source.sourceClass != PlaybackSourceClass.direct) {
+      return false;
+    }
+    final missingVisualProof = !controller.hasRenderedVideoFrame ||
+        controller.size == Size.zero ||
+        controller.duration <= Duration.zero;
+    final earlyRuntimeRecovery = resumePosition < const Duration(seconds: 30) &&
+        _hasRecentRuntimeFailureForSource(source);
+    if (earlyRuntimeRecovery && missingVisualProof) return true;
+    if (resumePosition < const Duration(seconds: 30)) return false;
+    if (missingVisualProof) return true;
+    final farBelowAnchor =
+        controller.position < resumePosition - const Duration(seconds: 10);
+    if (farBelowAnchor) return true;
+    final nearResumeAnchor =
+        controller.position >= resumePosition - const Duration(seconds: 10);
+    if (nearResumeAnchor && (controller.isPlaying || controller.isBuffering)) {
+      return false;
+    }
+    if (!controller.isPlaying && !controller.isBuffering) return true;
+    if (!controller.hasRenderedVideoFrame && !controller.isBuffering) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _hasRecentRuntimeFailureForSource(PlaybackSource source) {
+    final failedAt = _lastRuntimeSourceFailureAt;
+    if (failedAt == null) return false;
+    if (DateTime.now().difference(failedAt) > const Duration(seconds: 45)) {
+      return false;
+    }
+    final failedProvider = _lastRuntimeSourceFailureProviderId;
+    if (failedProvider == null || failedProvider.isEmpty) return true;
+    return failedProvider == source.providerId;
   }
 
   Future<bool?> _confirmResumePlayback(Duration saved) async {
@@ -14107,10 +21537,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     void closeResumeDialog(BuildContext dialogContext, bool resume) {
       if (dialogClosing) return;
       dialogClosing = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!dialogContext.mounted) return;
-        Navigator.of(dialogContext).pop(resume);
-      });
+      if (!dialogContext.mounted) return;
+      Navigator.of(dialogContext).pop(resume);
     }
 
     _hideControlsTimer?.cancel();
@@ -14139,6 +21567,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         ],
       ),
     );
+    if (confirmed == null) {
+      DiagnosticLog.add(
+        'native resume prompt dismissed action=start_over reason=back_or_system_dismiss',
+      );
+    }
     if (!mounted) return confirmed;
     final controller = _controller;
     final waitForLibVlcProof = confirmed == true &&
@@ -14157,6 +21590,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return confirmed;
   }
 
+  bool _shouldLogProgressSaveSkip(
+    String reason, {
+    required bool force,
+  }) {
+    final now = DateTime.now();
+    final lastAt = _lastProgressSaveSkipLogAt;
+    if (_lastProgressSaveSkipLogReason == reason &&
+        lastAt != null &&
+        now.difference(lastAt) < const Duration(seconds: 1)) {
+      return false;
+    }
+    _lastProgressSaveSkipLogReason = reason;
+    _lastProgressSaveSkipLogAt = now;
+    return true;
+  }
+
   void _saveNativeProgress({
     bool force = false,
     bool completionObserved = false,
@@ -14172,6 +21621,18 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       }
       return;
     }
+    final coordinatorGeneration = _mobileLibVlcCoordinator?.generation ?? -1;
+    if (_mobileLibVlcSeekPreparing &&
+        _mobileLibVlcSeekOwnerGeneration == coordinatorGeneration) {
+      if (force) {
+        _saveNativePreferencesOnly(reason: 'seek_candidate_unproved');
+      }
+      DiagnosticLog.add(
+        'native progress save deferred reason=seek_candidate_unproved '
+        'surfaceGeneration=$coordinatorGeneration force=$force',
+      );
+      return;
+    }
 
     final hasInitializedController =
         controller != null && controller.isInitialized;
@@ -14179,10 +21640,80 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         hasInitializedController && !controller.hasError;
     final duration = _bestKnownProgressDuration(controller);
     final rawPosition = _bestKnownProgressPosition(controller, duration);
+    if (_manualLibVlcSelectionProofPending) {
+      if (force) {
+        _saveNativePreferencesOnly(
+          reason: 'libvlc_candidate_switch_unproved',
+        );
+      }
+      DiagnosticLog.add(
+        'native progress save skipped '
+        'reason=libvlc_candidate_switch_unproved '
+        'anchor=${_manualLibVlcSelectionProgressAnchor.inSeconds}s '
+        'force=$force completionObserved=$completionObserved',
+      );
+      return;
+    }
+    if (_manualLibVlcSelectionRetainedClockRecoveryPending) {
+      final anchor = _manualLibVlcSelectionProgressAnchor;
+      final lowerBound = anchor - const Duration(seconds: 3);
+      final upperBound = anchor + const Duration(seconds: 45);
+      final retainedClockRecovered = hasHealthyController &&
+          controller.isPlaying &&
+          !controller.isBuffering &&
+          rawPosition >= lowerBound &&
+          rawPosition <= upperBound;
+      if (!retainedClockRecovered) {
+        if (force) {
+          _saveNativePreferencesOnly(
+            reason: 'libvlc_retained_session_clock_unproved',
+          );
+        }
+        if (_shouldLogProgressSaveSkip(
+          'libvlc_retained_session_clock_unproved',
+          force: force,
+        )) {
+          DiagnosticLog.add(
+            'native progress save skipped '
+            'reason=libvlc_retained_session_clock_unproved '
+            'raw=${rawPosition.inSeconds}s anchor=${anchor.inSeconds}s '
+            'playing=${controller?.isPlaying == true} '
+            'buffering=${controller?.isBuffering == true} force=$force',
+          );
+        }
+        return;
+      }
+      _manualLibVlcSelectionRetainedClockRecoveryPending = false;
+      _manualLibVlcSelectionProgressAnchor = Duration.zero;
+      _rememberCrediblePlaybackAnchor(
+        rawPosition,
+        reason: 'libvlc_retained_session_clock_recovered',
+      );
+      DiagnosticLog.add(
+        'native libvlc retained session clock recovered '
+        'reason=libvlc_retained_session_clock_recovered '
+        'position=${rawPosition.inSeconds}s anchor=${anchor.inSeconds}s',
+      );
+    }
     final stablePosition = _stableProgressClockPosition(
       rawPosition,
       reason: force ? 'forced_progress_save' : 'progress_save',
     );
+    final resumeSeekStillPending = controller != null &&
+        _resumeProgressAnchorPosition >= const Duration(seconds: 5) &&
+        rawPosition <
+            _resumeProgressAnchorPosition - const Duration(seconds: 10) &&
+        !completionObserved;
+    if (resumeSeekStillPending) {
+      if (force) {
+        _saveNativePreferencesOnly(
+            reason: 'resume_seek_pending_progress_guard');
+      }
+      DiagnosticLog.add(
+        'native progress save skipped reason=resume_seek_pending_progress_guard raw=${rawPosition.inSeconds}s anchor=${_resumeProgressAnchorPosition.inSeconds}s force=$force',
+      );
+      return;
+    }
     final position = _rendererRecoveryProgressSavePosition(
       rawPosition: rawPosition,
       stablePosition: stablePosition,
@@ -14214,16 +21745,70 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         recoveryAnchor >= const Duration(seconds: 3) &&
         rawPosition - recoveryAnchor > const Duration(seconds: 2);
     if (media3RecoveryClockUntrusted) {
-      DiagnosticLog.add(
-        'native progress save skipped reason=media3_recovery_clock_untrusted raw=${rawPosition.inSeconds}s stable=${position.inSeconds}s anchor=${recoveryAnchor.inSeconds}s force=$force',
-      );
+      if (_shouldLogProgressSaveSkip(
+        'media3_recovery_clock_untrusted',
+        force: force,
+      )) {
+        DiagnosticLog.add(
+          'native progress save skipped reason=media3_recovery_clock_untrusted raw=${rawPosition.inSeconds}s stable=${position.inSeconds}s anchor=${recoveryAnchor.inSeconds}s force=$force',
+        );
+      }
       return;
     }
     if (_media3RendererClockIsUnproven(controller)) {
-      DiagnosticLog.add(
-        'native progress save skipped reason=media3_renderer_unproven_clock raw=${rawPosition.inSeconds}s stable=${position.inSeconds}s force=$force',
-      );
+      if (_shouldLogProgressSaveSkip(
+        'media3_renderer_unproven_clock',
+        force: force,
+      )) {
+        DiagnosticLog.add(
+          'native progress save skipped reason=media3_renderer_unproven_clock raw=${rawPosition.inSeconds}s stable=${position.inSeconds}s force=$force',
+        );
+      }
       return;
+    }
+    final resumeAnchorBufferingClockUntrusted = controller != null &&
+        controller.isBuffering &&
+        !completionObserved &&
+        _resumeProgressAnchorPosition >= const Duration(seconds: 30) &&
+        rawPosition >= _resumeProgressAnchorPosition &&
+        rawPosition - _resumeProgressAnchorPosition <=
+            const Duration(seconds: 45);
+    if (resumeAnchorBufferingClockUntrusted) {
+      if (force) {
+        _saveNativePreferencesOnly(
+          reason: 'resume_anchor_buffering_clock',
+        );
+      }
+      if (_shouldLogProgressSaveSkip(
+        'resume_anchor_buffering_clock',
+        force: force,
+      )) {
+        DiagnosticLog.add(
+          'native progress save skipped reason=resume_anchor_buffering_clock raw=${rawPosition.inSeconds}s anchor=${_resumeProgressAnchorPosition.inSeconds}s force=$force',
+        );
+      }
+      return;
+    }
+    if (_media3DirectHlsExtendedProgressProofIsPending(controller) &&
+        !completionObserved) {
+      final suspiciousRawClock = _isSuspiciousProgressClockJump(
+        rawPosition,
+        reason: 'media3_direct_hls_extended_progress_proof',
+        log: true,
+      );
+      if (_playbackCadenceClockUnstable ||
+          suspiciousRawClock ||
+          (!force && rawPosition - position > const Duration(seconds: 2))) {
+        if (force) {
+          _saveNativePreferencesOnly(
+            reason: 'media3_direct_hls_extended_progress_proof',
+          );
+        }
+        DiagnosticLog.add(
+          'native progress save skipped reason=media3_direct_hls_extended_progress_proof raw=${rawPosition.inSeconds}s stable=${position.inSeconds}s force=$force unstable=$_playbackCadenceClockUnstable suspicious=$suspiciousRawClock',
+        );
+        return;
+      }
     }
     if (_playbackCadenceClockUnstable &&
         completionObserved &&
@@ -14326,6 +21911,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       DiagnosticLog.add(
         'native progress saved with fallback clock engine=${controller.engine.id} watched=${watchedSeconds}s wall=${wallClockSeconds}s delta=${deltaSeconds}s',
       );
+      _markRuntimeSourceRecovered(
+        engine: controller.engine,
+        position: Duration(seconds: watchedSeconds),
+        reason: 'fallback_progress_save',
+      );
       AppState.recordPlaybackProgress(
         item: item,
         playbackKey: key,
@@ -14371,10 +21961,40 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             ));
     final effectivePosition =
         completionObserved && credibleCompletionObserved ? duration : position;
-    final savedPosition = _resumeSafeProgressPosition(
+    var savedPosition = _resumeSafeProgressPosition(
       effectivePosition,
       duration,
       completionObserved: credibleCompletionObserved,
+    );
+    savedPosition = preserveMobileLibVlcAnchor(
+      current: _resumeProgressAnchorPosition,
+      candidate: savedPosition,
+      explicitSeek: false,
+    );
+    final usesContinuousTsAbsoluteTimeline =
+        controller?.engine == _NativePlaybackEngine.libvlc &&
+            _libVlcContinuousTsActive;
+    var absoluteProgressFloor = Duration.zero;
+    if (usesContinuousTsAbsoluteTimeline) {
+      final coordinatorGeneration = _mobileLibVlcCoordinator?.generation ?? -1;
+      final seekOwnsGeneration =
+          _mobileLibVlcSeekOwnerGeneration == coordinatorGeneration;
+      if (seekOwnsGeneration) {
+        absoluteProgressFloor = _mobileLibVlcSeekAbsoluteFloor;
+      }
+      final activeTimelinePosition =
+          _activeMobileLibVlcSessionTimeline?.absolutePlaybackPosition ??
+              Duration.zero;
+      if ((!_mobileLibVlcSeekPreparing || !seekOwnsGeneration) &&
+          activeTimelinePosition > absoluteProgressFloor) {
+        absoluteProgressFloor = activeTimelinePosition;
+      }
+    }
+    savedPosition = preserveMobileLibVlcAbsoluteProgressFloor(
+      proposedPosition: savedPosition,
+      authoritativeAnchor: absoluteProgressFloor,
+      relayLocalDuration: controller?.duration ?? Duration.zero,
+      continuousTsAbsoluteTimeline: usesContinuousTsAbsoluteTimeline,
     );
     if (completionObserved) {
       DiagnosticLog.add(
@@ -14389,6 +22009,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     DiagnosticLog.add(
       'native progress saved with player clock engine=${controller?.engine.id ?? 'cached'} watched=${savedPosition.inSeconds}s duration=${duration.inSeconds}s force=$force',
     );
+    if (controller != null) {
+      _markRuntimeSourceRecovered(
+        engine: controller.engine,
+        position: savedPosition,
+        reason: 'player_progress_save',
+      );
+    }
     if (controller != null) {
       _rememberVerifiedSource(controller, savedPosition);
     }
@@ -14537,11 +22164,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return 5;
   }
 
-  bool _nativeControlsReady(_NativePlaybackController? controller) {
+  bool _nativeControlsReady(
+    _NativePlaybackController? controller, {
+    bool allowSeekPreparation = false,
+  }) {
     if (controller == null ||
         !controller.isInitialized ||
         controller.hasError ||
-        _loading ||
+        (_loading && !allowSeekPreparation) ||
         _openingSource ||
         _recoveringFromStall ||
         _resolverTemporarilyBlocked ||
@@ -14560,19 +22190,140 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return hasUsableClock && hasVideoSurface;
   }
 
+  void _emitHudMountSignal(NativeHudMountSignalEvent? event) {
+    if (event != null) DiagnosticLog.add(event.diagnostic);
+  }
+
+  void _advanceHudRevealGeneration() {
+    _hudRevealGeneration += 1;
+    _hudTransportMountOwner =
+        NativeHudTransportMountOwner(_hudRevealGeneration);
+  }
+
+  void _handleHudTransportAnimationCompleted(
+    NativeHudTransportMountOwner owner,
+    NativeHudTransportSlot slot,
+  ) {
+    if (!mounted ||
+        _playerClosing ||
+        !identical(owner, _hudTransportMountOwner) ||
+        owner.generation != _hudRevealGeneration) {
+      return;
+    }
+    owner.markAnimationCompleted(slot);
+    if (!owner.animationCompleted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _playerClosing ||
+          !identical(owner, _hudTransportMountOwner) ||
+          owner.generation != _hudRevealGeneration) {
+        return;
+      }
+      final visible = _controlsVisible &&
+          !_loading &&
+          !_openingSource &&
+          !_recoveringFromStall &&
+          _playbackWaitMessage == null;
+      _emitHudMountSignal(
+        _hudMountSignalGate.completePostFrame(
+          generation: owner.generation,
+          visible: visible,
+          animationCompleted: owner.animationCompleted,
+          leftSkipMounted: nativeHudTransportRenderObjectReady(
+            activePlayerBoundsKey: owner.activePlayerBoundsKey,
+            controlKey: owner.leftSkipKey,
+          ),
+          centerControlMounted: nativeHudTransportRenderObjectReady(
+            activePlayerBoundsKey: owner.activePlayerBoundsKey,
+            controlKey: owner.centerPlayPauseKey,
+          ),
+          rightSkipMounted: nativeHudTransportRenderObjectReady(
+            activePlayerBoundsKey: owner.activePlayerBoundsKey,
+            controlKey: owner.rightSkipKey,
+          ),
+          playerVerified: _nativeControlsReady(_controller),
+          loading: _loading,
+        ),
+      );
+    });
+  }
+
+  void _scheduleHudMountSignalAfterFrame({
+    required bool playerVerified,
+    required bool controlsIncluded,
+  }) {
+    final generation = _hudRevealGeneration;
+    final visible = _controlsVisible && controlsIncluded && playerVerified;
+    final owner = _hudTransportMountOwner;
+    if (!visible) {
+      owner.resetAnimationCompletion();
+      _emitHudMountSignal(_hudMountSignalGate.hide(generation));
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _playerClosing ||
+          generation != _hudRevealGeneration ||
+          !identical(owner, _hudTransportMountOwner)) {
+        return;
+      }
+      if (!_controlsVisible) {
+        owner.resetAnimationCompletion();
+        _emitHudMountSignal(_hudMountSignalGate.hide(generation));
+        return;
+      }
+      _emitHudMountSignal(
+        _hudMountSignalGate.beginVisibleGeneration(generation),
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
+    final stagedControllers = _stagedMobileLibVlcControllers.entries
+        .where(
+          (entry) =>
+              entry.key == _mobileLibVlcCoordinator?.generation &&
+              !identical(entry.value, controller),
+        )
+        .map((entry) => entry.value)
+        .toList(growable: false);
+    final mountedLibVlcControllers = <_NativePlaybackController>[
+      if (controller != null &&
+          controller.engine == _NativePlaybackEngine.libvlc &&
+          !stagedControllers.contains(controller))
+        controller,
+      ...stagedControllers,
+    ];
+    final visibleLibVlcController =
+        _mobileLibVlcSeekPreparing && stagedControllers.isNotEmpty
+            ? stagedControllers.last
+            : controller;
     final initialized = controller?.isInitialized == true;
-    final nativeControlsReady = _nativeControlsReady(controller);
+    final nativeControlsReady = _nativeControlsReady(
+      controller,
+      allowSeekPreparation: _mobileLibVlcSeekPreparing,
+    );
     final controlsSuppressed = _resumeDialogOpen;
     final controlsDimmed = !controlsSuppressed &&
         (_settingsExpanded || (_optionSheetOpen && !_loading));
+    final hudTransportMountOwner = _hudTransportMountOwner;
     return PopScope(
       canPop: _allowPop,
       onPopInvokedWithResult: (didPop, __) {
         if (didPop) {
           _exitPlayerMode();
+          return;
+        }
+        if (_resumeDialogOpen) {
+          DiagnosticLog.add(
+            'native resume prompt back intercepted action=start_over',
+          );
+          final navigator = Navigator.of(context, rootNavigator: true);
+          if (navigator.canPop()) {
+            navigator.pop(false);
+          }
           return;
         }
         unawaited(
@@ -14606,30 +22357,66 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               fallbackPosition,
               fallbackDuration,
             );
+            final seekControlsReady = !_loading || _mobileLibVlcSeekPreparing;
+            final controlsIncluded = seekControlsReady &&
+                _playbackWaitMessage == null &&
+                !controlsSuppressed &&
+                nativeControlsReady &&
+                !_pictureInPictureActive;
+            _scheduleHudMountSignalAfterFrame(
+              playerVerified: nativeControlsReady,
+              controlsIncluded: controlsIncluded,
+            );
+            final surfaceInteractionEnabled = !_loading &&
+                !controlsSuppressed &&
+                nativeControlsReady &&
+                !_pictureInPictureActive &&
+                !_settingsExpanded &&
+                !_optionSheetOpen;
+            final surfaceGesturesEnabled =
+                surfaceInteractionEnabled && !compactPlayer && !_locked;
             return GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: _settingsExpanded || _loading || controlsSuppressed
-                  ? null
-                  : _toggleControls,
-              onVerticalDragUpdate: _settingsExpanded ||
-                      _loading ||
-                      compactPlayer ||
-                      controlsSuppressed
-                  ? null
-                  : (details) =>
-                      _handleVerticalDrag(details, constraints.maxWidth),
+              onTap: surfaceInteractionEnabled ? _handlePlayerSurfaceTap : null,
+              onVerticalDragUpdate: surfaceGesturesEnabled
+                  ? (details) => _handleVerticalDrag(
+                        details,
+                        constraints.maxWidth,
+                      )
+                  : null,
               onVerticalDragEnd:
-                  _settingsExpanded || _loading || controlsSuppressed
-                      ? null
-                      : (_) => _clearGestureOverlay(),
+                  surfaceGesturesEnabled ? (_) => _clearGestureOverlay() : null,
               child: Stack(
                 fit: StackFit.expand,
                 children: [
                   const ColoredBox(color: Colors.black),
+                  for (final surfaceController in mountedLibVlcControllers)
+                    KeyedSubtree(
+                      key: ValueKey<int>(identityHashCode(surfaceController)),
+                      child: ExcludeSemantics(
+                        excluding: !identical(surfaceController, controller),
+                        child: IgnorePointer(
+                          ignoring: !identical(surfaceController, controller),
+                          child: Opacity(
+                            opacity: identical(
+                              surfaceController,
+                              visibleLibVlcController,
+                            )
+                                ? 1
+                                : 0.01,
+                            child: _VideoSurface(
+                              controller: surfaceController,
+                              fitMode: _fitMode,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  if (_mobileLibVlcSeekNeedsVisibleFallback)
+                    const _NativeSeekPreparationSurface(),
                   if (controller != null &&
-                      (initialized ||
-                          controller.requiresPlatformViewWarmup ||
-                          controller.engine == _NativePlaybackEngine.libvlc))
+                      controller.engine != _NativePlaybackEngine.libvlc &&
+                      (initialized || controller.requiresPlatformViewWarmup))
                     _VideoSurface(controller: controller, fitMode: _fitMode),
                   if (_loading && !initialized)
                     _NativePlayerLoading(
@@ -14648,6 +22435,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                       },
                       onRetry: _nativeProvidersExhausted
                           ? () {
+                              _beginLibVlcLaunchGeneration(
+                                reason: 'explicit_retry',
+                              );
                               _failureCloseGeneration += 1;
                               _providerIndex = 0;
                               _sourceIndex = 0;
@@ -14682,10 +22472,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                               ? () => unawaited(_showSourceSheet())
                               : null,
                     ),
-                  if (_loading && initialized)
+                  if (_loading && initialized && !_mobileLibVlcSeekPreparing)
                     _NativeRefreshOverlay(
                       message: _statusMessage ?? 'Refreshing...',
                       onBack: () => unawaited(_requestClose()),
+                    ),
+                  if (_mobileLibVlcSeekPreparing && initialized)
+                    _NativePlaybackStatusOverlay(
+                      label: _statusMessage ?? 'Seeking...',
                     ),
                   if (!_loading && _playbackWaitMessage != null)
                     _NativePlaybackStatusOverlay(label: _playbackWaitMessage!),
@@ -14706,7 +22500,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                         ),
                       ),
                     ),
-                  if (_subtitleText != null && !_loading)
+                  if (_subtitleText != null && seekControlsReady)
                     _SubtitleOverlay(
                       text: _subtitleText!,
                       fontSize: _subtitleFontSize,
@@ -14738,75 +22532,90 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                         ),
                       ),
                     ),
-                  if (!_loading &&
+                  if (seekControlsReady &&
                       _playbackWaitMessage == null &&
                       !controlsSuppressed &&
                       nativeControlsReady &&
                       !_pictureInPictureActive)
-                    _AnimatedPlayerControls(
-                      visible: _controlsVisible && nativeControlsReady,
-                      child: _NativePlayerControls(
-                        title: _title,
-                        nextEpisodeLabel: _nextEpisodeLabel,
-                        controller: controller,
-                        fallbackDuration: fallbackDuration,
-                        fallbackPosition: fallbackPosition,
-                        skipSegment: skipSegment,
-                        locked: _locked,
-                        liveMode: _isLiveTvMode,
-                        buffering: initialized &&
-                            controller!.isBuffering &&
-                            !_recoveringFromStall,
-                        onBack: () {
-                          unawaited(_requestClose());
-                        },
-                        onNextEpisode: _nextEpisodeLabel == null
-                            ? null
-                            : () {
-                                DiagnosticLog.add(
-                                  'native next episode pressed label="$_nextEpisodeLabel"',
-                                );
-                                unawaited(_openNextEpisodeInPlace());
-                              },
-                        onPlayPause: _togglePlayback,
-                        seekStepSeconds: _seekStepSeconds.round(),
-                        onSeekBackward: () => _seekBy(
-                          Duration(seconds: -_seekStepSeconds.round()),
+                    KeyedSubtree(
+                      key: hudTransportMountOwner.activePlayerBoundsKey,
+                      child: _AnimatedPlayerControls(
+                        key: ValueKey<int>(_hudRevealGeneration),
+                        visible: _controlsVisible && nativeControlsReady,
+                        child: _NativePlayerControls(
+                          title: _title,
+                          accentColor: _playerAccent(context),
+                          controlsVisible:
+                              _controlsVisible && nativeControlsReady,
+                          nextEpisodeLabel: _nextEpisodeLabel,
+                          controller: controller,
+                          bufferedPositionOverride:
+                              _libVlcContinuousTsBufferedPosition,
+                          fallbackDuration: fallbackDuration,
+                          fallbackPosition: fallbackPosition,
+                          skipSegment: skipSegment,
+                          locked: _locked,
+                          liveMode: _isLiveTvMode,
+                          buffering: initialized &&
+                              controller!.isBuffering &&
+                              !_recoveringFromStall,
+                          onBack: () {
+                            unawaited(_requestClose());
+                          },
+                          onNextEpisode: _nextEpisodeLabel == null
+                              ? null
+                              : () {
+                                  DiagnosticLog.add(
+                                    'native next episode pressed label="$_nextEpisodeLabel"',
+                                  );
+                                  unawaited(_openNextEpisodeInPlace());
+                                },
+                          onPlayPause: _togglePlayback,
+                          seekStepSeconds: _seekStepSeconds.round(),
+                          onSeekBackward: () => _seekBy(
+                            Duration(seconds: -_seekStepSeconds.round()),
+                          ),
+                          onSeekForward: () => _seekBy(
+                            Duration(seconds: _seekStepSeconds.round()),
+                          ),
+                          onSeekToFraction: _seekToFraction,
+                          onSkipSegment: skipSegment == null
+                              ? null
+                              : () => unawaited(_skipToSegment(skipSegment)),
+                          onToggleLock: _toggleLock,
+                          onEnterPip: _handlePictureInPictureButton,
+                          onOpenCast: _openScreencast,
+                          pipSupported: _canEnterSystemPictureInPicture(),
+                          sourceSelectionAvailable: _activeSources.length > 1,
+                          onSourcePressed: _showSourceSheet,
+                          sourceActionLabel: _sourceActionLabel(),
+                          sourceIndicator: _sourceIndicatorLabel(),
+                          qualityLabel: _qualityControlLabel(
+                            _usingGlobalOverrides,
+                            _qualityPreferenceMode,
+                            _preferredQuality,
+                          ),
+                          onQualityPressed: _showQualitySheet,
+                          speedLabel: _speedLabel(_playbackSpeed),
+                          onSpeedPressed: _showSpeedSheet,
+                          fitMode: _fitMode,
+                          onFitPressed: _showFitSheet,
+                          onReloadPressed: _reloadCurrentSource,
+                          settingsExpanded: _settingsExpanded,
+                          limitedSettingsMode: _usingGlobalOverrides,
+                          onToggleSettings: _toggleSettingsPack,
+                          subtitlesAvailable: _subtitles.isNotEmpty,
+                          subtitlesEnabled: _activeSubtitle != null,
+                          onSubtitlePressed: _showSubtitleSheet,
+                          compactMode: compactPlayer,
+                          pictureInPictureActive: _pictureInPictureActive,
+                          hudTransportMountOwner: hudTransportMountOwner,
+                          onHudTransportControlShown: (slot) =>
+                              _handleHudTransportAnimationCompleted(
+                            hudTransportMountOwner,
+                            slot,
+                          ),
                         ),
-                        onSeekForward: () => _seekBy(
-                          Duration(seconds: _seekStepSeconds.round()),
-                        ),
-                        onSeekToFraction: _seekToFraction,
-                        onSkipSegment: skipSegment == null
-                            ? null
-                            : () => unawaited(_skipToSegment(skipSegment)),
-                        onToggleLock: _toggleLock,
-                        onEnterPip: _handlePictureInPictureButton,
-                        onOpenCast: _openScreencast,
-                        pipSupported: _canEnterSystemPictureInPicture(),
-                        sourceSelectionAvailable: _activeSources.length > 1,
-                        onSourcePressed: _showSourceSheet,
-                        sourceActionLabel: _sourceActionLabel(),
-                        sourceIndicator: _sourceIndicatorLabel(),
-                        qualityLabel: _qualityControlLabel(
-                          _usingGlobalOverrides,
-                          _qualityPreferenceMode,
-                          _preferredQuality,
-                        ),
-                        onQualityPressed: _showQualitySheet,
-                        speedLabel: _speedLabel(_playbackSpeed),
-                        onSpeedPressed: _showSpeedSheet,
-                        fitMode: _fitMode,
-                        onFitPressed: _showFitSheet,
-                        onReloadPressed: _reloadCurrentSource,
-                        settingsExpanded: _settingsExpanded,
-                        limitedSettingsMode: _usingGlobalOverrides,
-                        onToggleSettings: _toggleSettingsPack,
-                        subtitlesAvailable: _subtitles.isNotEmpty,
-                        subtitlesEnabled: _activeSubtitle != null,
-                        onSubtitlePressed: _showSubtitleSheet,
-                        compactMode: compactPlayer,
-                        pictureInPictureActive: _pictureInPictureActive,
                       ),
                     ),
                   if (_gestureLabel != null)
@@ -14831,6 +22640,188 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       ),
     );
   }
+}
+
+class _NowPlayingTitleReveal extends StatefulWidget {
+  const _NowPlayingTitleReveal({
+    required this.rawTitle,
+    required this.accentColor,
+    required this.visible,
+    required this.compact,
+  });
+
+  final String rawTitle;
+  final Color accentColor;
+  final bool visible;
+  final bool compact;
+
+  @override
+  State<_NowPlayingTitleReveal> createState() => _NowPlayingTitleRevealState();
+}
+
+class _NowPlayingTitleRevealState extends State<_NowPlayingTitleReveal> {
+  Timer? _titleTimer;
+  bool _labelVisible = false;
+  bool _titleVisible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncVisibility();
+  }
+
+  @override
+  void didUpdateWidget(covariant _NowPlayingTitleReveal oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.visible != widget.visible ||
+        oldWidget.rawTitle != widget.rawTitle) {
+      _syncVisibility();
+    }
+  }
+
+  @override
+  void dispose() {
+    _titleTimer?.cancel();
+    super.dispose();
+  }
+
+  void _syncVisibility() {
+    _titleTimer?.cancel();
+    if (!widget.visible) {
+      _labelVisible = false;
+      _titleVisible = false;
+      return;
+    }
+    _labelVisible = true;
+    _titleVisible = false;
+    _titleTimer = Timer(const Duration(milliseconds: 120), () {
+      if (!mounted) return;
+      setState(() => _titleVisible = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final split = _splitNowPlayingTitle(widget.rawTitle);
+    final titleStyle = Theme.of(context).textTheme.titleLarge?.copyWith(
+      color: Colors.white,
+      fontWeight: FontWeight.w900,
+      fontSize: widget.compact ? 15 : 18,
+      height: 1.08,
+      shadows: [
+        Shadow(
+          color: Colors.black.withValues(alpha: 0.72),
+          blurRadius: 8,
+        ),
+        Shadow(
+          color: Colors.black.withValues(alpha: 0.36),
+          blurRadius: 2,
+          offset: const Offset(0, 1),
+        ),
+      ],
+    );
+    return IgnorePointer(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _NowPlayingRevealLine(
+            visible: _labelVisible,
+            delayOffset: -0.12,
+            child: Text(
+              'NOW PLAYING',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: widget.accentColor,
+                fontSize: widget.compact ? 8 : 10,
+                fontWeight: FontWeight.w900,
+                height: 1.0,
+                shadows: [
+                  Shadow(
+                    color: Colors.black.withValues(alpha: 0.65),
+                    blurRadius: 8,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 3),
+          _NowPlayingRevealLine(
+            visible: _titleVisible,
+            delayOffset: 0.12,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    split.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: titleStyle,
+                  ),
+                ),
+                if (split.episodeLabel != null) ...[
+                  const SizedBox(width: 7),
+                  Text(
+                    split.episodeLabel!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: titleStyle?.copyWith(
+                      color: Colors.white.withValues(alpha: 0.82),
+                      fontSize: widget.compact ? 12 : 14,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NowPlayingRevealLine extends StatelessWidget {
+  const _NowPlayingRevealLine({
+    required this.visible,
+    required this.delayOffset,
+    required this.child,
+  });
+
+  final bool visible;
+  final double delayOffset;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      opacity: visible ? 1 : 0,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+      child: AnimatedSlide(
+        offset: visible ? Offset.zero : Offset(0, delayOffset),
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        child: child,
+      ),
+    );
+  }
+}
+
+({String title, String? episodeLabel}) _splitNowPlayingTitle(String rawTitle) {
+  final title = rawTitle.trim();
+  if (title.isEmpty) return (title: 'Now playing', episodeLabel: null);
+  final match =
+      RegExp(r'\s+(S\d+\s*E\d+)$', caseSensitive: false).firstMatch(title);
+  if (match == null) return (title: title, episodeLabel: null);
+  final episodeLabel = match.group(1)?.replaceAll(RegExp(r'\s+'), ' ');
+  final cleanTitle = title.substring(0, match.start).trim();
+  if (cleanTitle.isEmpty || episodeLabel == null) {
+    return (title: title, episodeLabel: null);
+  }
+  return (title: cleanTitle, episodeLabel: episodeLabel.toUpperCase());
 }
 
 String _speedLabel(double value) {
@@ -14890,7 +22881,7 @@ int _normalizedPlaybackQualityHeight(int height) {
   if (height >= 220 && height <= 285) return 240;
   if (height >= 320 && height <= 390) return 360;
   if (height >= 430 && height <= 505) return 480;
-  if (height >= 520 && height <= 570) return 540;
+  if (height >= 520 && height <= 570) return 480;
   if (height >= 640 && height <= 820) return 720;
   if (height >= 1000 && height <= 1120) return 1080;
   if (height >= 1320 && height <= 1500) return 1440;
@@ -15064,6 +23055,29 @@ String? _sourceClassDisplayLabel(PlaybackSource source) {
   };
 }
 
+String _sourceTransportDisplayLabel(PlaybackSource? source) {
+  if (source == null) return 'Stream';
+  if (mobileIsHlsSourceDescriptor(source)) return 'HLS';
+  final type = (source.type ?? '').trim().toLowerCase();
+  final url = source.url.trim().toLowerCase();
+  if (type == 'mp4' ||
+      type == 'video/mp4' ||
+      type == 'application/mp4' ||
+      url.contains('.mp4')) {
+    return 'MP4';
+  }
+  return 'Stream';
+}
+
+String _sourceTransportGroupDisplayLabel(
+  Iterable<PlaybackSource> sources,
+) {
+  final labels = sources.map(_sourceTransportDisplayLabel).toSet();
+  if (labels.isEmpty) return 'Stream';
+  if (labels.length == 1) return labels.first;
+  return 'Mixed formats';
+}
+
 bool _nativeSourceClassIsPlayable(PlaybackSource source) {
   return AppState.playbackSourceClassAllowedForNative(source.sourceClass);
 }
@@ -15117,30 +23131,158 @@ bool _isPublicIptvSource(PlaybackSource source) {
   return source.providerId.trim().toLowerCase() == 'public-iptv';
 }
 
-class _AnimatedPlayerControls extends StatelessWidget {
-  const _AnimatedPlayerControls({required this.visible, required this.child});
+class _AnimatedPlayerControls extends StatefulWidget {
+  const _AnimatedPlayerControls({
+    super.key,
+    required this.visible,
+    required this.child,
+  });
 
   final bool visible;
   final Widget child;
 
   @override
+  State<_AnimatedPlayerControls> createState() =>
+      _AnimatedPlayerControlsState();
+}
+
+class _AnimatedPlayerControlsState extends State<_AnimatedPlayerControls> {
+  Timer? _chromeHideTimer;
+  late bool _chromeVisible;
+
+  @override
+  void initState() {
+    super.initState();
+    _chromeVisible = widget.visible;
+  }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedPlayerControls oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.visible == oldWidget.visible) return;
+    _chromeHideTimer?.cancel();
+    if (widget.visible) {
+      setState(() => _chromeVisible = true);
+      return;
+    }
+    _chromeHideTimer = Timer(const Duration(milliseconds: 240), () {
+      if (!mounted || widget.visible) return;
+      setState(() => _chromeVisible = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _chromeHideTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final curve = visible ? Curves.easeOutCubic : Curves.easeInCubic;
-    final duration = Duration(milliseconds: visible ? 140 : 210);
+    final curve = _chromeVisible ? Curves.easeOutCubic : Curves.easeInCubic;
+    final duration = Duration(milliseconds: _chromeVisible ? 140 : 180);
     return IgnorePointer(
-      ignoring: !visible,
+      ignoring: !widget.visible,
       child: AnimatedOpacity(
-        opacity: visible ? 1 : 0,
+        opacity: _chromeVisible ? 1 : 0,
         duration: duration,
         curve: curve,
-        child: child,
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+class _StagedHudControlReveal extends StatefulWidget {
+  const _StagedHudControlReveal({
+    required this.visible,
+    required this.delay,
+    required this.hideDelay,
+    required this.beginOffset,
+    required this.child,
+    this.onShown,
+  });
+
+  final bool visible;
+  final Duration delay;
+  final Duration hideDelay;
+  final Offset beginOffset;
+  final Widget child;
+  final VoidCallback? onShown;
+
+  @override
+  State<_StagedHudControlReveal> createState() =>
+      _StagedHudControlRevealState();
+}
+
+class _StagedHudControlRevealState extends State<_StagedHudControlReveal> {
+  Timer? _revealTimer;
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleVisibility(widget.visible);
+  }
+
+  @override
+  void didUpdateWidget(covariant _StagedHudControlReveal oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.visible == oldWidget.visible) return;
+    _scheduleVisibility(widget.visible);
+  }
+
+  void _scheduleVisibility(bool visible) {
+    _revealTimer?.cancel();
+    final delay = visible ? widget.delay : widget.hideDelay;
+    _revealTimer = Timer(delay, () {
+      if (!mounted) return;
+      if (widget.visible != visible) return;
+      setState(() => _visible = visible);
+    });
+  }
+
+  @override
+  void dispose() {
+    _revealTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ExcludeSemantics(
+      excluding: !widget.visible || !_visible,
+      child: IgnorePointer(
+        ignoring: !widget.visible || !_visible,
+        child: AnimatedOpacity(
+          opacity: _visible ? 1 : 0,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          onEnd: () {
+            if (_visible && widget.visible) widget.onShown?.call();
+          },
+          child: AnimatedSlide(
+            offset: _visible ? Offset.zero : widget.beginOffset,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            child: AnimatedScale(
+              scale: _visible ? 1 : 0.88,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutBack,
+              child: widget.child,
+            ),
+          ),
+        ),
       ),
     );
   }
 }
 
 class _VideoSurface extends StatelessWidget {
-  const _VideoSurface({required this.controller, required this.fitMode});
+  const _VideoSurface({
+    required this.controller,
+    required this.fitMode,
+  });
 
   final _NativePlaybackController controller;
   final VideoFitMode fitMode;
@@ -15157,8 +23299,32 @@ class _VideoSurface extends StatelessWidget {
     );
 
     return switch (fitMode) {
-      VideoFitMode.fit => Center(
-          child: AspectRatio(aspectRatio: displayAspectRatio, child: player),
+      VideoFitMode.fit => LayoutBuilder(
+          builder: (context, constraints) {
+            final viewportWidth = constraints.maxWidth;
+            final viewportHeight = constraints.maxHeight;
+            if (viewportWidth <= 0 || viewportHeight <= 0) {
+              return const SizedBox.shrink();
+            }
+            var fitHeight = viewportHeight;
+            final viewportRatio = viewportWidth / viewportHeight;
+            final platformMedia3 = controller.media3 != null;
+            if (platformMedia3 && viewportRatio > displayAspectRatio + 0.08) {
+              fitHeight = viewportHeight * 0.82;
+            }
+            final fitWidth = math.min(
+              viewportWidth,
+              fitHeight * displayAspectRatio,
+            );
+            final resolvedHeight = fitWidth / displayAspectRatio;
+            return Center(
+              child: SizedBox(
+                width: fitWidth,
+                height: resolvedHeight,
+                child: player,
+              ),
+            );
+          },
         ),
       VideoFitMode.fill => SizedBox.expand(
           child: ClipRect(
@@ -15221,11 +23387,30 @@ class _NativePlaybackSurface extends StatelessWidget {
     }
     final vlc = controller.vlc;
     if (vlc != null) {
+      controller.markPlatformSurfaceBuilt();
       return VlcPlayer(
+        key: ValueKey<int>(identityHashCode(vlc)),
         controller: vlc,
         aspectRatio: aspectRatio,
         placeholder: const ColoredBox(color: Colors.black),
         virtualDisplay: true,
+        onPlatformViewCreated: (viewId) {
+          DiagnosticLog.add(
+            'native libvlc lifecycle stage=platform_view_callback',
+          );
+          unawaited(
+            vlc.onPlatformViewCreated(viewId).then((_) {
+              DiagnosticLog.add(
+                'native libvlc lifecycle stage=platform_view_bound',
+              );
+            }).catchError((Object error) {
+              DiagnosticLog.add(
+                'native libvlc lifecycle stage=platform_view_bind_failed '
+                'error=${_safeDiagnosticError(error)}',
+              );
+            }),
+          );
+        },
       );
     }
     return const SizedBox.shrink();
@@ -15234,12 +23419,14 @@ class _NativePlaybackSurface extends StatelessWidget {
 
 class _CompactNativePlayerControls extends StatelessWidget {
   const _CompactNativePlayerControls({
+    required this.controlsVisible,
     required this.initialized,
     required this.playing,
     required this.liveMode,
     required this.position,
     required this.duration,
     required this.progress,
+    required this.bufferedProgress,
     required this.seekStepSeconds,
     required this.onBack,
     required this.onFullscreen,
@@ -15250,12 +23437,14 @@ class _CompactNativePlayerControls extends StatelessWidget {
     required this.pictureInPictureActive,
   });
 
+  final bool controlsVisible;
   final bool initialized;
   final bool playing;
   final bool liveMode;
   final Duration position;
   final Duration duration;
   final double progress;
+  final double? bufferedProgress;
   final int seekStepSeconds;
   final VoidCallback onBack;
   final VoidCallback onFullscreen;
@@ -15278,7 +23467,7 @@ class _CompactNativePlayerControls extends StatelessWidget {
         final iconSize = (sideButtonSize * 0.52).clamp(17.0, 23.0);
         final playIconSize = (playButtonSize * 0.65).clamp(27.0, 38.0);
         final progressInset = (width * 0.035).clamp(10.0, 16.0);
-        final progressTrackHeight = (height * 0.018).clamp(2.4, 4.0);
+        final progressTrackHeight = 6.0;
         final progressThumbRadius = (height * 0.032).clamp(4.5, 6.8);
         final timeFontSize = (shortest * 0.055).clamp(9.0, 12.0);
         final cornerButtonInsetX = (width * 0.038).clamp(12.0, 17.0);
@@ -15329,42 +23518,61 @@ class _CompactNativePlayerControls extends StatelessWidget {
               Positioned(
                 left: width * 0.18 - sideButtonSize / 2,
                 top: transportY - sideButtonSize / 2,
-                child: _MiniPipButton(
-                  icon: Icons.replay_10_rounded,
-                  onPressed: onSeekBackward,
-                  semanticLabel: 'Back $seekStepSeconds seconds',
-                  size: sideButtonSize,
-                  iconSize: iconSize,
-                  surfaceAlpha: 0.18,
-                  borderAlpha: 0.08,
+                child: _StagedHudControlReveal(
+                  visible: controlsVisible,
+                  delay: const Duration(milliseconds: 120),
+                  hideDelay: Duration.zero,
+                  beginOffset: const Offset(-0.14, 0),
+                  child: _MiniPipButton(
+                    icon: Icons.replay_10_rounded,
+                    onPressed: onSeekBackward,
+                    semanticLabel: 'Back $seekStepSeconds seconds',
+                    size: sideButtonSize,
+                    iconSize: iconSize,
+                    surfaceAlpha: 0.18,
+                    borderAlpha: 0.08,
+                  ),
                 ),
               ),
             Positioned(
               left: width * 0.50 - playButtonSize / 2,
               top: transportY - playButtonSize / 2,
-              child: _MiniPipButton(
-                icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                onPressed: initialized ? onPlayPause : null,
-                semanticLabel: playing ? 'Pause' : 'Play',
-                emphasized: true,
-                size: playButtonSize,
-                iconSize: playIconSize,
-                surfaceAlpha: 0.30,
-                borderAlpha: 0,
+              child: _StagedHudControlReveal(
+                visible: controlsVisible,
+                delay: Duration.zero,
+                hideDelay: const Duration(milliseconds: 120),
+                beginOffset: Offset.zero,
+                child: _MiniPipButton(
+                  icon:
+                      playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  onPressed: initialized ? onPlayPause : null,
+                  semanticLabel: playing ? 'Pause' : 'Play',
+                  emphasized: true,
+                  size: playButtonSize,
+                  iconSize: playIconSize,
+                  surfaceAlpha: 0.30,
+                  borderAlpha: 0,
+                ),
               ),
             ),
             if (!liveMode)
               Positioned(
                 left: width * 0.82 - sideButtonSize / 2,
                 top: transportY - sideButtonSize / 2,
-                child: _MiniPipButton(
-                  icon: Icons.forward_10_rounded,
-                  onPressed: onSeekForward,
-                  semanticLabel: 'Forward $seekStepSeconds seconds',
-                  size: sideButtonSize,
-                  iconSize: iconSize,
-                  surfaceAlpha: 0.18,
-                  borderAlpha: 0.08,
+                child: _StagedHudControlReveal(
+                  visible: controlsVisible,
+                  delay: const Duration(milliseconds: 120),
+                  hideDelay: Duration.zero,
+                  beginOffset: const Offset(0.14, 0),
+                  child: _MiniPipButton(
+                    icon: Icons.forward_10_rounded,
+                    onPressed: onSeekForward,
+                    semanticLabel: 'Forward $seekStepSeconds seconds',
+                    size: sideButtonSize,
+                    iconSize: iconSize,
+                    surfaceAlpha: 0.18,
+                    borderAlpha: 0.08,
+                  ),
                 ),
               ),
             if (!liveMode)
@@ -15374,6 +23582,7 @@ class _CompactNativePlayerControls extends StatelessWidget {
                 top: progressTop,
                 child: _MiniPipSeekBar(
                   progress: progress,
+                  bufferedProgress: bufferedProgress,
                   initialized: initialized,
                   onSeekToFraction: onSeekToFraction,
                   currentText: _formatDuration(position),
@@ -15393,6 +23602,7 @@ class _CompactNativePlayerControls extends StatelessWidget {
 class _MiniPipSeekBar extends StatelessWidget {
   const _MiniPipSeekBar({
     required this.progress,
+    required this.bufferedProgress,
     required this.initialized,
     required this.onSeekToFraction,
     required this.currentText,
@@ -15403,6 +23613,7 @@ class _MiniPipSeekBar extends StatelessWidget {
   });
 
   final double progress;
+  final double? bufferedProgress;
   final bool initialized;
   final ValueChanged<double> onSeekToFraction;
   final String currentText;
@@ -15414,6 +23625,10 @@ class _MiniPipSeekBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final effectiveProgress = progress.clamp(0.0, 1.0).toDouble();
+    final effectiveBufferedProgress = bufferedProgress?.clamp(
+      effectiveProgress,
+      1.0,
+    );
     final trackTop = thumbRadius;
     final labelTop = thumbRadius * 2 + 4;
     final height = labelTop + fontSize + 3;
@@ -15428,7 +23643,6 @@ class _MiniPipSeekBar extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final trackWidth = constraints.maxWidth;
-        final thumbLeft = (trackWidth * effectiveProgress) - thumbRadius;
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: (details) =>
@@ -15447,11 +23661,24 @@ class _MiniPipSeekBar extends StatelessWidget {
                   child: Container(
                     height: trackHeight,
                     decoration: BoxDecoration(
-                      color: Colors.white24,
+                      color: _playerUnbufferedTrackColor,
                       borderRadius: BorderRadius.circular(trackHeight),
                     ),
                   ),
                 ),
+                if (effectiveBufferedProgress != null)
+                  Positioned(
+                    left: 0,
+                    width: trackWidth * effectiveBufferedProgress,
+                    top: trackTop,
+                    child: Container(
+                      height: trackHeight,
+                      decoration: BoxDecoration(
+                        color: _playerBufferedTrackColor,
+                        borderRadius: BorderRadius.circular(trackHeight),
+                      ),
+                    ),
+                  ),
                 Positioned(
                   left: 0,
                   width: trackWidth * effectiveProgress,
@@ -15461,18 +23688,6 @@ class _MiniPipSeekBar extends StatelessWidget {
                     decoration: BoxDecoration(
                       color: _playerAccent(context),
                       borderRadius: BorderRadius.circular(trackHeight),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: thumbLeft.clamp(-thumbRadius, trackWidth - thumbRadius),
-                  top: trackTop + trackHeight / 2 - thumbRadius,
-                  child: Container(
-                    width: thumbRadius * 2,
-                    height: thumbRadius * 2,
-                    decoration: const BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
                     ),
                   ),
                 ),
@@ -15595,11 +23810,38 @@ class _MiniPipButton extends StatelessWidget {
   }
 }
 
+double? _trustedBufferedProgress({
+  required _NativePlaybackController controller,
+  required Duration bufferedPositionOverride,
+  required Duration duration,
+  required double watchedProgress,
+}) {
+  final hasBufferedPositionOverride = bufferedPositionOverride > Duration.zero;
+  final effectiveBufferedPosition = hasBufferedPositionOverride
+      ? bufferedPositionOverride
+      : controller.bufferedPosition;
+  if ((!controller.hasTrustedBufferedTimeline &&
+          !hasBufferedPositionOverride) ||
+      duration.inMilliseconds <= 0 ||
+      effectiveBufferedPosition <= Duration.zero) {
+    return null;
+  }
+  final bufferedProgress =
+      effectiveBufferedPosition.inMilliseconds / duration.inMilliseconds;
+  if (bufferedProgress <= watchedProgress) {
+    return null;
+  }
+  return bufferedProgress.clamp(watchedProgress, 1.0).toDouble();
+}
+
 class _NativePlayerControls extends StatelessWidget {
   const _NativePlayerControls({
     required this.title,
+    required this.accentColor,
+    required this.controlsVisible,
     required this.nextEpisodeLabel,
     required this.controller,
+    required this.bufferedPositionOverride,
     required this.fallbackDuration,
     required this.fallbackPosition,
     required this.skipSegment,
@@ -15637,11 +23879,16 @@ class _NativePlayerControls extends StatelessWidget {
     required this.onSubtitlePressed,
     required this.compactMode,
     required this.pictureInPictureActive,
+    required this.hudTransportMountOwner,
+    required this.onHudTransportControlShown,
   });
 
   final String title;
+  final Color accentColor;
+  final bool controlsVisible;
   final String? nextEpisodeLabel;
   final _NativePlaybackController? controller;
+  final Duration bufferedPositionOverride;
   final Duration fallbackDuration;
   final Duration fallbackPosition;
   final _PlayerSkipSegment? skipSegment;
@@ -15679,6 +23926,8 @@ class _NativePlayerControls extends StatelessWidget {
   final VoidCallback onSubtitlePressed;
   final bool compactMode;
   final bool pictureInPictureActive;
+  final NativeHudTransportMountOwner hudTransportMountOwner;
+  final ValueChanged<NativeHudTransportSlot> onHudTransportControlShown;
 
   @override
   Widget build(BuildContext context) {
@@ -15697,16 +23946,27 @@ class _NativePlayerControls extends StatelessWidget {
     final progress = duration.inMilliseconds <= 0
         ? 0.0
         : position.inMilliseconds / duration.inMilliseconds;
+    final watchedProgress = progress.clamp(0, 1).toDouble();
+    final bufferedProgress = controller == null
+        ? null
+        : _trustedBufferedProgress(
+            controller: controller!,
+            bufferedPositionOverride: bufferedPositionOverride,
+            duration: duration,
+            watchedProgress: watchedProgress,
+          );
     final padding = MediaQuery.paddingOf(context);
 
     if (compactMode) {
       return _CompactNativePlayerControls(
+        controlsVisible: controlsVisible,
         initialized: initialized,
         playing: playing,
         liveMode: liveMode,
         position: position,
         duration: duration,
-        progress: progress.clamp(0, 1).toDouble(),
+        progress: watchedProgress,
+        bufferedProgress: bufferedProgress,
         seekStepSeconds: seekStepSeconds,
         onBack: onBack,
         onFullscreen: onEnterPip,
@@ -15730,27 +23990,63 @@ class _NativePlayerControls extends StatelessWidget {
                 if (!liveMode)
                   Align(
                     alignment: const Alignment(-0.50, 0),
-                    child: _SeekButton(
-                      forward: false,
-                      seconds: seekStepSeconds,
-                      onPressed: onSeekBackward,
+                    child: _StagedHudControlReveal(
+                      visible: controlsVisible,
+                      delay: const Duration(milliseconds: 120),
+                      hideDelay: Duration.zero,
+                      beginOffset: const Offset(-0.14, 0),
+                      onShown: () => onHudTransportControlShown(
+                        NativeHudTransportSlot.leftSkip,
+                      ),
+                      child: KeyedSubtree(
+                        key: hudTransportMountOwner.leftSkipKey,
+                        child: _SeekButton(
+                          forward: false,
+                          seconds: seekStepSeconds,
+                          onPressed: onSeekBackward,
+                        ),
+                      ),
                     ),
                   ),
                 Align(
                   alignment: Alignment.center,
-                  child: _MainPlayButton(
-                    playing: playing,
-                    enabled: initialized,
-                    onPressed: onPlayPause,
+                  child: _StagedHudControlReveal(
+                    visible: controlsVisible,
+                    delay: Duration.zero,
+                    hideDelay: const Duration(milliseconds: 120),
+                    beginOffset: Offset.zero,
+                    onShown: () => onHudTransportControlShown(
+                      NativeHudTransportSlot.centerPlayPause,
+                    ),
+                    child: KeyedSubtree(
+                      key: hudTransportMountOwner.centerPlayPauseKey,
+                      child: _MainPlayButton(
+                        playing: playing,
+                        enabled: initialized,
+                        onPressed: onPlayPause,
+                      ),
+                    ),
                   ),
                 ),
                 if (!liveMode)
                   Align(
                     alignment: const Alignment(0.50, 0),
-                    child: _SeekButton(
-                      forward: true,
-                      seconds: seekStepSeconds,
-                      onPressed: onSeekForward,
+                    child: _StagedHudControlReveal(
+                      visible: controlsVisible,
+                      delay: const Duration(milliseconds: 120),
+                      hideDelay: Duration.zero,
+                      beginOffset: const Offset(0.14, 0),
+                      onShown: () => onHudTransportControlShown(
+                        NativeHudTransportSlot.rightSkip,
+                      ),
+                      child: KeyedSubtree(
+                        key: hudTransportMountOwner.rightSkipKey,
+                        child: _SeekButton(
+                          forward: true,
+                          seconds: seekStepSeconds,
+                          onPressed: onSeekForward,
+                        ),
+                      ),
                     ),
                   ),
               ],
@@ -15794,34 +24090,11 @@ class _NativePlayerControls extends StatelessWidget {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Flexible(
-                                child: Text(
-                                  title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  textAlign: TextAlign.center,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .titleLarge
-                                      ?.copyWith(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w900,
-                                    fontSize: 18,
-                                    shadows: [
-                                      Shadow(
-                                        color: Colors.black.withValues(
-                                          alpha: 0.72,
-                                        ),
-                                        blurRadius: 8,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black.withValues(
-                                          alpha: 0.36,
-                                        ),
-                                        blurRadius: 2,
-                                        offset: const Offset(0, 1),
-                                      ),
-                                    ],
-                                  ),
+                                child: _NowPlayingTitleReveal(
+                                  rawTitle: title,
+                                  accentColor: accentColor,
+                                  visible: controlsVisible,
+                                  compact: false,
                                 ),
                               ),
                               if (buffering) ...[
@@ -15934,38 +24207,68 @@ class _NativePlayerControls extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.center,
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                _SourceActionButton(
-                                  onPressed: onSourcePressed,
-                                  enabled: sourceSelectionAvailable,
-                                  label: sourceActionLabel,
-                                  detailLabel: sourceIndicator,
+                                _StagedHudControlReveal(
+                                  visible: controlsVisible,
+                                  delay: const Duration(milliseconds: 240),
+                                  hideDelay: Duration.zero,
+                                  beginOffset: const Offset(0, 0.10),
+                                  child: _SourceActionButton(
+                                    onPressed: onSourcePressed,
+                                    enabled: sourceSelectionAvailable,
+                                    label: sourceActionLabel,
+                                    detailLabel: sourceIndicator,
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
-                                _SettingsControlPack(
-                                  expanded: settingsExpanded,
-                                  onToggleSettings: onToggleSettings,
+                                _StagedHudControlReveal(
+                                  visible: controlsVisible,
+                                  delay: const Duration(milliseconds: 180),
+                                  hideDelay: const Duration(milliseconds: 60),
+                                  beginOffset: const Offset(0, 0.10),
+                                  child: _SettingsControlPack(
+                                    expanded: settingsExpanded,
+                                    onToggleSettings: onToggleSettings,
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
-                                _PlayerRoundButton(
-                                  icon: Icons.cast_rounded,
-                                  semanticLabel: 'Cast',
-                                  onPressed: onOpenCast,
-                                  size: 44,
+                                _StagedHudControlReveal(
+                                  visible: controlsVisible,
+                                  delay: const Duration(milliseconds: 120),
+                                  hideDelay: const Duration(milliseconds: 120),
+                                  beginOffset: const Offset(0, 0.10),
+                                  child: _PlayerRoundButton(
+                                    icon: Icons.cast_rounded,
+                                    semanticLabel: 'Cast',
+                                    onPressed: onOpenCast,
+                                    size: 44,
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
-                                _PlayerRoundButton(
-                                  icon: Icons.picture_in_picture_alt_rounded,
-                                  semanticLabel: 'Picture in picture',
-                                  onPressed: onEnterPip,
-                                  enabled: pipSupported,
-                                  size: 44,
+                                _StagedHudControlReveal(
+                                  visible: controlsVisible,
+                                  delay: const Duration(milliseconds: 60),
+                                  hideDelay: const Duration(milliseconds: 180),
+                                  beginOffset: const Offset(0, 0.10),
+                                  child: _PlayerRoundButton(
+                                    icon: Icons.picture_in_picture_alt_rounded,
+                                    semanticLabel: 'Picture in picture',
+                                    onPressed: onEnterPip,
+                                    enabled: pipSupported,
+                                    size: 44,
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
-                                _PlayerRoundButton(
-                                  icon: Icons.lock_open_rounded,
-                                  semanticLabel: 'Lock controls',
-                                  onPressed: onToggleLock,
-                                  size: 44,
+                                _StagedHudControlReveal(
+                                  visible: controlsVisible,
+                                  delay: Duration.zero,
+                                  hideDelay: const Duration(milliseconds: 240),
+                                  beginOffset: const Offset(0, 0.10),
+                                  child: _PlayerRoundButton(
+                                    icon: Icons.lock_open_rounded,
+                                    semanticLabel: 'Lock controls',
+                                    onPressed: onToggleLock,
+                                    size: 44,
+                                  ),
                                 ),
                               ],
                             ),
@@ -15998,23 +24301,25 @@ class _NativePlayerControls extends StatelessWidget {
                           Expanded(
                             child: SliderTheme(
                               data: SliderTheme.of(context).copyWith(
-                                trackHeight: 4,
-                                thumbShape: const RoundSliderThumbShape(
-                                  enabledThumbRadius: 7,
-                                ),
+                                trackHeight: 6,
+                                trackShape:
+                                    const _UniformBufferedSliderTrackShape(),
+                                thumbShape: SliderComponentShape.noThumb,
                                 overlayShape: const RoundSliderOverlayShape(
                                   overlayRadius: 15,
                                 ),
                                 activeTrackColor: _playerAccent(context),
-                                inactiveTrackColor: Colors.white24,
-                                thumbColor: Colors.white,
+                                inactiveTrackColor: _playerUnbufferedTrackColor,
+                                secondaryActiveTrackColor:
+                                    _playerBufferedTrackColor,
                                 overlayColor: _playerAccentOverlay(
                                   context,
                                   0.20,
                                 ),
                               ),
                               child: Slider(
-                                value: progress.clamp(0, 1).toDouble(),
+                                value: watchedProgress,
+                                secondaryTrackValue: bufferedProgress,
                                 onChanged:
                                     initialized ? onSeekToFraction : null,
                               ),
@@ -16035,6 +24340,39 @@ class _NativePlayerControls extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _UniformBufferedSliderTrackShape extends RoundedRectSliderTrackShape {
+  const _UniformBufferedSliderTrackShape();
+
+  @override
+  void paint(
+    PaintingContext context,
+    Offset offset, {
+    required RenderBox parentBox,
+    required SliderThemeData sliderTheme,
+    required Animation<double> enableAnimation,
+    required TextDirection textDirection,
+    required Offset thumbCenter,
+    Offset? secondaryOffset,
+    bool isDiscrete = false,
+    bool isEnabled = false,
+    double additionalActiveTrackHeight = 2,
+  }) {
+    super.paint(
+      context,
+      offset,
+      parentBox: parentBox,
+      sliderTheme: sliderTheme,
+      enableAnimation: enableAnimation,
+      textDirection: textDirection,
+      thumbCenter: thumbCenter,
+      secondaryOffset: secondaryOffset,
+      isDiscrete: isDiscrete,
+      isEnabled: isEnabled,
+      additionalActiveTrackHeight: 0,
     );
   }
 }
@@ -16710,8 +25048,8 @@ class _SourceOption extends StatelessWidget {
     final language = _sourceLanguageLabel(source);
     final languageLabel = language ?? 'Not tagged';
     final mirrorCount = entry.variants.length;
-    final groupedSourcesLabel =
-        mirrorCount > 1 ? ' - $mirrorCount mirrors' : '';
+    final mirrorLabel = mirrorCount == 1 ? '1 mirror' : '$mirrorCount mirrors';
+    final transport = _sourceTransportGroupDisplayLabel(entry.variants);
     final unsupportedReason = enabled ? '' : _sourceClassDisabledReason(source);
 
     return Column(
@@ -16719,16 +25057,16 @@ class _SourceOption extends StatelessWidget {
       children: [
         JuicrSheetOptionTile(
           padding: const EdgeInsets.only(top: 8),
-          label: _sourceDisplayLabel(source, index: index, total: total),
-          subtitle: enabled
-              ? mirrorCount > 1
-                  ? 'Audio: $languageLabel - $mirrorCount mirrors available below'
-                  : 'Audio: $languageLabel$groupedSourcesLabel'
-              : unsupportedReason,
+          label:
+              '${_sourceDisplayLabel(source, index: index, total: total)} · $mirrorLabel · $transport',
+          subtitle: enabled ? 'Audio: $languageLabel' : unsupportedReason,
           selected: selected && mirrorCount <= 1,
           enabled: enabled,
-          onTap:
-              enabled ? () => Navigator.of(context).pop(playableSource) : null,
+          onTap: enabled
+              ? () => Navigator.of(context).pop(
+                    selected && mirrorCount <= 1 ? null : playableSource,
+                  )
+              : null,
         ),
         if (mirrorCount > 1)
           Padding(
@@ -16772,6 +25110,7 @@ class _MirrorOption extends StatelessWidget {
     final enabled = _nativeSourceClassIsPlayable(source);
     final language = _sourceLanguageLabel(source);
     final parts = <String>[_qualityLabel(source)];
+    parts.add(_sourceTransportDisplayLabel(source));
     parts.add('Audio: ${language ?? 'Not tagged'}');
     final sourceClassLabel = _sourceClassDisplayLabel(source);
     if (sourceClassLabel != null) parts.add(sourceClassLabel);
@@ -16782,7 +25121,9 @@ class _MirrorOption extends StatelessWidget {
           enabled ? parts.join(' - ') : _sourceClassDisabledReason(source),
       selected: selected,
       enabled: enabled,
-      onTap: enabled ? () => Navigator.of(context).pop(source) : null,
+      onTap: enabled
+          ? () => Navigator.of(context).pop(selected ? null : source)
+          : null,
     );
   }
 }
@@ -18809,8 +27150,8 @@ class _NativeRefreshOverlay extends StatelessWidget {
               center: Alignment.center,
               radius: 0.72,
               colors: [
-                Colors.black.withValues(alpha: 0.16),
-                Colors.black.withValues(alpha: 0.62),
+                Colors.black,
+                Colors.black,
               ],
             ),
           ),
@@ -18835,6 +27176,17 @@ class _NativeRefreshOverlay extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _NativeSeekPreparationSurface extends StatelessWidget {
+  const _NativeSeekPreparationSurface();
+
+  @override
+  Widget build(BuildContext context) {
+    return const IgnorePointer(
+      child: ColoredBox(color: Color(0xFF18211D)),
     );
   }
 }
@@ -19331,16 +27683,39 @@ class _GestureHintOverlay extends StatelessWidget {
   }
 }
 
-class _GestureHintRail extends StatelessWidget {
+class _GestureHintRail extends StatefulWidget {
   const _GestureHintRail({required this.icon, required this.label});
 
   final IconData icon;
   final String label;
 
   @override
+  State<_GestureHintRail> createState() => _GestureHintRailState();
+}
+
+class _GestureHintRailState extends State<_GestureHintRail> {
+  Timer? _iconRevealTimer;
+  bool _iconVisible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _iconRevealTimer = Timer(const Duration(milliseconds: 120), () {
+      if (!mounted) return;
+      setState(() => _iconVisible = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _iconRevealTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Semantics(
-      label: '$label gesture hint',
+      label: '${widget.label} gesture hint',
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -19350,21 +27725,31 @@ class _GestureHintRail extends StatelessWidget {
             size: 22,
           ),
           const SizedBox(height: 4),
-          Container(
-            width: 52,
-            height: 52,
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.46),
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.30),
-                  blurRadius: 14,
-                  offset: const Offset(0, 6),
+          AnimatedOpacity(
+            opacity: _iconVisible ? 1 : 0,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            child: AnimatedScale(
+              scale: _iconVisible ? 1 : 0.86,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutBack,
+              child: Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.46),
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.30),
+                      blurRadius: 14,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
                 ),
-              ],
+                child: Icon(widget.icon, color: Colors.white, size: 24),
+              ),
             ),
-            child: Icon(icon, color: Colors.white, size: 24),
           ),
           const SizedBox(height: 4),
           const Icon(
@@ -19488,7 +27873,11 @@ Duration? _parseSubtitleTime(String raw) {
 
 bool _isTemporaryResolverBlock(Object error) {
   final text = error.toString().toLowerCase();
-  return text.contains('rate limit') ||
+  return error is StreamApiTemporaryBlockException ||
+      text.contains('streamapitemporaryblockexception') ||
+      text.contains('temporary_block') ||
+      text.contains('rate limit') ||
+      text.contains('retry after') ||
       text.contains('temporarily blocked') ||
       text.contains('taking longer than usual') ||
       text.contains('too many requests');
