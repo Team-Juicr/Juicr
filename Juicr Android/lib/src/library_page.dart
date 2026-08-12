@@ -2616,6 +2616,10 @@ class _LibrarySectionCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final compactLandscape = JuicrVisual.compactLandscape(context);
+    void openSectionPicker() {
+      unawaited(_showSectionPicker(context));
+    }
+
     return Card(
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
@@ -2630,10 +2634,11 @@ class _LibrarySectionCard extends StatelessWidget {
         label: 'Library section',
         value: selectedSection.label,
         hint: 'Choose library section',
+        onTap: openSectionPicker,
         child: ExcludeSemantics(
           child: InkWell(
             borderRadius: BorderRadius.circular(JuicrVisual.cardRadius),
-            onTap: () => _showSectionPicker(context),
+            onTap: openSectionPicker,
             child: Padding(
               padding: EdgeInsets.symmetric(
                 horizontal: compactLandscape ? 12 : 14,
@@ -2727,6 +2732,7 @@ class _LibrarySectionCard extends StatelessWidget {
         );
       },
     );
+    if (!context.mounted) return;
     if (selected != null && selected != selectedSection) onChanged(selected);
   }
 }
@@ -2941,25 +2947,26 @@ class _LibraryPoster extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final cacheWidth = _libraryImageCacheWidth(context, 180);
+    void openDetails() {
+      unawaited(
+        JuicrAdPolicy.maybeShowInterstitial(reason: 'library_title_open'),
+      );
+      Navigator.of(context).push(
+        AppPageRoute<void>(builder: (_) => DetailsPage(item: item)),
+      );
+    }
+
     return AppReveal(
       delay: Duration(milliseconds: 22 * (index % 12)),
       child: Semantics(
         button: true,
         label: 'Open ${item.name}',
         hint: 'Show details',
+        onTap: openDetails,
         child: ExcludeSemantics(
           child: InkWell(
             borderRadius: BorderRadius.circular(8),
-            onTap: () {
-              unawaited(
-                JuicrAdPolicy.maybeShowInterstitial(
-                  reason: 'library_title_open',
-                ),
-              );
-              Navigator.of(context).push(
-                AppPageRoute<void>(builder: (_) => DetailsPage(item: item)),
-              );
-            },
+            onTap: openDetails,
             child: item.type.isLive
                 ? _LibraryLiveChannel(item: item)
                 : JuicrVisual.compactLandscape(context)

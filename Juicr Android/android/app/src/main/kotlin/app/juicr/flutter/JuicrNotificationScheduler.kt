@@ -1,9 +1,11 @@
 package app.juicr.flutter
 
+import android.Manifest
 import android.app.job.JobInfo
 import android.app.job.JobScheduler
 import android.content.ComponentName
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 
 object JuicrNotificationScheduler {
@@ -34,12 +36,19 @@ object JuicrNotificationScheduler {
     }
 
     fun shouldSchedule(context: Context): Boolean {
-        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean("notificationsEnabled", false)
+        if (!context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getBoolean("notificationsEnabled", false)
+        ) {
+            return false
+        }
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
     }
 
     fun schedule(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP || !shouldSchedule(context)) {
+            cancel(context)
             return
         }
         val scheduler = context.getSystemService(JobScheduler::class.java) ?: return
