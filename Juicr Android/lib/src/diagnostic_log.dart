@@ -9,6 +9,101 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'app_state.dart';
 import 'visual_style.dart';
 
+Map<String, Object?> selectLatestMainAndroidExitInfo(Iterable<Object?> raw) {
+  final entries = raw
+      .whereType<Map<Object?, Object?>>()
+      .where((entry) => entry['processOwnership'] == 'main_app')
+      .map(
+        (entry) => entry.map(
+          (key, value) => MapEntry<String, Object?>(key.toString(), value),
+        ),
+      )
+      .toList()
+    ..sort((a, b) {
+      final aTimestamp = int.tryParse((a['timestamp'] ?? '').toString()) ?? 0;
+      final bTimestamp = int.tryParse((b['timestamp'] ?? '').toString()) ?? 0;
+      return bTimestamp.compareTo(aTimestamp);
+    });
+  return entries.isEmpty ? const <String, Object?>{} : entries.first;
+}
+
+String classifyDiagnosticPreviousSessionExit({
+  required bool previousWasRunning,
+  required bool previousInstallChanged,
+  required String androidReason,
+}) {
+  if (!previousWasRunning) return 'clean';
+  final classified = switch (androidReason) {
+    'crash' => 'app_crash',
+    'crash_native' => 'app_native_crash',
+    'anr' => 'app_anr',
+    'low_memory' => 'android_low_memory_kill',
+    'user_requested' || 'user_stopped' => 'android_user_or_system_stop',
+    'dependency_died' => 'android_dependency_died',
+    'permission_change' => 'android_permission_change',
+    'signaled' => 'process_signaled',
+    'exit_self' => 'app_exit_self',
+    'initialization_failure' => 'app_initialization_failure',
+    'excessive_resource_usage' => 'android_excessive_resource_usage',
+    'other' => 'android_other',
+    'unavailable' => 'android_exit_identity_unavailable',
+    _ => 'app_or_system_unknown',
+  };
+  if (previousInstallChanged &&
+      classified != 'app_crash' &&
+      classified != 'app_native_crash' &&
+      classified != 'app_anr') {
+    return 'android_app_update_or_reinstall';
+  }
+  return classified;
+}
+
+bool shouldPromptForDiagnosticPreviousExit(String exit) {
+  return switch (exit) {
+    'clean' => false,
+    'android_app_update_or_reinstall' => false,
+    'android_low_memory_kill' => false,
+    'android_user_or_system_stop' => false,
+    'android_permission_change' => false,
+    'app_exit_self' => false,
+    'android_exit_identity_unavailable' => false,
+    _ => true,
+  };
+}
+
+String acknowledgedDiagnosticAndroidExitFingerprint({
+  required String selectedEventFingerprint,
+}) {
+  final normalized = selectedEventFingerprint.trim().toLowerCase();
+  return RegExp(r'^[0-9a-f]{64}$').hasMatch(normalized) ? normalized : '';
+}
+
+bool shouldPromptForDiagnosticAndroidExit({
+  required String classification,
+  required String eventFingerprint,
+  required String? acknowledgedFingerprint,
+}) {
+  if (!shouldPromptForDiagnosticPreviousExit(classification)) return false;
+  final selected = acknowledgedDiagnosticAndroidExitFingerprint(
+    selectedEventFingerprint: eventFingerprint,
+  );
+  if (selected.isEmpty) return false;
+  final acknowledged = acknowledgedDiagnosticAndroidExitFingerprint(
+    selectedEventFingerprint: acknowledgedFingerprint ?? '',
+  );
+  return selected != acknowledged;
+}
+
+bool shouldPromptForDiagnosticSessionExit({
+  required String classification,
+  required String previousSessionId,
+  required String? promptedSessionId,
+}) {
+  return previousSessionId.isNotEmpty &&
+      shouldPromptForDiagnosticPreviousExit(classification) &&
+      previousSessionId != promptedSessionId;
+}
+
 class DiagnosticLog {
   DiagnosticLog._();
 
@@ -20,6 +115,8 @@ class DiagnosticLog {
   static const String _installMarkerKey = 'diagnostic_install_marker';
   static const String _lastPromptedCrashSessionKey =
       'diagnostic_last_prompted_crash_session';
+  static const String _lastPromptedAndroidExitFingerprintKey =
+      'diagnostic_last_prompted_android_exit_event';
   static const String _nativeEngineActiveKey =
       'diagnostic_native_engine_active';
   static const MethodChannel _diagnosticChannel = MethodChannel(
@@ -36,6 +133,7 @@ class DiagnosticLog {
   static String _previousNativeEngineActiveEngine = '';
   static String _previousAndroidExitReason = 'unavailable';
   static String _previousAndroidExitDescription = '';
+  static String _previousAndroidExitFingerprint = '';
   static String _currentInstallMarker = 'unknown';
   static bool _previousInstallChanged = false;
   static bool _previousSessionCrashed = false;
@@ -79,13 +177,14 @@ class DiagnosticLog {
     final previousState = _prefs?.getString(_sessionStateKey);
     final previousId = _prefs?.getString(_lastSessionIdKey);
     final promptedId = _prefs?.getString(_lastPromptedCrashSessionKey);
+    final promptedAndroidExitFingerprint =
+        _prefs?.getString(_lastPromptedAndroidExitFingerprintKey);
     final previousInstallMarker = _prefs?.getString(_installMarkerKey);
     final previousNativeEngineActive = _prefs?.getString(
       _nativeEngineActiveKey,
     );
     _previousSessionId = previousId ?? '';
-    final previousWasRunning =
-        previousState == 'running' &&
+    final previousWasRunning = previousState == 'running' &&
         previousId != null &&
         previousId.isNotEmpty;
     _currentInstallMarker = previousInstallMarker ?? 'unknown';
@@ -104,6 +203,7 @@ class DiagnosticLog {
         previousWasRunning: previousWasRunning,
         previousId: previousId,
         promptedId: promptedId,
+        promptedAndroidExitFingerprint: promptedAndroidExitFingerprint,
         previousInstallMarker: previousInstallMarker,
         previousNativeEngineActive: previousNativeEngineActive,
       ),
@@ -114,34 +214,51 @@ class DiagnosticLog {
     required bool previousWasRunning,
     required String? previousId,
     required String? promptedId,
+    required String? promptedAndroidExitFingerprint,
     required String? previousInstallMarker,
     required String? previousNativeEngineActive,
   }) async {
-    final nativeEngineInterrupted =
-        previousNativeEngineActive != null &&
+    final nativeEngineInterrupted = previousNativeEngineActive != null &&
         previousNativeEngineActive.trim().isNotEmpty;
     _previousNativeEngineActiveEngine = nativeEngineInterrupted
         ? _engineFromNativeActiveMarker(previousNativeEngineActive)
         : '';
     if (previousWasRunning) {
       _currentInstallMarker = await _loadInstallMarker();
-      _previousInstallChanged =
-          previousInstallMarker != null &&
+      _previousInstallChanged = previousInstallMarker != null &&
           _currentInstallMarker != 'unknown' &&
           previousInstallMarker != _currentInstallMarker;
       final androidExit = await _loadLatestAndroidExitInfo();
-      _previousAndroidExitReason = (androidExit['reason'] ?? 'unavailable')
-          .toString();
-      _previousAndroidExitDescription = (androidExit['description'] ?? '')
-          .toString();
+      _previousAndroidExitReason =
+          (androidExit['reason'] ?? 'unavailable').toString();
+      _previousAndroidExitDescription =
+          (androidExit['description'] ?? '').toString();
+      _previousAndroidExitFingerprint =
+          acknowledgedDiagnosticAndroidExitFingerprint(
+        selectedEventFingerprint:
+            (androidExit['eventFingerprint'] ?? '').toString(),
+      );
       _previousSessionExit = _classifyPreviousSessionExit(previousWasRunning);
-      if (nativeEngineInterrupted &&
+      final androidExitWouldPrompt =
+          _shouldPromptForPreviousExit(_previousSessionExit);
+      if (androidExitWouldPrompt) {
+        _previousSessionCrashed = shouldPromptForDiagnosticAndroidExit(
+          classification: _previousSessionExit,
+          eventFingerprint: _previousAndroidExitFingerprint,
+          acknowledgedFingerprint: promptedAndroidExitFingerprint,
+        );
+      } else if (nativeEngineInterrupted &&
+          !_previousInstallChanged &&
           _previousSessionExit != 'app_native_crash') {
         _previousSessionExit = 'native_engine_interrupted';
+        _previousSessionCrashed = shouldPromptForDiagnosticSessionExit(
+          classification: _previousSessionExit,
+          previousSessionId: previousId ?? '',
+          promptedSessionId: promptedId,
+        );
+      } else {
+        _previousSessionCrashed = false;
       }
-      _previousSessionCrashed =
-          _shouldPromptForPreviousExit(_previousSessionExit) &&
-          previousId != promptedId;
       if (_currentInstallMarker != 'unknown') {
         await _prefs?.setString(_installMarkerKey, _currentInstallMarker);
       }
@@ -153,11 +270,15 @@ class DiagnosticLog {
         'nativeEngineActive=${nativeEngineInterrupted ? _previousNativeEngineActiveEngine : 'none'}',
       );
     } else {
-      _previousSessionExit = nativeEngineInterrupted
-          ? 'native_engine_interrupted'
-          : 'clean';
-      _previousSessionCrashed =
-          nativeEngineInterrupted && previousId != promptedId;
+      _previousAndroidExitFingerprint = '';
+      _previousSessionExit =
+          nativeEngineInterrupted ? 'native_engine_interrupted' : 'clean';
+      _previousSessionCrashed = nativeEngineInterrupted &&
+          shouldPromptForDiagnosticSessionExit(
+            classification: _previousSessionExit,
+            previousSessionId: previousId ?? '',
+            promptedSessionId: promptedId,
+          );
       _previousAndroidExitReason = 'not_needed';
       _previousAndroidExitDescription = '';
       await _refreshInstallMarkerAfterBoot(previousInstallMarker);
@@ -213,10 +334,10 @@ class DiagnosticLog {
 
   static String get appVersionLabel {
     final parts = _currentInstallMarker.split('|');
-    if (parts.length < 3) return 'flutter-native unknown';
+    if (parts.length < 3) return 'mobile unknown';
     final versionName = parts[1].isEmpty ? 'unknown' : parts[1];
     final versionCode = parts[2].isEmpty ? 'unknown' : parts[2];
-    return 'flutter-native $versionName+$versionCode';
+    return 'mobile $versionName+$versionCode';
   }
 
   static bool get batteryEvidenceAvailable => _batteryAvailable;
@@ -268,9 +389,8 @@ class DiagnosticLog {
       if (_batteryAvailable) _batteryLastPercent = percent;
       _batteryLastStatus = status;
       _batteryLastPlugged = plugged;
-      _batteryLastTemperatureTenthsC = temperature == null || temperature < 0
-          ? null
-          : temperature;
+      _batteryLastTemperatureTenthsC =
+          temperature == null || temperature < 0 ? null : temperature;
       _batteryLastVoltageMv = voltage == null || voltage < 0 ? null : voltage;
       add(
         'battery evidence sample reason=${_sanitizeViewTimingToken(reason)} '
@@ -314,6 +434,15 @@ class DiagnosticLog {
   }
 
   static Future<void> dismissCrashPrompt() async {
+    final fingerprint = acknowledgedDiagnosticAndroidExitFingerprint(
+      selectedEventFingerprint: _previousAndroidExitFingerprint,
+    );
+    if (fingerprint.isNotEmpty) {
+      await _prefs?.setString(
+        _lastPromptedAndroidExitFingerprintKey,
+        fingerprint,
+      );
+    }
     if (_previousSessionId.isNotEmpty) {
       await _prefs?.setString(_lastPromptedCrashSessionKey, _previousSessionId);
     }
@@ -321,48 +450,15 @@ class DiagnosticLog {
   }
 
   static String _classifyPreviousSessionExit(bool previousWasRunning) {
-    if (!previousWasRunning) return 'clean';
-    if (_previousInstallChanged) return 'android_app_update_or_reinstall';
-    switch (_previousAndroidExitReason) {
-      case 'crash':
-        return 'app_crash';
-      case 'crash_native':
-        return 'app_native_crash';
-      case 'anr':
-        return 'app_anr';
-      case 'low_memory':
-        return 'android_low_memory_kill';
-      case 'user_requested':
-      case 'user_stopped':
-        return 'android_user_or_system_stop';
-      case 'dependency_died':
-        return 'android_dependency_died';
-      case 'permission_change':
-        return 'android_permission_change';
-      case 'signaled':
-        return 'process_signaled';
-      case 'exit_self':
-        return 'app_exit_self';
-      case 'initialization_failure':
-        return 'app_initialization_failure';
-      case 'excessive_resource_usage':
-        return 'android_excessive_resource_usage';
-      case 'other':
-        return 'android_other';
-    }
-    return 'app_or_system_unknown';
+    return classifyDiagnosticPreviousSessionExit(
+      previousWasRunning: previousWasRunning,
+      previousInstallChanged: _previousInstallChanged,
+      androidReason: _previousAndroidExitReason,
+    );
   }
 
   static bool _shouldPromptForPreviousExit(String exit) {
-    return switch (exit) {
-      'clean' => false,
-      'android_app_update_or_reinstall' => false,
-      'android_low_memory_kill' => false,
-      'android_user_or_system_stop' => false,
-      'android_permission_change' => false,
-      'app_exit_self' => false,
-      _ => true,
-    };
+    return shouldPromptForDiagnosticPreviousExit(exit);
   }
 
   static Future<String> _loadInstallMarker() async {
@@ -395,18 +491,7 @@ class DiagnosticLog {
         'processExitInfo',
       );
       if (raw == null || raw.isEmpty) return const <String, Object?>{};
-      final entries = raw.whereType<Map<Object?, Object?>>().toList()
-        ..sort((a, b) {
-          final aTimestamp =
-              int.tryParse((a['timestamp'] ?? '').toString()) ?? 0;
-          final bTimestamp =
-              int.tryParse((b['timestamp'] ?? '').toString()) ?? 0;
-          return bTimestamp.compareTo(aTimestamp);
-        });
-      if (entries.isEmpty) return const <String, Object?>{};
-      return entries.first.map(
-        (key, value) => MapEntry<String, Object?>(key.toString(), value),
-      );
+      return selectLatestMainAndroidExitInfo(raw);
     } catch (error) {
       add('diagnostic android exit info unavailable error=$error');
       return const <String, Object?>{};
@@ -495,8 +580,7 @@ class DiagnosticLog {
     if (!_isPlaybackLogcatCandidate(safe)) return;
     unawaited(
       _diagnosticChannel
-          .invokeMethod<void>('logcat', {'message': safe})
-          .catchError((_) {}),
+          .invokeMethod<void>('logcat', {'message': safe}).catchError((_) {}),
     );
   }
 
@@ -592,14 +676,10 @@ class DiagnosticLog {
   }
 
   static String report() {
-    final errors = _entries
-        .where(_isErrorLike)
-        .map(_sanitizeForReport)
-        .toList();
-    final performance = _entries
-        .where(_isPerformanceLike)
-        .map(_sanitizeForReport)
-        .toList();
+    final errors =
+        _entries.where(_isErrorLike).map(_sanitizeForReport).toList();
+    final performance =
+        _entries.where(_isPerformanceLike).map(_sanitizeForReport).toList();
     final lines = <String>[
       'Juicr diagnostic report',
       '------------------------',
@@ -713,14 +793,10 @@ class DiagnosticLog {
       return fullReport;
     }
 
-    final errors = _entries
-        .where(_isErrorLike)
-        .map(_sanitizeForReport)
-        .toList();
-    final performance = _entries
-        .where(_isPerformanceLike)
-        .map(_sanitizeForReport)
-        .toList();
+    final errors =
+        _entries.where(_isErrorLike).map(_sanitizeForReport).toList();
+    final performance =
+        _entries.where(_isPerformanceLike).map(_sanitizeForReport).toList();
     final recentEvents = _entries
         .map(_sanitizeForReport)
         .toList()
@@ -933,7 +1009,8 @@ class DiagnosticLog {
     );
     final resolverBusyCount = _countMatches(
       entries,
-      RegExp(r'Playback service is busy|Resolver is busy|playback_service_temporary_block|resolver_temporary_block'),
+      RegExp(
+          r'Playback service is busy|Resolver is busy|playback_service_temporary_block|resolver_temporary_block'),
     );
     return <String>[
       'App title cooldown: ${localBackoffCount == 0 ? 'not recorded' : 'old cooldown seen ($localBackoffCount)'}',
@@ -1093,8 +1170,8 @@ class DiagnosticLog {
     final kindCounts = summary['kindCounts'];
     final kindLine = kindCounts is Map
         ? kindCounts.entries
-              .map((entry) => '${entry.key}:${entry.value}')
-              .join(', ')
+            .map((entry) => '${entry.key}:${entry.value}')
+            .join(', ')
         : '';
     return <String>[
       'Catalogs: ${summary['catalogCount']}',
@@ -1417,6 +1494,12 @@ class DiagnosticLog {
       'sigma': 'Sigma',
       'xyra': 'Chi',
       'chi': 'Chi',
+      'streamvault': 'Psi',
+      'psi': 'Psi',
+      'notorrent': 'Omega',
+      'omega': 'Omega',
+      'dulo': 'Aster',
+      'aster': 'Aster',
       'videasy': 'Tau',
       'tau': 'Tau',
       'vidfun': 'Upsilon',
@@ -1461,6 +1544,12 @@ class DiagnosticLog {
         .replaceAll(RegExp(r'\bsigma\b', caseSensitive: false), 'Sigma')
         .replaceAll(RegExp(r'\bxyra\b', caseSensitive: false), 'Chi')
         .replaceAll(RegExp(r'\bchi\b', caseSensitive: false), 'Chi')
+        .replaceAll(RegExp(r'\bstreamvault\b', caseSensitive: false), 'Psi')
+        .replaceAll(RegExp(r'\bpsi\b', caseSensitive: false), 'Psi')
+        .replaceAll(RegExp(r'\bnotorrent\b', caseSensitive: false), 'Omega')
+        .replaceAll(RegExp(r'\bomega\b', caseSensitive: false), 'Omega')
+        .replaceAll(RegExp(r'\bdulo\b', caseSensitive: false), 'Aster')
+        .replaceAll(RegExp(r'\baster\b', caseSensitive: false), 'Aster')
         .replaceAll(RegExp(r'\bvideasy\b', caseSensitive: false), 'Tau')
         .replaceAll(RegExp(r'\btau\b', caseSensitive: false), 'Tau')
         .replaceAll(RegExp(r'\bvidfun\b', caseSensitive: false), 'Upsilon')

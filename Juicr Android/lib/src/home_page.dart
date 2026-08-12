@@ -17,6 +17,17 @@ import 'playback_provider.dart';
 import 'stream_api.dart';
 import 'visual_style.dart';
 
+const Duration homeWarmSnapshotMaxAge = Duration(hours: 24);
+
+bool homeWarmSnapshotIsFresh(Object? savedAt, {DateTime? now}) {
+  if (savedAt is! String || savedAt.trim().isEmpty) return false;
+  final parsed = DateTime.tryParse(savedAt.trim())?.toUtc();
+  if (parsed == null) return false;
+  final current = (now ?? DateTime.now()).toUtc();
+  if (parsed.isAfter(current)) return false;
+  return current.difference(parsed) <= homeWarmSnapshotMaxAge;
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -46,6 +57,9 @@ class _HomePageState extends State<HomePage>
   final Map<String, CatalogItem> _heroTrailerAvailabilityPending =
       <String, CatalogItem>{};
   final Map<String, int> _heroTrailerAvailabilityAttempts = <String, int>{};
+  final Map<String, CatalogItem> _titleWheelArtworkCache =
+      <String, CatalogItem>{};
+  final Set<String> _titleWheelArtworkInFlight = <String>{};
   HomeEditorialEdition? _remoteEditorial;
   bool _loading = true;
   bool _matureContentChoiceScheduled = false;
@@ -314,8 +328,7 @@ class _HomePageState extends State<HomePage>
       const upcomingMovies = StreamCatalogResult(items: <CatalogItem>[]);
       final previousEditorialEdition = _remoteEditorial?.editionId ?? '';
       final nextEditorialEdition = effectiveEditorial?.editionId ?? '';
-      final editorialEditionChanged =
-          nextEditorialEdition.isNotEmpty &&
+      final editorialEditionChanged = nextEditorialEdition.isNotEmpty &&
           previousEditorialEdition != nextEditorialEdition;
       final movieNewPool = _availableHomeItems(
         _dedupeItems([...newMovies.items, ...moreNewMovies.items]),
@@ -341,8 +354,7 @@ class _HomePageState extends State<HomePage>
       );
       final initialHeroItems = await _loadCuratedHeroItems(heroEditorial);
       if (!mounted || generation != _loadGeneration) return;
-      final totalVisible =
-          movieNewPool.take(24).length +
+      final totalVisible = movieNewPool.take(24).length +
           seriesNewPool.take(24).length +
           animationHomePool.take(24).length +
           movieTopPool.take(24).length +
@@ -366,9 +378,8 @@ class _HomePageState extends State<HomePage>
           _heroTrailerAvailabilityAttempts.clear();
         }
         _heroEditorialItems = initialHeroItems;
-        _remoteEditorial = AppState.defaultCatalogEnabled.value
-            ? effectiveEditorial
-            : null;
+        _remoteEditorial =
+            AppState.defaultCatalogEnabled.value ? effectiveEditorial : null;
         _loading = false;
         DiagnosticLog.viewTiming(
           surface: 'home',
@@ -396,6 +407,36 @@ class _HomePageState extends State<HomePage>
         ..._topSeries.take(3),
         ..._animationPicks.take(3),
       ]);
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.hero,
+        items: _heroEditorialItems,
+        generation: generation,
+      );
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.newMovies,
+        items: _newMovies,
+        generation: generation,
+      );
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.topMovies,
+        items: _topMovies,
+        generation: generation,
+      );
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.newSeries,
+        items: _newSeries,
+        generation: generation,
+      );
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.topSeries,
+        items: _topSeries,
+        generation: generation,
+      );
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.animation,
+        items: _animationPicks,
+        generation: generation,
+      );
       _warmUpcomingReleaseDates(_upcomingPicks.take(40));
       DiagnosticLog.add(
         'home client fallback save skipped reason=server_source_only',
@@ -444,6 +485,11 @@ class _HomePageState extends State<HomePage>
               rankedItems,
             );
           });
+          _warmHomeTitleWheelArtwork(
+            rail: _HomeTitleWheelRail.topSignal,
+            items: _topSignalRemoteItems,
+            generation: generation,
+          );
         }),
       );
       unawaited(
@@ -457,6 +503,11 @@ class _HomePageState extends State<HomePage>
               rankedItems,
             );
           });
+          _warmHomeTitleWheelArtwork(
+            rail: _HomeTitleWheelRail.todaySignal,
+            items: _todaySignalRemoteItems,
+            generation: generation,
+          );
         }),
       );
       unawaited(
@@ -470,6 +521,11 @@ class _HomePageState extends State<HomePage>
               rankedItems,
             );
           });
+          _warmHomeTitleWheelArtwork(
+            rail: _HomeTitleWheelRail.juicrTopSignal,
+            items: _juicrTopSignalRemoteItems,
+            generation: generation,
+          );
         }),
       );
       unawaited(
@@ -480,9 +536,8 @@ class _HomePageState extends State<HomePage>
           animationPicks: animationPicks,
           topMovies: topMovies,
           topSeries: topSeries,
-          effectiveEditorial: AppState.defaultCatalogEnabled.value
-              ? effectiveEditorial
-              : null,
+          effectiveEditorial:
+              AppState.defaultCatalogEnabled.value ? effectiveEditorial : null,
         ),
       );
     } catch (_) {
@@ -553,6 +608,31 @@ class _HomePageState extends State<HomePage>
         _topSeries = seriesTopPool.take(24).toList(growable: false);
         _upcomingPicks = upcomingPool;
       });
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.newMovies,
+        items: _newMovies,
+        generation: generation,
+      );
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.topMovies,
+        items: _topMovies,
+        generation: generation,
+      );
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.newSeries,
+        items: _newSeries,
+        generation: generation,
+      );
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.topSeries,
+        items: _topSeries,
+        generation: generation,
+      );
+      _warmHomeTitleWheelArtwork(
+        rail: _HomeTitleWheelRail.animation,
+        items: _animationPicks,
+        generation: generation,
+      );
       DiagnosticLog.add(
         'home supplemental rails loaded elapsedMs=${loadStopwatch.elapsedMilliseconds} movieNew=${_newMovies.length} movieTop=${_topMovies.length} animation=${_animationPicks.length} upcoming=${_upcomingPicks.length}',
       );
@@ -621,9 +701,8 @@ class _HomePageState extends State<HomePage>
     final types = rail.types.isEmpty
         ? const [MediaType.movie, MediaType.series, MediaType.animation]
         : rail.types;
-    final genre = rail.genres.isEmpty
-        ? 'All genres'
-        : _displayGenre(rail.genres.first);
+    final genre =
+        rail.genres.isEmpty ? 'All genres' : _displayGenre(rail.genres.first);
     final perType = rail.perType.clamp(1, 12);
     DiagnosticLog.add(
       'home hero editorial start genre=$genre genreCount=${rail.genres.length} types=${types.map((type) => type.compatTypeValue).join("|")} sort=${rail.sort.id} perType=$perType requireGenre=${rail.requireGenreMatch} intent=${rail.intent} releaseWindow=${rail.releaseWindow} theme=${rail.theme} seasonalWindow=${rail.seasonalWindow} hasQuery=${rail.query.isNotEmpty}',
@@ -733,11 +812,7 @@ class _HomePageState extends State<HomePage>
           final delta = result.skipDelta ?? result.items.length;
           if (result.items.isEmpty || delta <= 0 || result.hasMore == false) {
             DiagnosticLog.add(
-              'home hero bucket stop type=${type.compatTypeValue} sort=${sort.id} reason=${result.items.isEmpty
-                  ? "empty"
-                  : delta <= 0
-                  ? "no_delta"
-                  : "no_more"} gathered=${gathered.length} matches=${matches.length}',
+              'home hero bucket stop type=${type.compatTypeValue} sort=${sort.id} reason=${result.items.isEmpty ? "empty" : delta <= 0 ? "no_delta" : "no_more"} gathered=${gathered.length} matches=${matches.length}',
             );
             break;
           }
@@ -776,6 +851,14 @@ class _HomePageState extends State<HomePage>
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map<String, dynamic>) return false;
+      if (!homeWarmSnapshotIsFresh(decoded['savedAt'])) {
+        unawaited(prefs.remove(_homeWarmSnapshotKey));
+        unawaited(prefs.remove(_homeEditorialCacheKey));
+        DiagnosticLog.add(
+          'home warm snapshot skipped reason=stale_or_invalid',
+        );
+        return false;
+      }
       final editorialRaw = decoded['editorial'];
       final editorial = editorialRaw is Map<String, dynamic>
           ? HomeEditorialEdition.fromJson(editorialRaw)
@@ -790,8 +873,7 @@ class _HomePageState extends State<HomePage>
       final topSignal = _catalogSnapshotList(decoded['topSignal']);
       final todaySignal = _catalogSnapshotList(decoded['todaySignal']);
       final juicrTopSignal = _catalogSnapshotList(decoded['juicrTopSignal']);
-      final itemCount =
-          newMovies.length +
+      final itemCount = newMovies.length +
           newSeries.length +
           animation.length +
           topMovies.length +
@@ -844,8 +926,7 @@ class _HomePageState extends State<HomePage>
   void _saveHomeWarmSnapshot({required HomeEditorialEdition? editorial}) {
     final prefs = AppState.prefs;
     if (prefs == null || !_hasCatalogSource) return;
-    final itemCount =
-        _newMovies.length +
+    final itemCount = _newMovies.length +
         _newSeries.length +
         _animationPicks.length +
         _topMovies.length +
@@ -949,6 +1030,107 @@ class _HomePageState extends State<HomePage>
     return ranked.toList(growable: false);
   }
 
+  void _warmHomeTitleWheelArtwork({
+    required _HomeTitleWheelRail rail,
+    required List<CatalogItem> items,
+    required int generation,
+  }) {
+    if (items.isEmpty) return;
+    final candidates = homeTitleWheelHydrationCandidates(items);
+    if (candidates.isEmpty) return;
+    unawaited(() async {
+      final hydrated = <CatalogItem>[];
+      var skippedCached = 0;
+      for (final item in candidates) {
+        if (!mounted || generation != _loadGeneration) return;
+        final key = _homeUsedKey(item);
+        final cached = _titleWheelArtworkCache[key];
+        if (cached != null) {
+          hydrated.add(cached);
+          skippedCached += 1;
+          continue;
+        }
+        if (!_titleWheelArtworkInFlight.add(key)) continue;
+        try {
+          final details = await _api.meta(item).timeout(
+                const Duration(seconds: 5),
+              );
+          final merged = item.merge(details.item);
+          if ((merged.logo ?? '').trim().isNotEmpty) {
+            _titleWheelArtworkCache[key] = merged;
+            hydrated.add(merged);
+          }
+        } catch (error) {
+          DiagnosticLog.add(
+            'mobile title wheel artwork hydrate skipped rail=${rail.name} type=${item.type.compatTypeValue} id=${item.id} error=${error.runtimeType}',
+          );
+        } finally {
+          _titleWheelArtworkInFlight.remove(key);
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      }
+      if (!mounted || generation != _loadGeneration || hydrated.isEmpty) {
+        return;
+      }
+      setState(() {
+        _applyHomeTitleWheelHydration(rail, hydrated);
+      });
+      DiagnosticLog.add(
+        'mobile title wheel artwork hydrated rail=${rail.name} requested=${candidates.length} hydrated=${hydrated.length} cached=$skippedCached',
+      );
+    }());
+  }
+
+  void _applyHomeTitleWheelHydration(
+    _HomeTitleWheelRail rail,
+    List<CatalogItem> hydrated,
+  ) {
+    switch (rail) {
+      case _HomeTitleWheelRail.hero:
+        _heroEditorialItems = _mergeHomeTitleWheelHydratedItems(
+          _heroEditorialItems,
+          hydrated,
+        );
+        break;
+      case _HomeTitleWheelRail.newMovies:
+        _newMovies = _mergeHomeTitleWheelHydratedItems(_newMovies, hydrated);
+        break;
+      case _HomeTitleWheelRail.newSeries:
+        _newSeries = _mergeHomeTitleWheelHydratedItems(_newSeries, hydrated);
+        break;
+      case _HomeTitleWheelRail.animation:
+        _animationPicks = _mergeHomeTitleWheelHydratedItems(
+          _animationPicks,
+          hydrated,
+        );
+        break;
+      case _HomeTitleWheelRail.topMovies:
+        _topMovies = _mergeHomeTitleWheelHydratedItems(_topMovies, hydrated);
+        break;
+      case _HomeTitleWheelRail.topSeries:
+        _topSeries = _mergeHomeTitleWheelHydratedItems(_topSeries, hydrated);
+        break;
+      case _HomeTitleWheelRail.topSignal:
+        _topSignalRemoteItems = _mergeHomeTitleWheelHydratedItems(
+          _topSignalRemoteItems,
+          hydrated,
+        );
+        break;
+      case _HomeTitleWheelRail.todaySignal:
+        _todaySignalRemoteItems = _mergeHomeTitleWheelHydratedItems(
+          _todaySignalRemoteItems,
+          hydrated,
+        );
+        break;
+      case _HomeTitleWheelRail.juicrTopSignal:
+        _juicrTopSignalRemoteItems = _mergeHomeTitleWheelHydratedItems(
+          _juicrTopSignalRemoteItems,
+          hydrated,
+        );
+        break;
+    }
+  }
+
   Future<CatalogItem?> _findHomeTopSignalCatalogMatch(
     HomeEditorialTrendItem signal,
     MediaType type,
@@ -1029,9 +1211,8 @@ class _HomePageState extends State<HomePage>
     final hydrated = <CatalogItem>[];
     for (final item in items) {
       try {
-        final details = await _api
-            .meta(item)
-            .timeout(const Duration(seconds: 5));
+        final details =
+            await _api.meta(item).timeout(const Duration(seconds: 5));
         final merged = item.merge(details.item);
         if ((merged.releaseDate ?? '').isNotEmpty) hydrated.add(merged);
       } catch (_) {
@@ -1162,11 +1343,11 @@ class _HomePageState extends State<HomePage>
     final rawGenre = genreOverride?.trim().isNotEmpty == true
         ? genreOverride!.trim()
         : editorial.genres.isNotEmpty
-        ? editorial.genres.first
-        : items
-              .expand((item) => item.genres)
-              .map((genre) => genre.trim())
-              .firstWhere((genre) => genre.isNotEmpty, orElse: () => '');
+            ? editorial.genres.first
+            : items
+                .expand((item) => item.genres)
+                .map((genre) => genre.trim())
+                .firstWhere((genre) => genre.isNotEmpty, orElse: () => '');
     return _displayGenre(rawGenre);
   }
 
@@ -1248,8 +1429,7 @@ class _HomePageState extends State<HomePage>
                       _dedupeItems(_heroEditorialItems),
                       continueKeys,
                     );
-                    final displayHeroEditorial =
-                        heroEditorial ??
+                    final displayHeroEditorial = heroEditorial ??
                         const _EditorialRail(title: '', subtitle: '');
                     final displayHeroItems = _mergeHomeHeroDisplayItems(
                       heroItems,
@@ -1285,8 +1465,7 @@ class _HomePageState extends State<HomePage>
                       searchHistory: AppState.searchHistory.value,
                       insightsEnabled: insightsEnabled,
                     );
-                    final topSignalUsesRemote =
-                        _remoteTopSignalItems(
+                    final topSignalUsesRemote = _remoteTopSignalItems(
                           catalogPool,
                           topSignalEditorial,
                         ).length >=
@@ -1307,8 +1486,7 @@ class _HomePageState extends State<HomePage>
                       searchHistory: AppState.searchHistory.value,
                       insightsEnabled: insightsEnabled,
                     );
-                    final todaySignalUsesRemote =
-                        _remoteTopSignalItems(
+                    final todaySignalUsesRemote = _remoteTopSignalItems(
                           catalogPool,
                           todaySignalEditorial,
                         ).length >=
@@ -1329,8 +1507,7 @@ class _HomePageState extends State<HomePage>
                       searchHistory: AppState.searchHistory.value,
                       insightsEnabled: insightsEnabled,
                     );
-                    final juicrTopSignalUsesRemote =
-                        _remoteTopSignalItems(
+                    final juicrTopSignalUsesRemote = _remoteTopSignalItems(
                           catalogPool,
                           juicrTopSignalEditorial,
                         ).length >=
@@ -1390,8 +1567,7 @@ class _HomePageState extends State<HomePage>
                       continueKeys,
                     );
                     usedHomeKeys.addAll(savedItems.take(8).map(_homeUsedKey));
-                    final showFullLoading =
-                        _loading &&
+                    final showFullLoading = _loading &&
                         _newMovies.isEmpty &&
                         _newSeries.isEmpty &&
                         _animationPicks.isEmpty &&
@@ -1455,9 +1631,8 @@ class _HomePageState extends State<HomePage>
                           _RankedHomeRail(
                             title: topSignalEditorial.title,
                             subtitle: topSignalEditorial.sectionSubtitle,
-                            items: topSignalItems
-                                .take(20)
-                                .toList(growable: false),
+                            items:
+                                topSignalItems.take(20).toList(growable: false),
                             onTap: _openDetails,
                             onOpenDiscovery: () => _openCuratedShelf(
                               title: topSignalEditorial.title,
@@ -1506,9 +1681,8 @@ class _HomePageState extends State<HomePage>
                           _RankedHomeRail(
                             title: upcomingEditorial.title,
                             subtitle: upcomingEditorial.sectionSubtitle,
-                            items: upcomingItems
-                                .take(20)
-                                .toList(growable: false),
+                            items:
+                                upcomingItems.take(20).toList(growable: false),
                             showRankPills: false,
                             onTap: _openDetails,
                             onOpenDiscovery: () => _openCuratedShelf(
@@ -1529,6 +1703,18 @@ class _HomePageState extends State<HomePage>
       ),
     );
   }
+}
+
+enum _HomeTitleWheelRail {
+  hero,
+  newMovies,
+  newSeries,
+  animation,
+  topMovies,
+  topSeries,
+  topSignal,
+  todaySignal,
+  juicrTopSignal,
 }
 
 List<CatalogItem> _dedupeItems(List<CatalogItem> items) {
@@ -1731,6 +1917,50 @@ List<CatalogItem> _mergeHomeHeroDisplayItems(
   return merged;
 }
 
+List<CatalogItem> _mergeHomeTitleWheelHydratedItems(
+  List<CatalogItem> current,
+  List<CatalogItem> hydrated,
+) {
+  if (current.isEmpty || hydrated.isEmpty) return current;
+  final byItemKey = {for (final item in hydrated) _itemKey(item): item};
+  final byContentKey = <String, CatalogItem>{
+    for (final item in hydrated)
+      if (_homeContentKey(item).isNotEmpty) _homeContentKey(item): item,
+  };
+  var changed = false;
+  final merged = [
+    for (final item in current)
+      (() {
+        final richer =
+            byItemKey[_itemKey(item)] ?? byContentKey[_homeContentKey(item)];
+        if (richer == null) return item;
+        final mergedItem = item.merge(richer);
+        if ((mergedItem.logo ?? '').trim() != (item.logo ?? '').trim()) {
+          changed = true;
+        }
+        return mergedItem;
+      })(),
+  ];
+  return changed ? merged : current;
+}
+
+@visibleForTesting
+List<CatalogItem> homeTitleWheelHydrationCandidates(
+  Iterable<CatalogItem> items, {
+  int visibleLimit = 8,
+}) {
+  if (visibleLimit <= 0) return const <CatalogItem>[];
+  final candidates = <CatalogItem>[];
+  final seen = <String>{};
+  for (final item in items.take(visibleLimit)) {
+    if ((item.logo ?? '').trim().isNotEmpty) continue;
+    if (item.tmdbId == null) continue;
+    final key = _homeUsedKey(item);
+    if (seen.add(key)) candidates.add(item);
+  }
+  return candidates;
+}
+
 String _heroTrailerAvailabilityKey(CatalogItem item) {
   return '${item.type.compatTypeValue}:${item.id}:${item.tmdbId ?? ''}';
 }
@@ -1835,26 +2065,25 @@ List<CatalogItem> _localTopSignalItems(
   required List<String> searchHistory,
   required bool insightsEnabled,
 }) {
-  final ranked =
-      [
-        for (final item in items)
-          if (!item.type.isLive && _isHomeAllowedByMatureGate(item))
-            _ScoredCatalogItem(
-              item,
-              _weeklySignalScore(
-                item,
-                library: library,
-                progress: progress,
-                completed: completed,
-                searchHistory: searchHistory,
-                insightsEnabled: insightsEnabled,
-              ),
-            ),
-      ]..sort((left, right) {
-        final score = right.score.compareTo(left.score);
-        if (score != 0) return score;
-        return itemTieBreaker(left.item).compareTo(itemTieBreaker(right.item));
-      });
+  final ranked = [
+    for (final item in items)
+      if (!item.type.isLive && _isHomeAllowedByMatureGate(item))
+        _ScoredCatalogItem(
+          item,
+          _weeklySignalScore(
+            item,
+            library: library,
+            progress: progress,
+            completed: completed,
+            searchHistory: searchHistory,
+            insightsEnabled: insightsEnabled,
+          ),
+        ),
+  ]..sort((left, right) {
+      final score = right.score.compareTo(left.score);
+      if (score != 0) return score;
+      return itemTieBreaker(left.item).compareTo(itemTieBreaker(right.item));
+    });
   return _dedupeItems(
     ranked.map((entry) => entry.item).toList(growable: false),
   ).take(limit).toList(growable: false);
@@ -1985,9 +2214,8 @@ String _topTenItemReason(
   } else if (AppState.library.value.containsKey(item.id)) {
     clues.add('saved');
   }
-  final reason = clues.isEmpty
-      ? 'strong shelf momentum'
-      : clues.take(3).join(' - ');
+  final reason =
+      clues.isEmpty ? 'strong shelf momentum' : clues.take(3).join(' - ');
   return externalTopSignal
       ? 'Rank $rank from the shared trend source, matched here with $reason.'
       : 'Rank $rank because of $reason.';
@@ -2214,19 +2442,17 @@ List<CatalogItem> _homeItemsMatchingEditorialIntent(
           item,
     ];
   }
-  return items
-      .where((item) {
-        if (!_isHomeEditorialCandidate(item, rail)) return false;
-        if (item.isUpcoming && !_allowsUpcomingEditorialIntent(rail)) {
-          return false;
-        }
-        if (!_homeItemMatchesEditorialQuery(item, rail.query)) return false;
-        if (!_requiresStrictEditorialIntent(rail)) return true;
-        if (item.type.isLive) return false;
-        final year = _itemYear(item);
-        return year != null && year == DateTime.now().year;
-      })
-      .toList(growable: false);
+  return items.where((item) {
+    if (!_isHomeEditorialCandidate(item, rail)) return false;
+    if (item.isUpcoming && !_allowsUpcomingEditorialIntent(rail)) {
+      return false;
+    }
+    if (!_homeItemMatchesEditorialQuery(item, rail.query)) return false;
+    if (!_requiresStrictEditorialIntent(rail)) return true;
+    if (item.type.isLive) return false;
+    final year = _itemYear(item);
+    return year != null && year == DateTime.now().year;
+  }).toList(growable: false);
 }
 
 bool _homeItemMatchesInTheaters(CatalogItem item, _EditorialRail rail) {
@@ -2252,12 +2478,10 @@ List<CatalogItem> _bestGenreMatches(
       ..sort((left, right) => _imdbScore(right).compareTo(_imdbScore(left)));
     return sorted.take(limit).toList(growable: false);
   }
-  final matches = items
-      .where((item) {
-        if (_itemMatchesAnyGenre(item, genres)) return true;
-        return allowUnknownGenre && item.genres.isEmpty;
-      })
-      .toList(growable: false);
+  final matches = items.where((item) {
+    if (_itemMatchesAnyGenre(item, genres)) return true;
+    return allowUnknownGenre && item.genres.isEmpty;
+  }).toList(growable: false);
   final sorted = matches.toList()
     ..sort((left, right) => _imdbScore(right).compareTo(_imdbScore(left)));
   return sorted.take(limit).toList(growable: false);
@@ -2285,11 +2509,10 @@ List<CatalogItem> _bestEditorialMatches(
     return matches;
   }
   final matchedKeys = {for (final item in matches) _itemKey(item)};
-  final fallback =
-      scopedItems
-          .where((item) => !matchedKeys.contains(_itemKey(item)))
-          .toList(growable: false)
-        ..sort((left, right) => _imdbScore(right).compareTo(_imdbScore(left)));
+  final fallback = scopedItems
+      .where((item) => !matchedKeys.contains(_itemKey(item)))
+      .toList(growable: false)
+    ..sort((left, right) => _imdbScore(right).compareTo(_imdbScore(left)));
   return _dedupeItems([
     ...matches,
     ...fallback,
@@ -2374,21 +2597,15 @@ String _titleCaseHomeLabel(String value) {
   final normalized = value.trim().replaceAll(RegExp(r'\s+'), ' ');
   if (normalized.isEmpty) return normalized;
   const acronyms = {'dc': 'DC', 'imdb': 'IMDb', 'p2p': 'P2P', 'tv': 'TV'};
-  return normalized
-      .split(' ')
-      .map((word) {
-        return word
-            .split('-')
-            .map((part) {
-              if (part.isEmpty) return part;
-              final lower = part.toLowerCase();
-              final acronym = acronyms[lower];
-              if (acronym != null) return acronym;
-              return '${part[0].toUpperCase()}${part.substring(1).toLowerCase()}';
-            })
-            .join('-');
-      })
-      .join(' ');
+  return normalized.split(' ').map((word) {
+    return word.split('-').map((part) {
+      if (part.isEmpty) return part;
+      final lower = part.toLowerCase();
+      final acronym = acronyms[lower];
+      if (acronym != null) return acronym;
+      return '${part[0].toUpperCase()}${part.substring(1).toLowerCase()}';
+    }).join('-');
+  }).join(' ');
 }
 
 class _EditorialRail {
@@ -2441,9 +2658,9 @@ class _EditorialRail {
   String get displayTitle => _titleCaseHomeLabel(title);
 
   String get displaySubtitle => juicrCopyWithoutRepeatedTitlePhrase(
-    title: displayTitle,
-    subtitle: subtitle,
-  );
+        title: displayTitle,
+        subtitle: subtitle,
+      );
 
   String get sectionSubtitle => '';
 
@@ -2683,8 +2900,8 @@ List<CatalogItem> _dailyEditorialItems(
   final scopedItems = rail.types.isEmpty
       ? shuffledItems
       : shuffledItems
-            .where((item) => rail.types.contains(item.type))
-            .toList(growable: false);
+          .where((item) => rail.types.contains(item.type))
+          .toList(growable: false);
   final candidates = [
     for (final item in (scopedItems.isEmpty ? items : scopedItems))
       if (_hasHomePoster(item)) item,
@@ -2695,20 +2912,17 @@ List<CatalogItem> _dailyEditorialItems(
       intentCandidates.isEmpty) {
     return const <CatalogItem>[];
   }
-  final editorialCandidates = intentCandidates.isEmpty
-      ? candidates
-      : intentCandidates;
+  final editorialCandidates =
+      intentCandidates.isEmpty ? candidates : intentCandidates;
   if (rail.genres.isEmpty) {
     return editorialCandidates.take(12).toList(growable: false);
   }
-  final genreMatches = editorialCandidates
-      .where((item) {
-        final itemGenres = item.genres.map((genre) => genre.toLowerCase());
-        return rail.genres.any(
-          (target) => itemGenres.any((genre) => genre.contains(target)),
-        );
-      })
-      .toList(growable: false);
+  final genreMatches = editorialCandidates.where((item) {
+    final itemGenres = item.genres.map((genre) => genre.toLowerCase());
+    return rail.genres.any(
+      (target) => itemGenres.any((genre) => genre.contains(target)),
+    );
+  }).toList(growable: false);
   if (genreMatches.isEmpty) {
     return rail.requireGenreMatch
         ? const <CatalogItem>[]
@@ -2848,21 +3062,20 @@ class _HeroCarouselState extends State<_HeroCarousel>
     }
     _controller
         .animateToPage(
-          target,
-          duration: const Duration(milliseconds: 520),
-          curve: Curves.easeOutCubic,
-        )
+      target,
+      duration: const Duration(milliseconds: 520),
+      curve: Curves.easeOutCubic,
+    )
         .whenComplete(() {
-          if (mounted) _syncAutoRotate();
-        });
+      if (mounted) _syncAutoRotate();
+    });
   }
 
   @override
   void didUpdateWidget(covariant _HeroCarousel oldWidget) {
     super.didUpdateWidget(oldWidget);
     final itemCountChanged = oldWidget.items.length != widget.items.length;
-    final itemsChanged =
-        itemCountChanged ||
+    final itemsChanged = itemCountChanged ||
         _heroCarouselItemsSignature(oldWidget.items) !=
             _heroCarouselItemsSignature(widget.items);
     if (_index >= widget.items.length && widget.items.isNotEmpty) {
@@ -2959,8 +3172,8 @@ class _HeroCarouselState extends State<_HeroCarousel>
     final heroItemPadding = phoneLandscape
         ? 34.0
         : compactLandscape
-        ? 18.0
-        : 2.0;
+            ? 18.0
+            : 2.0;
     return Padding(
       padding: EdgeInsets.fromLTRB(
         compactLandscape ? 14 : 18,
@@ -2990,8 +3203,7 @@ class _HeroCarouselState extends State<_HeroCarousel>
                 final item = widget.items.isEmpty
                     ? null
                     : widget.items[_logicalIndex(page, widget.items.length)];
-                final hasTrailer =
-                    item != null &&
+                final hasTrailer = item != null &&
                     widget.trailerAvailability[_heroTrailerAvailabilityKey(
                           item,
                         )] !=
@@ -2999,38 +3211,34 @@ class _HeroCarouselState extends State<_HeroCarousel>
                 return AnimatedBuilder(
                   animation: _controller,
                   builder: (context, child) {
-                    final rawPage =
-                        _controller.hasClients &&
+                    final rawPage = _controller.hasClients &&
                             _controller.position.haveDimensions
                         ? _controller.page ?? _page.toDouble()
                         : _page.toDouble();
                     final pageOffset = (page - rawPage).clamp(-1.0, 1.0);
                     final distance = pageOffset.abs();
-                    final scale =
-                        1 -
+                    final scale = 1 -
                         (distance *
                             (phoneLandscape
                                 ? 0.30
                                 : compactLandscape
-                                ? 0.24
-                                : 0.16));
-                    final opacity =
-                        (1.0 -
-                                distance *
-                                    (phoneLandscape
-                                        ? 0.58
-                                        : compactLandscape
+                                    ? 0.24
+                                    : 0.16));
+                    final opacity = (1.0 -
+                            distance *
+                                (phoneLandscape
+                                    ? 0.58
+                                    : compactLandscape
                                         ? 0.42
                                         : 0.0))
-                            .clamp(0.0, 1.0)
-                            .toDouble();
-                    final xOffset =
-                        -pageOffset *
+                        .clamp(0.0, 1.0)
+                        .toDouble();
+                    final xOffset = -pageOffset *
                         (phoneLandscape
                             ? 96
                             : compactLandscape
-                            ? 74
-                            : 18);
+                                ? 74
+                                : 18);
                     final yOffset = distance * 16;
                     return Opacity(
                       opacity: opacity,
@@ -3058,10 +3266,10 @@ class _HeroCarouselState extends State<_HeroCarousel>
                       onTrailer: item == null
                           ? null
                           : !hasTrailer
-                          ? null
-                          : () {
-                              if (item != null) _openTrailer(item);
-                            },
+                              ? null
+                              : () {
+                                  if (item != null) _openTrailer(item);
+                                },
                     ),
                   ),
                 );
@@ -3069,27 +3277,28 @@ class _HeroCarouselState extends State<_HeroCarousel>
             ),
           ),
           if (widget.items.length > 1) ...[
-            SizedBox(height: compactLandscape ? 4 : 6),
+            SizedBox(height: compactLandscape ? 8 : 10),
             AnimatedBuilder(
               animation: _controller,
               builder: (context, _) {
                 final itemCount = widget.items.length;
-                final rawPage =
-                    _controller.hasClients &&
+                final rawPage = _controller.hasClients &&
                         _controller.position.haveDimensions
                     ? _controller.page ?? _page.toDouble()
                     : _page.toDouble();
                 final activeIndex = _logicalIndex(rawPage.round(), itemCount);
-                return _ThreeDotHeroIndicator(
-                  itemCount: itemCount,
-                  activeIndex: activeIndex,
-                  onTap: (index) {
-                    _controller.animateToPage(
-                      _nearestPageForLogicalIndex(index),
-                      duration: const Duration(milliseconds: 320),
-                      curve: Curves.easeOutCubic,
-                    );
-                  },
+                return Center(
+                  child: _AdaptiveHeroIndicator(
+                    itemCount: itemCount,
+                    activeIndex: activeIndex,
+                    onTap: (index) {
+                      _controller.animateToPage(
+                        _nearestPageForLogicalIndex(index),
+                        duration: const Duration(milliseconds: 320),
+                        curve: Curves.easeOutCubic,
+                      );
+                    },
+                  ),
                 );
               },
             ),
@@ -3134,11 +3343,11 @@ class _HeroEditorialHeader extends StatelessWidget {
           _heroHeaderKicker(displayTitle),
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.labelSmall?.copyWith(
-            color: colorScheme.primary.withValues(alpha: 0.78),
-            fontSize: phoneLandscape ? 8.0 : 9.5,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 1.2,
-          ),
+                color: colorScheme.primary.withValues(alpha: 0.78),
+                fontSize: phoneLandscape ? 8.0 : 9.5,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.2,
+              ),
         ),
         SizedBox(height: phoneLandscape ? 1 : 3),
         SizedBox(
@@ -3147,10 +3356,10 @@ class _HeroEditorialHeader extends StatelessWidget {
             text: displayTitle,
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              fontSize: phoneLandscape ? 13 : null,
-              fontWeight: FontWeight.w900,
-              letterSpacing: -0.35,
-            ),
+                  fontSize: phoneLandscape ? 13 : null,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: -0.35,
+                ),
           ),
         ),
         SizedBox(height: phoneLandscape ? 3 : 6),
@@ -3184,15 +3393,8 @@ String _heroHeaderKicker(String title) {
   return 'TODAY\'S CURATION';
 }
 
-List<int> _centeredIndicatorIndexes(int itemCount, int activeIndex) {
-  return [
-    for (var offset = -1; offset <= 1; offset += 1)
-      (activeIndex + offset + itemCount) % itemCount,
-  ];
-}
-
-class _ThreeDotHeroIndicator extends StatelessWidget {
-  const _ThreeDotHeroIndicator({
+class _AdaptiveHeroIndicator extends StatelessWidget {
+  const _AdaptiveHeroIndicator({
     required this.itemCount,
     required this.activeIndex,
     required this.onTap,
@@ -3204,26 +3406,28 @@ class _ThreeDotHeroIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final indexes = _centeredIndicatorIndexes(itemCount, activeIndex);
     final color = Theme.of(context).colorScheme.onSurface;
     return Row(
+      mainAxisSize: MainAxisSize.min,
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        for (var slot = 0; slot < indexes.length; slot += 1) ...[
+        for (var dot = 0; dot < itemCount; dot++) ...[
           GestureDetector(
-            onTap: () => onTap(indexes[slot]),
+            onTap: () => onTap(dot),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
               curve: Curves.easeOutCubic,
-              width: slot == 1 ? 18 : 6,
-              height: 6,
+              width: dot == activeIndex ? 22 : 7,
+              height: 7,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(99),
-                color: color.withValues(alpha: slot == 1 ? 0.72 : 0.24),
+                color: color.withValues(
+                  alpha: dot == activeIndex ? 0.86 : 0.24,
+                ),
               ),
             ),
           ),
-          if (slot != indexes.length - 1) const SizedBox(width: 6),
+          if (dot != itemCount - 1) const SizedBox(width: 7),
         ],
       ],
     );
@@ -3317,9 +3521,8 @@ class _HeroSlide extends StatelessWidget {
     final image = item?.background ?? item?.poster;
     final colorScheme = Theme.of(context).colorScheme;
     final compactLandscape = JuicrVisual.compactLandscape(context);
-    final heroImageAlignment = compactLandscape
-        ? const Alignment(0, -0.72)
-        : Alignment.center;
+    final heroImageAlignment =
+        compactLandscape ? const Alignment(0, -0.72) : Alignment.center;
     final cacheWidth = _homeImageCacheWidth(
       context,
       MediaQuery.sizeOf(context).width * (compactLandscape ? 0.72 : 0.82),
@@ -3416,9 +3619,8 @@ class _HeroSlide extends StatelessWidget {
                     child: Semantics(
                       button: true,
                       enabled: !trailerLoading,
-                      label: trailerLoading
-                          ? 'Loading trailer'
-                          : 'Watch trailer',
+                      label:
+                          trailerLoading ? 'Loading trailer' : 'Watch trailer',
                       child: ExcludeSemantics(
                         child: Material(
                           color: Colors.black.withValues(alpha: 0.58),
@@ -3508,9 +3710,8 @@ class _HeroSlide extends StatelessWidget {
                             color: saved ? colorScheme.primary : Colors.white,
                             style: IconButton.styleFrom(
                               backgroundColor: Colors.transparent,
-                              foregroundColor: saved
-                                  ? colorScheme.primary
-                                  : Colors.white,
+                              foregroundColor:
+                                  saved ? colorScheme.primary : Colors.white,
                             ),
                           ),
                         ),
@@ -3574,27 +3775,26 @@ class _HeroCardCaption extends StatelessWidget {
   Widget build(BuildContext context) {
     final compactLandscape = JuicrVisual.compactLandscape(context);
     final phoneLandscape = JuicrVisual.phoneLandscape(context);
-    final title = loading
-        ? 'Loading picks...'
-        : item?.name ?? 'Find your next watch';
+    final title =
+        loading ? 'Loading picks...' : item?.name ?? 'Find your next watch';
     final subtitle = loading
         ? 'A little shelf we would point at today.'
         : _heroCardSubtitle(item, editorialGenres);
     final titleHeight = focused
         ? (phoneLandscape
-              ? 25.0
-              : compactLandscape
-              ? 34.0
-              : 38.0)
+            ? 25.0
+            : compactLandscape
+                ? 34.0
+                : 38.0)
         : 18.0;
     final titleStyle = Theme.of(context).textTheme.titleLarge?.copyWith(
       color: Colors.white,
       fontSize: focused
           ? (phoneLandscape
-                ? 15
-                : compactLandscape
-                ? 18
-                : 21)
+              ? 15
+              : compactLandscape
+                  ? 18
+                  : 21)
           : 11,
       fontWeight: FontWeight.w900,
       letterSpacing: focused ? -0.8 : -0.2,
@@ -3618,14 +3818,19 @@ class _HeroCardCaption extends StatelessWidget {
             fallback: _AutoScrollTitle(text: title, style: titleStyle),
           ),
         ),
-        SizedBox(height: phoneLandscape ? 1 : compactLandscape ? 2 : 3),
+        SizedBox(
+            height: phoneLandscape
+                ? 1
+                : compactLandscape
+                    ? 2
+                    : 3),
         SizedBox(
           height: focused
               ? (phoneLandscape
-                    ? 13
-                    : compactLandscape
-                    ? 15
-                    : 17)
+                  ? 13
+                  : compactLandscape
+                      ? 15
+                      : 17)
               : 12,
           child: _AutoScrollTitle(
             text: subtitle,
@@ -3633,10 +3838,10 @@ class _HeroCardCaption extends StatelessWidget {
               color: Colors.white.withValues(alpha: 0.82),
               fontSize: focused
                   ? (phoneLandscape
-                        ? 9.5
-                        : compactLandscape
-                        ? 11
-                        : 12)
+                      ? 9.5
+                      : compactLandscape
+                          ? 11
+                          : 12)
                   : 8,
               fontWeight: FontWeight.w700,
               shadows: [
@@ -3804,41 +4009,41 @@ List<_ContinuePromptSummary> _continuePromptSummaries(
 IconData _continuePromptIcon(MediaType type, [int variant = 0]) {
   return switch (type) {
     MediaType.movie => const [
-      Icons.movie_creation_rounded,
-      Icons.local_movies_rounded,
-      Icons.theaters_rounded,
-      Icons.movie_filter_rounded,
-    ][variant % 4],
+        Icons.movie_creation_rounded,
+        Icons.local_movies_rounded,
+        Icons.theaters_rounded,
+        Icons.movie_filter_rounded,
+      ][variant % 4],
     MediaType.series => const [
-      Icons.live_tv_rounded,
-      Icons.tv_rounded,
-      Icons.video_library_rounded,
-      Icons.play_lesson_rounded,
-    ][variant % 4],
+        Icons.live_tv_rounded,
+        Icons.tv_rounded,
+        Icons.video_library_rounded,
+        Icons.play_lesson_rounded,
+      ][variant % 4],
     MediaType.animation => const [
-      Icons.auto_awesome_rounded,
-      Icons.bolt_rounded,
-      Icons.flare_rounded,
-      Icons.blur_on_rounded,
-    ][variant % 4],
+        Icons.auto_awesome_rounded,
+        Icons.bolt_rounded,
+        Icons.flare_rounded,
+        Icons.blur_on_rounded,
+      ][variant % 4],
     MediaType.music => const [
-      Icons.music_note_rounded,
-      Icons.queue_music_rounded,
-      Icons.album_rounded,
-      Icons.graphic_eq_rounded,
-    ][variant % 4],
+        Icons.music_note_rounded,
+        Icons.queue_music_rounded,
+        Icons.album_rounded,
+        Icons.graphic_eq_rounded,
+      ][variant % 4],
     MediaType.nsfw => const [
-      Icons.lock_rounded,
-      Icons.privacy_tip_rounded,
-      Icons.visibility_off_rounded,
-      Icons.shield_rounded,
-    ][variant % 4],
+        Icons.lock_rounded,
+        Icons.privacy_tip_rounded,
+        Icons.visibility_off_rounded,
+        Icons.shield_rounded,
+      ][variant % 4],
     MediaType.liveTv => const [
-      Icons.tv_rounded,
-      Icons.live_tv_rounded,
-      Icons.connected_tv_rounded,
-      Icons.sensors_rounded,
-    ][variant % 4],
+        Icons.tv_rounded,
+        Icons.live_tv_rounded,
+        Icons.connected_tv_rounded,
+        Icons.sensors_rounded,
+      ][variant % 4],
   };
 }
 
@@ -3857,41 +4062,41 @@ String _continuePromptTypeLabel(MediaType type, int count) {
 List<String> _continuePromptLines(MediaType type, int count, String label) {
   return switch (type) {
     MediaType.movie => [
-      '$count $label left unwatched',
-      '$count $label saved for the good part',
-      '$count $label saved from the cliff',
-      '$count $label keeping the couch warm',
-    ],
+        '$count $label left unwatched',
+        '$count $label saved for the good part',
+        '$count $label saved from the cliff',
+        '$count $label keeping the couch warm',
+      ],
     MediaType.series => [
-      '$count $label still mid-conversation',
-      '$count $label with loose ends',
-      '$count $label asking for one more',
-      '$count $label waiting where you left them',
-    ],
+        '$count $label still mid-conversation',
+        '$count $label with loose ends',
+        '$count $label asking for one more',
+        '$count $label waiting where you left them',
+      ],
     MediaType.animation => [
-      '$count $label arcs still glowing',
-      '$count $label saved mid-power-up',
-      '$count $label one episode from chaos',
-      '$count $label with energy left',
-    ],
+        '$count $label arcs still glowing',
+        '$count $label saved mid-power-up',
+        '$count $label one episode from chaos',
+        '$count $label with energy left',
+      ],
     MediaType.music => [
-      '$count $label sessions still warm',
-      '$count $label picks waiting their turn',
-      '$count $label tracks left humming',
-      '$count $label moments you parked',
-    ],
+        '$count $label sessions still warm',
+        '$count $label picks waiting their turn',
+        '$count $label tracks left humming',
+        '$count $label moments you parked',
+      ],
     MediaType.nsfw => [
-      '$count $label kept private',
-      '$count $label waiting quietly',
-      '$count $label saved on your terms',
-      '$count $label staying out of the way',
-    ],
+        '$count $label kept private',
+        '$count $label waiting quietly',
+        '$count $label saved on your terms',
+        '$count $label staying out of the way',
+      ],
     MediaType.liveTv => [
-      '$count $label moments waiting',
-      '$count $label sessions saved',
-      '$count $label picks parked',
-      '$count $label ready when you are',
-    ],
+        '$count $label moments waiting',
+        '$count $label sessions saved',
+        '$count $label picks parked',
+        '$count $label ready when you are',
+      ],
   };
 }
 
@@ -3978,7 +4183,11 @@ class _ContinuePromptCardState extends State<_ContinuePromptCard> {
           borderRadius: BorderRadius.circular(18),
           onTap: widget.onTap,
           child: Container(
-            padding: EdgeInsets.all(phoneLandscape ? 8 : compactLandscape ? 10 : 14),
+            padding: EdgeInsets.all(phoneLandscape
+                ? 8
+                : compactLandscape
+                    ? 10
+                    : 14),
             decoration: JuicrVisual.elevatedCardDecoration(
               colorScheme,
               radius: 18,
@@ -3990,8 +4199,16 @@ class _ContinuePromptCardState extends State<_ContinuePromptCard> {
             child: Row(
               children: [
                 Container(
-                  width: phoneLandscape ? 28 : compactLandscape ? 34 : 42,
-                  height: phoneLandscape ? 28 : compactLandscape ? 34 : 42,
+                  width: phoneLandscape
+                      ? 28
+                      : compactLandscape
+                          ? 34
+                          : 42,
+                  height: phoneLandscape
+                      ? 28
+                      : compactLandscape
+                          ? 34
+                          : 42,
                   decoration: JuicrVisual.elevatedIconDecoration(
                     colorScheme,
                     radius: 14,
@@ -4016,11 +4233,20 @@ class _ContinuePromptCardState extends State<_ContinuePromptCard> {
                         'continue-icon-${summary.icon.codePoint}-${summary.icon.fontFamily}-${summary.subtitle}',
                       ),
                       color: colorScheme.primary,
-                      size: phoneLandscape ? 16 : compactLandscape ? 19 : 22,
+                      size: phoneLandscape
+                          ? 16
+                          : compactLandscape
+                              ? 19
+                              : 22,
                     ),
                   ),
                 ),
-                SizedBox(width: phoneLandscape ? 8 : compactLandscape ? 10 : 12),
+                SizedBox(
+                    width: phoneLandscape
+                        ? 8
+                        : compactLandscape
+                            ? 10
+                            : 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -4103,13 +4329,12 @@ class _ContinuePromptAnimatedContext extends StatelessWidget {
         );
       },
       transitionBuilder: (child, animation) {
-        final offset =
-            Tween<Offset>(
-              begin: const Offset(0.04, 0),
-              end: Offset.zero,
-            ).animate(
-              CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
-            );
+        final offset = Tween<Offset>(
+          begin: const Offset(0.04, 0),
+          end: Offset.zero,
+        ).animate(
+          CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
+        );
         return FadeTransition(
           opacity: animation,
           child: SlideTransition(position: offset, child: child),
@@ -4170,7 +4395,9 @@ class _HomeRail extends StatelessWidget {
                           height: 22,
                           child: _AutoScrollTitle(
                             text: displayTitle,
-                            style: Theme.of(context).textTheme.titleMedium
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
                                 ?.copyWith(
                                   color: Theme.of(context).colorScheme.primary,
                                   fontWeight: FontWeight.w900,
@@ -4184,7 +4411,9 @@ class _HomeRail extends StatelessWidget {
                             height: 17,
                             child: _AutoScrollTitle(
                               text: subtitle!,
-                              style: Theme.of(context).textTheme.bodySmall
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
                                   ?.copyWith(
                                     color: Theme.of(
                                       context,
@@ -4207,8 +4436,8 @@ class _HomeRail extends StatelessWidget {
               height: phoneLandscape
                   ? 104
                   : compactLandscape
-                  ? 122
-                  : 206,
+                      ? 122
+                      : 206,
               child: ListView.separated(
                 padding: EdgeInsets.symmetric(
                   horizontal: compactLandscape ? 14 : 18,
@@ -4314,7 +4543,9 @@ class _RankedHomeRail extends StatelessWidget {
                           height: 23,
                           child: _AutoScrollTitle(
                             text: displayTitle,
-                            style: Theme.of(context).textTheme.titleMedium
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
                                 ?.copyWith(
                                   color: Theme.of(context).colorScheme.primary,
                                   fontWeight: FontWeight.w900,
@@ -4328,7 +4559,9 @@ class _RankedHomeRail extends StatelessWidget {
                             height: 17,
                             child: _AutoScrollTitle(
                               text: subtitle,
-                              style: Theme.of(context).textTheme.bodySmall
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
                                   ?.copyWith(
                                     color: Theme.of(
                                       context,
@@ -4355,8 +4588,8 @@ class _RankedHomeRail extends StatelessWidget {
               height: phoneLandscape
                   ? 104
                   : compactLandscape
-                  ? 122
-                  : 194,
+                      ? 122
+                      : 194,
               child: ListView.separated(
                 padding: EdgeInsets.symmetric(
                   horizontal: compactLandscape ? 14 : 18,
@@ -4668,7 +4901,9 @@ class _TopTenWideCard extends StatelessWidget {
                               item.subtitle,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodySmall
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
                                   ?.copyWith(
                                     color: Colors.white70,
                                     fontWeight: FontWeight.w700,
@@ -4679,7 +4914,9 @@ class _TopTenWideCard extends StatelessWidget {
                               reason,
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.labelMedium
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelMedium
                                   ?.copyWith(
                                     color: Colors.white,
                                     fontWeight: FontWeight.w900,
@@ -4854,9 +5091,9 @@ class _HomeShelfGridCard extends StatelessWidget {
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: colorScheme.onSurface.withValues(alpha: 0.9),
-                  fontWeight: FontWeight.w900,
-                ),
+                      color: colorScheme.onSurface.withValues(alpha: 0.9),
+                      fontWeight: FontWeight.w900,
+                    ),
               ),
             ],
           ),
@@ -4933,9 +5170,9 @@ class _RankedPosterCard extends StatelessWidget {
                   child: _AutoScrollTitle(
                     text: item.name,
                     style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: colorScheme.onSurface.withValues(alpha: 0.9),
-                      fontWeight: FontWeight.w900,
-                    ),
+                          color: colorScheme.onSurface.withValues(alpha: 0.9),
+                          fontWeight: FontWeight.w900,
+                        ),
                   ),
                 ),
               ],
@@ -4971,12 +5208,12 @@ class _RankBadge extends StatelessWidget {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: Colors.white,
-              fontWeight: FontWeight.w900,
-              fontSize: 11.5,
-              height: 1.05,
-              letterSpacing: 0.2,
-            ),
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 11.5,
+                  height: 1.05,
+                  letterSpacing: 0.2,
+                ),
           ),
         ),
       ),
@@ -5078,9 +5315,8 @@ class _HomeLandscapeCard extends StatelessWidget {
                       right: 10,
                       bottom: 9,
                       child: LinearProgressIndicator(
-                        value: entry.progress!.progress
-                            .clamp(0.0, 1.0)
-                            .toDouble(),
+                        value:
+                            entry.progress!.progress.clamp(0.0, 1.0).toDouble(),
                         minHeight: 3,
                         borderRadius: BorderRadius.circular(99),
                         backgroundColor: Colors.white.withValues(alpha: 0.22),
@@ -5221,9 +5457,9 @@ class _HomePosterCard extends StatelessWidget {
                 _AutoScrollTitle(
                   text: entry.item.name,
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.9),
-                    fontWeight: FontWeight.w800,
-                  ),
+                        color: colorScheme.onSurface.withValues(alpha: 0.9),
+                        fontWeight: FontWeight.w800,
+                      ),
                 ),
               ],
             ),
@@ -5552,18 +5788,17 @@ class _HeroCarouselSkeletonStage extends StatelessWidget {
       builder: (context, constraints) {
         final compactLandscape = JuicrVisual.compactLandscape(context);
         final phoneLandscape = JuicrVisual.phoneLandscape(context);
-        final cardWidth =
-            (constraints.maxWidth *
+        final cardWidth = (constraints.maxWidth *
                 (compactLandscape ? _homeHeroViewportFraction : 0.76)) -
             (phoneLandscape
                 ? 68.0
                 : compactLandscape
-                ? 36.0
-                : 0.0);
+                    ? 36.0
+                    : 0.0);
         final sideOffset = compactLandscape
             ? phoneLandscape
-                  ? (cardWidth * 0.32).clamp(86.0, 132.0)
-                  : (cardWidth * 0.56).clamp(148.0, 210.0)
+                ? (cardWidth * 0.32).clamp(86.0, 132.0)
+                : (cardWidth * 0.56).clamp(148.0, 210.0)
             : (cardWidth * 0.92).clamp(270.0, 318.0);
         final stageHeight = _homeHeroStageHeight(context);
         final cardHeight = compactLandscape ? stageHeight - 18.0 : 190.0;

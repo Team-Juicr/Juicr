@@ -3917,19 +3917,84 @@ class AppState {
     final exact = current[key];
     final contentKey = contentPlaybackKeyFor(item, key);
     final canonical = current[contentKey];
-    final bestKnown = _preferredResumeEntry(exact, canonical);
-    if (bestKnown != null) return bestKnown;
+    var bestKnown = _preferredResumeEntry(exact, canonical);
 
-    if (!item.type.isPlayableSeries) return current[item.id];
+    final direct = current[item.id];
+    bestKnown = _preferredResumeEntry(bestKnown, direct);
     final targetIdentity =
         '${item.type.compatTypeValue}:${contentKey.toLowerCase()}';
-    ContinueWatchingEntry? bestIdentityMatch;
     for (final entry in current.values) {
       if (_continueWatchingIdentityFor(entry) == targetIdentity) {
-        bestIdentityMatch = _preferredResumeEntry(bestIdentityMatch, entry);
+        bestKnown = _preferredResumeEntry(bestKnown, entry);
       }
     }
-    return bestIdentityMatch;
+    if (!item.type.isPlayableSeries) {
+      for (final entry in current.values) {
+        if (_sameProgressMovieIdentity(item, entry.item)) {
+          bestKnown = _preferredResumeEntry(bestKnown, entry);
+        }
+      }
+    }
+    return bestKnown;
+  }
+
+  static Map<String, Object> progressLookupDiagnostics(
+    CatalogItem item, {
+    String? playbackKey,
+  }) {
+    final current = _continueWatchingSnapshot;
+    final key = playbackKey?.trim();
+    final contentKey =
+        key == null || key.isEmpty ? null : contentPlaybackKeyFor(item, key);
+    final exact = key == null || key.isEmpty ? null : current[key];
+    final canonical = contentKey == null ? null : current[contentKey];
+    final direct = current[item.id];
+    final selected = progressFor(item, playbackKey: playbackKey);
+    var routeMatches = 0;
+    if (contentKey != null) {
+      final targetIdentity =
+          '${item.type.compatTypeValue}:${contentKey.toLowerCase()}';
+      routeMatches = current.values
+          .where(
+            (entry) => _continueWatchingIdentityFor(entry) == targetIdentity,
+          )
+          .length;
+    }
+    var externalMatches = 0;
+    if (!item.type.isPlayableSeries) {
+      externalMatches = current.values
+          .where((entry) => _sameProgressMovieIdentity(item, entry.item))
+          .length;
+    }
+    return <String, Object>{
+      'entryCount': current.length,
+      'playbackKeyPresent': key != null && key.isNotEmpty,
+      'playbackKeyEqualsItem': key != null && key == item.id,
+      'exactSeconds': exact?.watchedSeconds ?? -1,
+      'canonicalSeconds': canonical?.watchedSeconds ?? -1,
+      'directSeconds': direct?.watchedSeconds ?? -1,
+      'routeMatches': routeMatches,
+      'externalMatches': externalMatches,
+      'selectedSeconds': selected?.watchedSeconds ?? -1,
+    };
+  }
+
+  static bool _sameProgressMovieIdentity(CatalogItem a, CatalogItem b) {
+    if (a.type != b.type || a.type.isPlayableSeries) return false;
+
+    final aImdb = a.imdbId?.trim().toLowerCase();
+    final bImdb = b.imdbId?.trim().toLowerCase();
+    if (aImdb != null &&
+        aImdb.isNotEmpty &&
+        bImdb != null &&
+        bImdb.isNotEmpty &&
+        aImdb == bImdb) {
+      return true;
+    }
+
+    final aTmdb = a.tmdbId;
+    final bTmdb = b.tmdbId;
+    return aTmdb != null && bTmdb != null && aTmdb == bTmdb;
   }
 
   static ContinueWatchingEntry? _preferredResumeEntry(
@@ -4051,7 +4116,7 @@ class AppState {
     if (item.type.isLive) return;
     if (generation != null && generation != _continueWatchingGeneration) return;
     final fallbackDuration = durationSeconds == null || durationSeconds <= 0
-        ? (item.type.isPlayableSeries ? 10 * 60 * 60 : 45 * 60)
+        ? 45 * 60
         : durationSeconds;
     final current = _continueWatchingSnapshot;
     final existing = current[playbackKey];
@@ -4229,8 +4294,8 @@ class AppState {
 
     final current = _continueWatchingSnapshot;
     final existing = progressFor(item, playbackKey: playbackKey);
-    final durationSeconds = existing?.durationSeconds ??
-        (item.type.isPlayableSeries ? 10 * 60 * 60 : 45 * 60);
+    if (existing == null) return;
+    final durationSeconds = existing.durationSeconds;
     final watchedSeconds =
         (existing?.watchedSeconds ?? 0).clamp(0, durationSeconds).toInt();
     final credibleWatchedSeconds = (existing?.credibleWatchedSeconds ?? 0)
@@ -5677,6 +5742,7 @@ int _verifiedSourceFailurePenalty(String reason) {
   if (normalized.contains('403') ||
       normalized.contains('404') ||
       normalized.contains('expired') ||
+      normalized.contains('timeout') ||
       normalized.contains('descriptor_missing') ||
       normalized.contains('unreadable')) {
     return 100;
@@ -5694,6 +5760,7 @@ bool _verifiedSourceIsHardExpired(String reason) {
   return normalized.contains('403') ||
       normalized.contains('404') ||
       normalized.contains('expired') ||
+      normalized.contains('timeout') ||
       normalized.contains('descriptor_missing') ||
       normalized.contains('unreadable');
 }
@@ -5773,6 +5840,25 @@ String _safePlaybackEngineOrAuto(dynamic value) {
   };
 }
 
+String formatRemainingWatchTimeValue(int remainingSeconds) {
+  final seconds = remainingSeconds < 0 ? 0 : remainingSeconds;
+  if (seconds < 60) return 'Less than 1 minute';
+
+  final totalMinutes = (seconds / 60).ceil();
+  final hours = totalMinutes ~/ 60;
+  final minutes = totalMinutes.remainder(60);
+  final hourLabel = hours == 1 ? 'hour' : 'hours';
+  final minuteLabel = minutes == 1 ? 'minute' : 'minutes';
+
+  if (hours <= 0) return '$totalMinutes $minuteLabel';
+  if (minutes <= 0) return '$hours $hourLabel';
+  return '$hours $hourLabel and $minutes $minuteLabel';
+}
+
+String formatRemainingWatchTime(int remainingSeconds) {
+  return '${formatRemainingWatchTimeValue(remainingSeconds)} left';
+}
+
 class ContinueWatchingEntry {
   const ContinueWatchingEntry({
     required this.key,
@@ -5807,27 +5893,37 @@ class ContinueWatchingEntry {
         (progress >= 0.92 || remainingSeconds <= 3 * 60)) {
       return 'Almost done';
     }
-    final minutes = (remainingSeconds / 60).ceil();
-    if (minutes <= 1) return 'Less than 1 min left';
-    return '$minutes min left';
+    return formatRemainingWatchTime(remainingSeconds);
+  }
+
+  String get remainingTimeLabel {
+    if (watchedSeconds > 0 &&
+        (progress >= 0.92 || remainingSeconds <= 3 * 60)) {
+      return 'Almost done';
+    }
+    return formatRemainingWatchTimeValue(remainingSeconds);
   }
 
   factory ContinueWatchingEntry.fromJson(Map<String, dynamic> json) {
+    final item = CatalogItem.fromJson(
+      (json['item'] is Map<String, dynamic>)
+          ? json['item'] as Map<String, dynamic>
+          : const {},
+    );
     final watchedSeconds =
         int.tryParse((json['watchedSeconds'] ?? '').toString()) ?? 0;
     final credibleWatchedSeconds =
         int.tryParse((json['credibleWatchedSeconds'] ?? '').toString()) ?? 0;
     final parsedDuration =
         int.tryParse((json['durationSeconds'] ?? '').toString()) ?? 45 * 60;
-    final durationSeconds = parsedDuration <= 0 ? 45 * 60 : parsedDuration;
+    final durationSeconds = parsedDuration <= 0 ||
+            (item.type.isPlayableSeries && parsedDuration == 10 * 60 * 60)
+        ? 45 * 60
+        : parsedDuration;
     final rawProgress = double.tryParse((json['progress'] ?? '').toString());
     return ContinueWatchingEntry(
       key: (json['key'] ?? '').toString(),
-      item: CatalogItem.fromJson(
-        (json['item'] is Map<String, dynamic>)
-            ? json['item'] as Map<String, dynamic>
-            : const {},
-      ),
+      item: item,
       title: (json['title'] ?? 'Continue watching').toString(),
       subtitle: json['subtitle']?.toString(),
       watchedSeconds: watchedSeconds,

@@ -8,6 +8,7 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 import 'app_state.dart' as juicr;
 import 'diagnostic_log.dart';
+import 'system_ui.dart';
 
 class JuicrAdPolicy {
   JuicrAdPolicy._();
@@ -43,17 +44,9 @@ class JuicrAdPolicy {
   static Completer<void>? _fullScreenAdClosedCompleter;
   static const List<DeviceOrientation> _playbackAdPortraitOrientations =
       <DeviceOrientation>[
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.portraitDown,
-      ];
-  static const List<DeviceOrientation> _allDeviceOrientations =
-      <DeviceOrientation>[
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.portraitDown,
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ];
-
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ];
   static String get bannerAdUnitId {
     if (defaultTargetPlatform == TargetPlatform.iOS) return _iosBannerAdUnitId;
     return kReleaseMode ? _androidBannerAdUnitId : _androidTestBannerAdUnitId;
@@ -288,7 +281,9 @@ class JuicrAdPolicy {
     String reason,
   ) async {
     try {
-      await SystemChrome.setPreferredOrientations(_allDeviceOrientations);
+      await applyJuicrShellOrientation(
+        forcePortrait: juicr.AppState.forcePortraitShell.value,
+      );
       DiagnosticLog.add('ads rewarded orientation restored reason=$reason');
     } catch (error, stack) {
       DiagnosticLog.asyncError(error, stack);
@@ -601,9 +596,8 @@ class _JuicrBannerAdSlotState extends State<JuicrBannerAdSlot> {
               _markBannerNoFillCooldown();
             }
             _scheduleRetry(
-              delay: error.code == 3
-                  ? _bannerNoFillRetryDelay
-                  : _bannerRetryDelay,
+              delay:
+                  error.code == 3 ? _bannerNoFillRetryDelay : _bannerRetryDelay,
             );
           }
           DiagnosticLog.add(
