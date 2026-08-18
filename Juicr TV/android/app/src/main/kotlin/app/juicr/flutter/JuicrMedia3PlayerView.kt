@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.Matrix
 import android.net.Uri
+import android.os.Build
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -20,6 +21,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
@@ -35,6 +37,33 @@ import kotlin.math.max
 private const val DEFAULT_MEDIA3_USER_AGENT = "JuicrApp/1 Android Media3"
 private const val DEFAULT_MAX_AUTO_VIDEO_WIDTH = 1920
 private const val DEFAULT_MAX_AUTO_VIDEO_HEIGHT = 1080
+
+private fun isAndroidEmulator(): Boolean {
+    val hardware = Build.HARDWARE.lowercase()
+    val model = Build.MODEL.lowercase()
+    return hardware.contains("ranchu") ||
+        hardware.contains("goldfish") ||
+        model.contains("sdk_gphone")
+}
+
+private fun media3CodecSelectorForDevice(sourceType: String): MediaCodecSelector {
+    if (!isAndroidEmulator()) return MediaCodecSelector.DEFAULT
+    if (sourceType != "hls" && sourceType != "ts") return MediaCodecSelector.DEFAULT
+    return MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+        if (mimeType != MimeTypes.VIDEO_H264) {
+            return@MediaCodecSelector MediaCodecSelector.DEFAULT.getDecoderInfos(
+                mimeType,
+                requiresSecureDecoder,
+                requiresTunnelingDecoder
+            )
+        }
+        MediaCodecSelector.PREFER_SOFTWARE.getDecoderInfos(
+            mimeType,
+            requiresSecureDecoder,
+            requiresTunnelingDecoder
+        )
+    }
+}
 
 class JuicrMedia3PlayerViewFactory(
     messenger: BinaryMessenger
@@ -163,6 +192,7 @@ class JuicrMedia3PlayerView(
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
         val renderersFactory = DefaultRenderersFactory(context)
+            .setMediaCodecSelector(media3CodecSelectorForDevice(sourceType))
             .setEnableDecoderFallback(true)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         player = ExoPlayer.Builder(context)

@@ -4,7 +4,22 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+int reportLibVlcRelayStreamedBytes(
+  int currentBytes,
+  int chunkBytes,
+  void Function(int streamedBytes)? onStreamedBytes,
+) {
+  final total = currentBytes + chunkBytes;
+  onStreamedBytes?.call(total);
+  return total;
+}
+
 class LibVlcHlsRelay {
+  static const Set<String> _crossOriginSafeHeaders = <String>{
+    HttpHeaders.refererHeader,
+    'origin',
+  };
+
   LibVlcHlsRelay._({
     required this.localUri,
     required HttpServer server,
@@ -20,19 +35,19 @@ class LibVlcHlsRelay {
     required void Function(int streamedSegments)? onContinuousTsProgress,
     required void Function(int streamedBytes)? onContinuousTsBytes,
     required void Function(String message) onEvent,
-  }) : _server = server,
-       _client = client,
-       _uriById = uriById,
-       _playlistIds = playlistIds,
-       _headers = headers,
-       _limitHeadersToUpstreamOrigin = limitHeadersToUpstreamOrigin,
-       _resumePosition = resumePosition,
-       _token = token,
-       _continuousTsMode = continuousTsMode,
-       _onDuration = onDuration,
-       _onContinuousTsProgress = onContinuousTsProgress,
-       _onContinuousTsBytes = onContinuousTsBytes,
-       _onEvent = ((message) => onEvent(_redactRelayEvent(message, token))) {
+  })  : _server = server,
+        _client = client,
+        _uriById = uriById,
+        _playlistIds = playlistIds,
+        _headers = headers,
+        _limitHeadersToUpstreamOrigin = limitHeadersToUpstreamOrigin,
+        _resumePosition = resumePosition,
+        _token = token,
+        _continuousTsMode = continuousTsMode,
+        _onDuration = onDuration,
+        _onContinuousTsProgress = onContinuousTsProgress,
+        _onContinuousTsBytes = onContinuousTsBytes,
+        _onEvent = ((message) => onEvent(_redactRelayEvent(message, token))) {
     _subscription = _server.listen(_handleRequest);
   }
 
@@ -93,6 +108,8 @@ class LibVlcHlsRelay {
   final void Function(String message) _onEvent;
   late final StreamSubscription<HttpRequest> _subscription;
   var _closed = false;
+  var _continuousRequestGeneration = 0;
+  final Set<HttpResponse> _continuousResponses = <HttpResponse>{};
   var _nextId = 0;
   var _requestCount = 0;
   var _playlistCount = 0;
@@ -115,9 +132,15 @@ class LibVlcHlsRelay {
   Future<void> stop() async {
     if (_closed) return;
     _closed = true;
-    await _subscription.cancel();
+    _continuousRequestGeneration += 1;
     _client.close(force: true);
-    await _server.close(force: true);
+    for (final response in List<HttpResponse>.of(_continuousResponses)) {
+      try {
+        await response.close();
+      } catch (_) {}
+    }
+    await _server.close(force: false);
+    await _subscription.cancel();
     _uriById.clear();
   }
 
@@ -175,8 +198,7 @@ class LibVlcHlsRelay {
       final encodingBucket = _encodingBucket(
         upstreamResponse.headers.value(HttpHeaders.contentEncodingHeader),
       );
-      final looksLikePlaylist =
-          knownPlaylistRequest ||
+      final looksLikePlaylist = knownPlaylistRequest ||
           _pathLooksLikePlaylist(upstream.path) ||
           (contentType?.mimeType.toLowerCase().contains('mpegurl') ?? false);
       if (looksLikePlaylist) _playlistIds.add(id);
@@ -271,7 +293,7 @@ class LibVlcHlsRelay {
       try {
         await _closeWith(request.response, HttpStatus.badGateway);
       } catch (_) {}
-      }
+    }
   }
 
   Future<_RelayPlaylistBody?> _flattenRootMasterPlaylist(
@@ -321,23 +343,27 @@ class LibVlcHlsRelay {
     Uri playlistUri, {
     String? range,
   }) async {
+    final requestGeneration = ++_continuousRequestGeneration;
     _playlistCount += 1;
     request.response.statusCode = HttpStatus.ok;
+    request.response.bufferOutput = false;
     request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
     request.response.headers.set(HttpHeaders.acceptRangesHeader, 'none');
-    request.response.headers.contentType = ContentType('video', 'mp2t');
     if (request.method == 'HEAD') {
+      request.response.headers.contentType = ContentType('video', 'mp2t');
       await request.response.close();
       return;
     }
+    _continuousResponses.add(request.response);
 
     var streamedSegments = 0;
     var streamedBytes = 0;
     var rejectedSegments = 0;
     try {
-      final plan = _trimPlanForResume(
-        await _continuousTsPlan(playlistUri),
-      );
+      var plan = _trimPlanForResume(await _continuousTsPlan(playlistUri));
+      request.response.headers.contentType = plan.isFragmentedMp4
+          ? ContentType('video', 'mp4')
+          : ContentType('video', 'mp2t');
       if (plan.segmentUris.isEmpty) {
         _upstreamErrorCount += 1;
         _onEvent(
@@ -353,76 +379,83 @@ class LibVlcHlsRelay {
         'native libvlc hls relay continuous-ts start segments=${_countBucket(plan.segmentUris.length)} '
         'playlistDepth=${plan.playlistDepth} duration=${_durationBucket(plan.duration)} $summary',
       );
-      final segmentQueue = List<Uri>.of(plan.segmentUris);
-      while (segmentQueue.isNotEmpty) {
-        if (_closed) break;
-        final segmentUri = segmentQueue.removeAt(0);
-        streamedSegments += 1;
-        final segmentRequest = await _openUpstream(segmentUri);
-        final segmentResponse = await segmentRequest.close();
-        _lastStatusBucket = _statusBucket(segmentResponse.statusCode);
-        if (segmentResponse.statusCode < 200 ||
-            segmentResponse.statusCode >= 300) {
-          _upstreamErrorCount += 1;
-          rejectedSegments += 1;
-          _onEvent(
-            'native libvlc hls relay continuous-ts segment rejected status=$_lastStatusBucket '
-            'streamed=${_countBucket(streamedSegments)} '
-            'rejected=${_countBucket(rejectedSegments)} $summary',
+      final emittedSegmentUris = <Uri>{};
+      Uri? emittedMapUri;
+      while (_continuousRequestIsActive(requestGeneration)) {
+        for (var index = 0;
+            index < plan.segmentUris.length &&
+                _continuousRequestIsActive(requestGeneration);
+            index += 1) {
+          final segmentUri = plan.segmentUris[index];
+          if (emittedSegmentUris.contains(segmentUri)) continue;
+
+          final mapUri = index < plan.segmentMapUris.length
+              ? plan.segmentMapUris[index]
+              : null;
+          if (mapUri != null && mapUri != emittedMapUri) {
+            final mapBytes = await _pipeContinuousResource(
+              mapUri,
+              request.response,
+              playlistUri: plan.playlistUri,
+              requestGeneration: requestGeneration,
+              normalizeTs: false,
+              onStreamedBytes: (bytes) =>
+                  _onContinuousTsBytes?.call(streamedBytes + bytes),
+            );
+            if (mapBytes == null) {
+              rejectedSegments += 1;
+              break;
+            }
+            emittedMapUri = mapUri;
+            streamedBytes += mapBytes;
+            _onContinuousTsBytes?.call(streamedBytes);
+            await request.response.flush();
+          }
+
+          final segmentBytes = await _pipeContinuousResource(
+            segmentUri,
+            request.response,
+            playlistUri: plan.playlistUri,
+            requestGeneration: requestGeneration,
+            normalizeTs: !plan.isFragmentedMp4,
+            onStreamedBytes: (bytes) =>
+                _onContinuousTsBytes?.call(streamedBytes + bytes),
           );
-          await segmentResponse.drain<void>();
-          if (rejectedSegments >= 12) break;
-          continue;
-        }
-        rejectedSegments = 0;
-        final segmentContentType = segmentResponse.headers.contentType;
-        if (_contentTypeBucket(segmentContentType) == 'playlist') {
-          final encodingBucket = _encodingBucket(
-            segmentResponse.headers.value(HttpHeaders.contentEncodingHeader),
-          );
-          final body = _decodePlaylist(
-            await _collectBytes(segmentResponse),
-            encodingBucket,
-          );
-          final nestedPlan = _playlistSegmentPlan(segmentUri, body);
-          _onEvent(
-            'native libvlc hls relay continuous-ts segment playlist expanded '
-            'children=${_countBucket(nestedPlan.segmentUris.length)} '
-            '${_playlistShape(body)}',
-          );
-          if (nestedPlan.segmentUris.isEmpty) {
-            _upstreamErrorCount += 1;
+          if (segmentBytes == null) {
             rejectedSegments += 1;
             if (rejectedSegments >= 12) break;
             continue;
           }
-          segmentQueue.insertAll(0, nestedPlan.segmentUris);
-          continue;
+          rejectedSegments = 0;
+          emittedSegmentUris.add(segmentUri);
+          streamedSegments += 1;
+          streamedBytes += segmentBytes;
+          _onContinuousTsBytes?.call(streamedBytes);
+          await request.response.flush();
+          if (streamedSegments == 1 || streamedSegments % 20 == 0) {
+            _onContinuousTsProgress?.call(streamedSegments);
+            _onEvent(
+              'native libvlc hls relay continuous-ts progress streamed=${_countBucket(streamedSegments)} '
+              'bytes=${_byteBucket(streamedBytes)} $summary',
+            );
+          }
         }
-        _mediaCount += 1;
-        streamedBytes += await _pipeMediaResponse(
-          segmentResponse,
-          request.response,
-          contentTypeBucket: _contentTypeBucket(
-            segmentResponse.headers.contentType,
-          ),
-          normalizeTs: true,
-        );
-        _onContinuousTsBytes?.call(streamedBytes);
-        if (streamedSegments == 1 || streamedSegments % 20 == 0) {
-          _onContinuousTsProgress?.call(streamedSegments);
-          _onEvent(
-            'native libvlc hls relay continuous-ts progress streamed=${_countBucket(streamedSegments)} '
-            'bytes=${_byteBucket(streamedBytes)} $summary',
-          );
+
+        if (!_continuousRequestIsActive(requestGeneration) ||
+            plan.hasEndList ||
+            rejectedSegments >= 12) {
+          break;
         }
+        await Future<void>.delayed(plan.reloadInterval);
+        if (!_continuousRequestIsActive(requestGeneration)) break;
+        plan = await _continuousTsPlan(playlistUri);
       }
       _onEvent(
         'native libvlc hls relay continuous-ts finished streamed=${_countBucket(streamedSegments)} $summary',
       );
       await request.response.close();
     } catch (error) {
-      if (_closed) {
+      if (!_continuousRequestIsActive(requestGeneration)) {
         _onEvent(
           'native libvlc hls relay continuous-ts stopped reason=relay_closed streamed=${_countBucket(streamedSegments)} $summary',
         );
@@ -438,7 +471,59 @@ class LibVlcHlsRelay {
       try {
         await request.response.close();
       } catch (_) {}
+    } finally {
+      _continuousResponses.remove(request.response);
+      if (requestGeneration == _continuousRequestGeneration) {
+        _continuousRequestGeneration += 1;
+      }
     }
+  }
+
+  Future<int?> _pipeContinuousResource(
+    Uri uri,
+    HttpResponse output, {
+    required Uri playlistUri,
+    required int requestGeneration,
+    required bool normalizeTs,
+    void Function(int streamedBytes)? onStreamedBytes,
+  }) async {
+    if (!_continuousRequestIsActive(requestGeneration)) return null;
+    final fallbackUri = _inheritedPlaylistQueryUri(uri, playlistUri);
+    final requestUris = <Uri>[uri, if (fallbackUri != null) fallbackUri];
+    for (var index = 0; index < requestUris.length; index += 1) {
+      final upstreamRequest = await _openUpstream(requestUris[index]);
+      final upstreamResponse = await upstreamRequest.close();
+      if (!_continuousRequestIsActive(requestGeneration)) return null;
+      _lastStatusBucket = _statusBucket(upstreamResponse.statusCode);
+      if (upstreamResponse.statusCode < 200 ||
+          upstreamResponse.statusCode >= 300) {
+        _upstreamErrorCount += 1;
+        await upstreamResponse.drain<void>();
+        continue;
+      }
+      _mediaCount += 1;
+      return _pipeMediaResponse(
+        upstreamResponse,
+        output,
+        contentTypeBucket:
+            _contentTypeBucket(upstreamResponse.headers.contentType),
+        normalizeTs: normalizeTs,
+        shouldContinue: () => _continuousRequestIsActive(requestGeneration),
+        onStreamedBytes: onStreamedBytes,
+      );
+    }
+    return null;
+  }
+
+  static Uri? _inheritedPlaylistQueryUri(Uri child, Uri playlist) {
+    if (child.hasQuery || !playlist.hasQuery || !_sameOrigin(child, playlist)) {
+      return null;
+    }
+    return child.replace(query: playlist.query);
+  }
+
+  bool _continuousRequestIsActive(int requestGeneration) {
+    return !_closed && requestGeneration == _continuousRequestGeneration;
   }
 
   _ContinuousTsPlan _trimPlanForResume(_ContinuousTsPlan plan) {
@@ -472,8 +557,15 @@ class LibVlcHlsRelay {
       segmentDurations: List<Duration>.unmodifiable(
         plan.segmentDurations.skip(skippedSegments),
       ),
+      segmentMapUris: List<Uri?>.unmodifiable(
+        plan.segmentMapUris.skip(skippedSegments),
+      ),
+      playlistUri: plan.playlistUri,
       duration: plan.duration,
       playlistDepth: plan.playlistDepth,
+      hasEndList: plan.hasEndList,
+      reloadInterval: plan.reloadInterval,
+      isFragmentedMp4: plan.isFragmentedMp4,
     );
   }
 
@@ -509,8 +601,12 @@ class LibVlcHlsRelay {
         return _ContinuousTsPlan(
           segmentUris: const <Uri>[],
           segmentDurations: const <Duration>[],
+          segmentMapUris: const <Uri?>[],
+          playlistUri: currentUri,
           duration: Duration.zero,
           playlistDepth: depth,
+          hasEndList: _playlistHasEndList(body),
+          reloadInterval: _playlistReloadInterval(body),
         );
       }
       if (_playlistLooksLikeMaster(body)) {
@@ -528,15 +624,24 @@ class LibVlcHlsRelay {
       return _ContinuousTsPlan(
         segmentUris: liveTail.segmentUris,
         segmentDurations: liveTail.segmentDurations,
+        segmentMapUris: liveTail.segmentMapUris,
+        playlistUri: currentUri,
         duration: segmentPlan.duration,
         playlistDepth: depth,
+        hasEndList: _playlistHasEndList(body),
+        reloadInterval: _playlistReloadInterval(body),
+        isFragmentedMp4: liveTail.isFragmentedMp4,
       );
     }
-    return const _ContinuousTsPlan(
-      segmentUris: <Uri>[],
-      segmentDurations: <Duration>[],
-      duration: Duration(),
+    return _ContinuousTsPlan(
+      segmentUris: const <Uri>[],
+      segmentDurations: const <Duration>[],
+      segmentMapUris: const <Uri?>[],
+      playlistUri: playlistUri,
+      duration: Duration.zero,
       playlistDepth: 3,
+      hasEndList: true,
+      reloadInterval: const Duration(seconds: 1),
     );
   }
 
@@ -558,7 +663,7 @@ class LibVlcHlsRelay {
       final bytes = await _collectBytes(response);
       final looksLikePlaylist =
           (contentType?.mimeType.toLowerCase().contains('mpegurl') ?? false) ||
-          _magicBucket(bytes) == 'playlist';
+              _magicBucket(bytes) == 'playlist';
       if (!looksLikePlaylist) return null;
       _onEvent(
         'native libvlc hls relay continuous-ts nested playlist detected '
@@ -587,20 +692,30 @@ class LibVlcHlsRelay {
             ? plan.segmentDurations.skip(plan.segmentDurations.length - 80)
             : const <Duration>[],
       ),
+      segmentMapUris: List<Uri?>.unmodifiable(
+        plan.segmentMapUris.skip(plan.segmentMapUris.length - 80),
+      ),
+      playlistUri: plan.playlistUri,
       duration: plan.duration,
+      isFragmentedMp4: plan.isFragmentedMp4,
     );
   }
 
   Future<HttpClientRequest> _openUpstream(Uri upstream, {String? range}) async {
     final request = await _client.openUrl('GET', upstream);
-    if (!_limitHeadersToUpstreamOrigin || _sameOrigin(upstream, _uriById['root'])) {
-      for (final header in _headers.entries) {
-        final name = header.key.trim();
-        final value = header.value.trim();
-        if (name.isEmpty || value.isEmpty) continue;
-        if (name.toLowerCase() == HttpHeaders.acceptEncodingHeader) continue;
-        request.headers.set(name, value);
+    final sameOrigin = _sameOrigin(upstream, _uriById['root']);
+    for (final header in _headers.entries) {
+      final name = header.key.trim();
+      final normalizedName = name.toLowerCase();
+      final value = header.value.trim();
+      if (name.isEmpty || value.isEmpty) continue;
+      if (normalizedName == HttpHeaders.acceptEncodingHeader) continue;
+      if (_limitHeadersToUpstreamOrigin &&
+          !sameOrigin &&
+          !_crossOriginSafeHeaders.contains(normalizedName)) {
+        continue;
       }
+      request.headers.set(name, value);
     }
     final normalizedRange = _safeForwardRange(range);
     if (normalizedRange != null) {
@@ -636,27 +751,23 @@ class LibVlcHlsRelay {
   }
 
   String _rewritePlaylist(Uri baseUri, String body) {
-    final lines = body
-        .replaceAll('\r\n', '\n')
-        .replaceAll('\r', '\n')
-        .split('\n');
-    return lines
-        .map((line) {
-          final trimmed = line.trim();
-          if (trimmed.isEmpty) return line;
-          if (trimmed.startsWith('#')) {
-            final safeLine = _streamInfoWithBandwidth(line);
-            return safeLine.replaceAllMapped(RegExp(r'URI="([^"]+)"'), (match) {
-              final raw = match.group(1);
-              if (raw == null || raw.trim().isEmpty || _isDataUri(raw)) {
-                return match.group(0)!;
-              }
-              return 'URI="${_localPathFor(baseUri.resolve(raw))}"';
-            });
+    final lines =
+        body.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
+    return lines.map((line) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) return line;
+      if (trimmed.startsWith('#')) {
+        final safeLine = _streamInfoWithBandwidth(line);
+        return safeLine.replaceAllMapped(RegExp(r'URI="([^"]+)"'), (match) {
+          final raw = match.group(1);
+          if (raw == null || raw.trim().isEmpty || _isDataUri(raw)) {
+            return match.group(0)!;
           }
-          return _localPathFor(baseUri.resolve(trimmed));
-        })
-        .join('\n');
+          return 'URI="${_localPathFor(baseUri.resolve(raw))}"';
+        });
+      }
+      return _localPathFor(baseUri.resolve(trimmed));
+    }).join('\n');
   }
 
   static String _streamInfoWithBandwidth(String line) {
@@ -712,11 +823,25 @@ class LibVlcHlsRelay {
     return body.contains('#EXT-X-ENDLIST');
   }
 
+  static Duration _playlistReloadInterval(String body) {
+    for (final line
+        in body.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n')) {
+      final trimmed = line.trim();
+      if (!trimmed.startsWith('#EXT-X-TARGETDURATION:')) continue;
+      final seconds = double.tryParse(
+        trimmed.substring('#EXT-X-TARGETDURATION:'.length).trim(),
+      );
+      if (seconds != null && seconds > 0) {
+        final milliseconds = (seconds * 500).round().clamp(250, 5000);
+        return Duration(milliseconds: milliseconds);
+      }
+    }
+    return const Duration(seconds: 1);
+  }
+
   static Uri? _firstVariantUri(Uri baseUri, String body) {
-    final lines = body
-        .replaceAll('\r\n', '\n')
-        .replaceAll('\r', '\n')
-        .split('\n');
+    final lines =
+        body.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
     var expectsVariantUri = false;
     for (final line in lines) {
       final trimmed = line.trim();
@@ -737,15 +862,23 @@ class LibVlcHlsRelay {
   ) {
     final output = <Uri>[];
     final durations = <Duration>[];
-    final lines = body
-        .replaceAll('\r\n', '\n')
-        .replaceAll('\r', '\n')
-        .split('\n');
+    final mapUris = <Uri?>[];
+    final lines =
+        body.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
     var totalDurationMs = 0;
     double? pendingSegmentSeconds;
+    Uri? activeMapUri;
     for (final line in lines) {
       final trimmed = line.trim();
       if (trimmed.isEmpty) continue;
+      if (trimmed.startsWith('#EXT-X-MAP:')) {
+        final match = RegExp(r'URI="([^"]+)"').firstMatch(trimmed);
+        final reference = match?.group(1)?.trim();
+        if (reference != null && reference.isNotEmpty) {
+          activeMapUri = baseUri.resolve(reference);
+        }
+        continue;
+      }
       if (trimmed.startsWith('#EXTINF:')) {
         pendingSegmentSeconds = _parseExtInfSeconds(trimmed);
         continue;
@@ -753,6 +886,7 @@ class LibVlcHlsRelay {
       if (trimmed.startsWith('#')) continue;
       if (_isDataUri(trimmed)) continue;
       output.add(baseUri.resolve(trimmed));
+      mapUris.add(activeMapUri);
       if (pendingSegmentSeconds != null && pendingSegmentSeconds > 0) {
         final segmentDurationMs = (pendingSegmentSeconds * 1000).round();
         totalDurationMs += segmentDurationMs;
@@ -765,7 +899,10 @@ class LibVlcHlsRelay {
     return _ContinuousTsSegmentPlan(
       segmentUris: List<Uri>.unmodifiable(output),
       segmentDurations: List<Duration>.unmodifiable(durations),
+      segmentMapUris: List<Uri?>.unmodifiable(mapUris),
+      playlistUri: baseUri,
       duration: Duration(milliseconds: totalDurationMs),
+      isFragmentedMp4: mapUris.any((uri) => uri != null),
     );
   }
 
@@ -803,10 +940,13 @@ class LibVlcHlsRelay {
     HttpResponse output, {
     required String contentTypeBucket,
     required bool normalizeTs,
+    bool Function()? shouldContinue,
+    void Function(int streamedBytes)? onStreamedBytes,
   }) async {
     var sawFirstChunk = false;
     var streamedBytes = 0;
     await for (final chunk in input) {
+      if (!(shouldContinue?.call() ?? true)) break;
       if (!sawFirstChunk) {
         sawFirstChunk = true;
         final trimmedChunk = normalizeTs ? _trimToMpegTsSync(chunk) : chunk;
@@ -817,11 +957,19 @@ class LibVlcHlsRelay {
         );
         if (trimmedChunk.isEmpty) continue;
         output.add(trimmedChunk);
-        streamedBytes += trimmedChunk.length;
+        streamedBytes = reportLibVlcRelayStreamedBytes(
+          streamedBytes,
+          trimmedChunk.length,
+          onStreamedBytes,
+        );
         continue;
       }
       output.add(chunk);
-      streamedBytes += chunk.length;
+      streamedBytes = reportLibVlcRelayStreamedBytes(
+        streamedBytes,
+        chunk.length,
+        onStreamedBytes,
+      );
     }
     if (!sawFirstChunk) {
       _onEvent(
@@ -1041,26 +1189,42 @@ class _ContinuousTsPlan {
   const _ContinuousTsPlan({
     required this.segmentUris,
     required this.segmentDurations,
+    required this.segmentMapUris,
+    required this.playlistUri,
     required this.duration,
     required this.playlistDepth,
+    required this.hasEndList,
+    required this.reloadInterval,
+    this.isFragmentedMp4 = false,
   });
 
   final List<Uri> segmentUris;
   final List<Duration> segmentDurations;
+  final List<Uri?> segmentMapUris;
+  final Uri playlistUri;
   final Duration duration;
   final int playlistDepth;
+  final bool hasEndList;
+  final Duration reloadInterval;
+  final bool isFragmentedMp4;
 }
 
 class _ContinuousTsSegmentPlan {
   const _ContinuousTsSegmentPlan({
     required this.segmentUris,
     required this.segmentDurations,
+    required this.segmentMapUris,
+    required this.playlistUri,
     required this.duration,
+    this.isFragmentedMp4 = false,
   });
 
   final List<Uri> segmentUris;
   final List<Duration> segmentDurations;
+  final List<Uri?> segmentMapUris;
+  final Uri playlistUri;
   final Duration duration;
+  final bool isFragmentedMp4;
 }
 
 class _RelayPlaylistBody {

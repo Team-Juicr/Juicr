@@ -11,6 +11,7 @@ class _TvReleaseUpdateInfo {
     required this.publishedAt,
     required this.checkedAt,
     required this.fromFallback,
+    this.apkAssets = const [],
     this.releaseUrl,
   });
 
@@ -21,6 +22,7 @@ class _TvReleaseUpdateInfo {
   final DateTime? publishedAt;
   final DateTime checkedAt;
   final bool fromFallback;
+  final List<TvReleaseApkAsset> apkAssets;
   final Uri? releaseUrl;
 
   String get displayVersion {
@@ -116,7 +118,7 @@ class _TvReleaseUpdatesClient {
       if (release == null) {
         throw const FormatException('No matching release found.');
       }
-      return _fromReleaseJson(release, channel, checkedAt);
+      return await _fromReleaseJson(release, channel, checkedAt, client);
     } catch (_) {
       return _fallbackTvReleaseInfo(channel, checkedAt: checkedAt);
     } finally {
@@ -124,11 +126,12 @@ class _TvReleaseUpdatesClient {
     }
   }
 
-  _TvReleaseUpdateInfo _fromReleaseJson(
+  Future<_TvReleaseUpdateInfo> _fromReleaseJson(
     Map<String, dynamic> json,
     _TvReleaseUpdateChannel channel,
     DateTime checkedAt,
-  ) {
+    HttpClient client,
+  ) async {
     final tag = (json['tag_name'] ?? '').toString().trim();
     final name = (json['name'] ?? tag).toString().trim();
     final body = (json['body'] ?? '').toString().trim();
@@ -138,6 +141,11 @@ class _TvReleaseUpdatesClient {
     final releaseUrl = _safeTvExternalReleaseUri(
       (json['html_url'] ?? '').toString(),
     );
+    final apkAssets = await _verifiedTvApkAssets(
+      releaseJson: json,
+      releaseTag: tag,
+      client: client,
+    );
     return _TvReleaseUpdateInfo(
       channel: channel,
       name: name.isEmpty ? tag : name,
@@ -146,9 +154,92 @@ class _TvReleaseUpdatesClient {
       publishedAt: publishedAt,
       checkedAt: checkedAt,
       fromFallback: false,
+      apkAssets: apkAssets,
       releaseUrl: releaseUrl,
     );
   }
+
+  Future<List<TvReleaseApkAsset>> _verifiedTvApkAssets({
+    required Map<String, dynamic> releaseJson,
+    required String releaseTag,
+    required HttpClient client,
+  }) async {
+    try {
+      if (releaseTag.isEmpty) return const [];
+      final rawAssets = releaseJson['assets'];
+      if (rawAssets is! List || rawAssets.length > 17) return const [];
+      final expectedManifestName = 'juicr-$releaseTag-checksums.json';
+      final manifests = <Uri>[];
+      final apkAssets = <TvGithubReleaseAsset>[];
+      for (final raw in rawAssets) {
+        if (raw is! Map) return const [];
+        final asset = Map<String, dynamic>.from(raw);
+        final name = (asset['name'] ?? '').toString().trim();
+        final size = asset['size'];
+        final uri = _safeTvReleaseAssetUri(
+          (asset['browser_download_url'] ?? '').toString(),
+          releaseTag: releaseTag,
+          assetName: name,
+        );
+        if (uri == null) return const [];
+        if (name == expectedManifestName) {
+          manifests.add(uri);
+        } else if (name.endsWith('.apk')) {
+          if (size is! int || size <= 0) return const [];
+          apkAssets.add(
+            TvGithubReleaseAsset(name: name, size: size, downloadUri: uri),
+          );
+        }
+      }
+      if (manifests.length != 1 || apkAssets.isEmpty) return const [];
+      final request = await client.getUrl(manifests.single);
+      request.headers
+        ..set(HttpHeaders.acceptHeader, 'application/json')
+        ..set('X-GitHub-Api-Version', '2022-11-28')
+        ..set(HttpHeaders.userAgentHeader, 'JuicrTV/$_tvAppVersion');
+      final response = await request.close().timeout(const Duration(seconds: 8));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return const [];
+      }
+      final decoded = jsonDecode(await utf8.decodeStream(response));
+      if (decoded is! Map) return const [];
+      return parseTvReleaseApkAssets(
+        releaseTag: releaseTag,
+        githubAssets: apkAssets,
+        manifestJson: Map<String, Object?>.from(decoded),
+      );
+    } catch (_) {
+      return const [];
+    }
+  }
+}
+
+Uri? _safeTvReleaseAssetUri(
+  String value, {
+  required String releaseTag,
+  required String assetName,
+}) {
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null ||
+      uri.scheme != 'https' ||
+      uri.host.toLowerCase() != 'github.com' ||
+      uri.hasPort ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasQuery ||
+      uri.hasFragment) {
+    return null;
+  }
+  final segments = uri.pathSegments;
+  if (segments.length != 6 ||
+      segments[0] != 'Team-Juicr' ||
+      segments[1] != 'Juicr' ||
+      segments[2] != 'releases' ||
+      segments[3] != 'download' ||
+      segments[4] != releaseTag ||
+      segments[5] != assetName) {
+    return null;
+  }
+  return uri;
 }
 
 _TvReleaseUpdateChannel _tvReleaseChannelForVersion(String versionName) {

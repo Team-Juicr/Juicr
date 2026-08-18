@@ -25,6 +25,17 @@
 -dontwarn software.solid.fluttervlcplayer.**
 -dontwarn org.videolan.libvlc.**
 
+# The optional TV P2P runtime is invoked through reflection and JNI.
+-keep class app.juicr.flutter.P2pRuntimeBridge { *; }
+-keep class app.juicr.flutter.P2pRuntimeBridge$* { *; }
+-keep class com.frostwire.jlibtorrent.** { *; }
+-keep class com.frostwire.jlibtorrent.swig.** { *; }
+-keepclassmembers class com.frostwire.jlibtorrent.** {
+    native <methods>;
+}
+-dontwarn com.frostwire.jlibtorrent.**
+-dontwarn com.frostwire.jlibtorrent.swig.**
+
 # Flutter references optional Play Core deferred-component APIs even when the app
 # does not use deferred components. Suppress missing optional classes for R8.
 -dontwarn com.google.android.play.core.splitcompat.SplitCompatApplication

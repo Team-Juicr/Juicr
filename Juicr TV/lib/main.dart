@@ -14,9 +14,18 @@ import 'package:video_player/video_player.dart';
 
 import 'libvlc_hls_relay.dart';
 import 'tv_account_state.dart';
+import 'tv_addon_playback.dart';
 import 'tv_input.dart';
 import 'tv_library_state.dart';
 import 'tv_playback_request.dart';
+import 'tv_playback_candidate_order.dart';
+import 'tv_playback_episode_selection.dart';
+import 'tv_playback_source_groups.dart';
+import 'tv_p2p_stream_bridge.dart';
+import 'tv_mature_content.dart';
+import 'tv_live_tv_catalog.dart';
+import 'tv_release_update_assets.dart';
+import 'tv_native_app_updater.dart';
 
 part 'tv_shell_widgets.dart';
 part 'tv_surfaces.dart';
@@ -27,7 +36,7 @@ part 'tv_data.dart';
 
 const _apiBase = 'https://api.juicr.app';
 const _tvSettingsPrefsKey = 'juicr_tv_settings_v1';
-const _tvCatalogWarmSnapshotPrefsKey = 'juicr_tv_catalog_warm_snapshot_v1';
+const _tvFirstRunWelcomeSeenKey = 'tv_first_run_welcome_seen_v1';
 const _tvVerifiedPlaybackSessionsPrefsKey =
     'juicr_tv_verified_playback_sessions_v2';
 const _tvAppVersion = '1.0.1';
@@ -43,6 +52,39 @@ Color _tvAccentColor = _juicrGreen;
 double _tvTextScale = 1.0;
 bool _tvMotionEnabled = true;
 _TvThemePalette _tvTheme = _TvThemePalette.dark;
+
+String tvCanonicalPlaybackItemKey({
+  required String type,
+  required String id,
+  required int? tmdbId,
+}) {
+  final normalizedType = _normalizeType(type);
+  final normalizedId = id.trim();
+  if (normalizedType == 'live') return '$normalizedType:$normalizedId';
+  if (tmdbId != null && tmdbId > 0) {
+    return '$normalizedType:tmdb:$tmdbId';
+  }
+  final embeddedTmdb = RegExp(r'^tmdb:(\d+)$').firstMatch(normalizedId);
+  if (embeddedTmdb != null) {
+    return '$normalizedType:tmdb:${embeddedTmdb.group(1)}';
+  }
+  return '$normalizedType:$normalizedId';
+}
+
+String tvPlaybackAuthorityFingerprint({
+  required bool builtInPlayback,
+  required Iterable<String> enabledAddOns,
+}) {
+  final addOns = enabledAddOns
+      .map((value) => value.trim())
+      .where((value) => value.isNotEmpty)
+      .toList(growable: false)
+    ..sort();
+  return '${builtInPlayback ? 1 : 0}|${addOns.join('|')}';
+}
+
+bool tvPlaybackAuthorityChanged(String previous, String next) =>
+    previous != next;
 
 Color get _tvFocusBorder => _tvAccentColor;
 Color get _tvSolidFocusBorder => Colors.white;
@@ -178,6 +220,7 @@ enum _TvLibraryFilter {
     'Unfinished titles',
     Icons.history_rounded,
   ),
+  completed('Completed', 'Finished titles', Icons.check_circle_outline_rounded),
   lists('Lists', 'Custom watchlists', Icons.bookmarks_outlined),
   movies('Movies', 'Liked movies', Icons.movie_rounded),
   series('Series', 'Liked series', Icons.tv_rounded),
@@ -195,8 +238,36 @@ enum _TvLibraryFilter {
 
 enum _TvAccountSyncState { guest, idle, syncing, synced, needsAttention }
 
-void main() {
+final Set<String> _tvArtworkFailureBuckets = <String>{};
+
+void _reportTvArtworkFailure(Object error, String surface) {
+  final bucket = switch (error) {
+    NetworkImageLoadException() => 'http_status',
+    SocketException() => 'transport',
+    HandshakeException() => 'transport',
+    HttpException() => 'transport',
+    _ => 'decode',
+  };
+  final key = '$surface:$bucket';
+  if (!_tvArtworkFailureBuckets.add(key)) return;
+  debugPrint(
+    'Juicr TV artwork unavailable surface=$surface bucket=$bucket '
+    'type=${error.runtimeType}',
+  );
+}
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  const p2pBridge = MethodChannelTvP2pLocalStreamBridge();
+  final p2pAvailable = await resolveTvP2pRuntimeCapability(bridge: p2pBridge);
+  TvP2pRuntimeCapability.configure(p2pAvailable);
+  if (!p2pAvailable) {
+    final status = await p2pBridge.availabilityStatus();
+    debugPrint(
+      'Juicr TV P2P runtime capability available=false '
+      'stage=${status['stage']} bucket=${status['bucket']}',
+    );
+  }
   PaintingBinding.instance.imageCache.maximumSize = 480;
   PaintingBinding.instance.imageCache.maximumSizeBytes = 256 << 20;
   _installTvKeyboardErrorFilter();
@@ -225,7 +296,11 @@ Future<T?> _showTvDialog<T>({
   final previousFocus = FocusManager.instance.primaryFocus;
   final result = await showDialog<T>(
     context: context,
-    builder: builder,
+    builder: (dialogContext) => TvDialogRouteLayer(
+      child: TvDialogFocusOwner(
+        child: builder(dialogContext),
+      ),
+    ),
     barrierDismissible: barrierDismissible,
     barrierColor: barrierColor,
     barrierLabel: barrierLabel,
@@ -251,10 +326,7 @@ void _restoreTvFocusAfterRoutePop(FocusNode? previousFocus) {
           context == null ||
           !context.mounted) {
         if (attempt < 5) {
-          Future<void>.delayed(
-            const Duration(milliseconds: 24),
-            () => restore(attempt + 1),
-          );
+          restore(attempt + 1);
         }
         return;
       }
@@ -274,10 +346,7 @@ void _restoreTvFocusAfterRoutePop(FocusNode? previousFocus) {
       final primaryFocus = FocusManager.instance.primaryFocus;
       if ((primaryFocus == null || primaryFocus.context == null) &&
           attempt < 5) {
-        Future<void>.delayed(
-          const Duration(milliseconds: 24),
-          () => restore(attempt + 1),
-        );
+        restore(attempt + 1);
       }
     });
   }
@@ -349,7 +418,397 @@ class JuicrTvApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const TvHomePage(),
+      home: const _TvFirstRunGate(),
+    );
+  }
+}
+
+class _TvFirstRunGate extends StatefulWidget {
+  const _TvFirstRunGate();
+
+  @override
+  State<_TvFirstRunGate> createState() => _TvFirstRunGateState();
+}
+
+class _TvFirstRunGateState extends State<_TvFirstRunGate> {
+  late final Future<bool> _restore = _restoreCompletion();
+  int? _initialTab;
+
+  Future<bool> _restoreCompletion() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getBool(_tvFirstRunWelcomeSeenKey) == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _complete(int initialTab) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_tvFirstRunWelcomeSeenKey, true);
+    } catch (_) {
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _initialTab = initialTab);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_initialTab case final initialTab?) {
+      return TvHomePage(initialTab: initialTab);
+    }
+    return FutureBuilder<bool>(
+      future: _restore,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Scaffold(body: SizedBox.expand());
+        }
+        if (snapshot.data == true) {
+          return const TvHomePage();
+        }
+        return _TvFirstRunWelcomePage(
+          onEnterHome: () => _complete(0),
+          onSetUpSources: () => _complete(3),
+        );
+      },
+    );
+  }
+}
+
+class _TvFirstRunWelcomePage extends StatefulWidget {
+  const _TvFirstRunWelcomePage({
+    required this.onEnterHome,
+    required this.onSetUpSources,
+  });
+
+  final VoidCallback onEnterHome;
+  final VoidCallback onSetUpSources;
+
+  @override
+  State<_TvFirstRunWelcomePage> createState() => _TvFirstRunWelcomePageState();
+}
+
+class _TvFirstRunWelcomePageState extends State<_TvFirstRunWelcomePage> {
+  static const _acknowledgements = <(IconData, String, String)>[
+    (
+      Icons.cloud_off_rounded,
+      'Juicr does not provide media',
+      'Juicr does not host, sell, upload, or supply movies, shows, animation, live TV, or copyrighted media.',
+    ),
+    (
+      Icons.extension_rounded,
+      'Sources are your choice',
+      'Built-in helpers and third-party add-ons are optional tools. You choose what to enable and which add-ons to trust.',
+    ),
+    (
+      Icons.verified_user_outlined,
+      'Use only allowed content',
+      'You are responsible for subscriptions, permissions, local laws, and only accessing content you are allowed to use.',
+    ),
+    (
+      Icons.lock_outline_rounded,
+      'No bypassing protections',
+      'Do not use Juicr or add-ons to bypass DRM, paywalls, site protections, geoblocks, subscriptions, or access controls.',
+    ),
+    (
+      Icons.public_rounded,
+      'Add-ons may contact outside services',
+      'Third-party add-ons can contact outside services. Those services may see network information such as your IP address.',
+    ),
+  ];
+
+  final Set<int> _accepted = <int>{};
+  late final List<FocusNode> _acknowledgementFocusNodes =
+      List<FocusNode>.generate(
+    _acknowledgements.length,
+    (index) => FocusNode(debugLabel: 'tv_first_run_acknowledgement_$index'),
+  );
+  final FocusNode _enterFocusNode = FocusNode(debugLabel: 'tv_first_run_enter');
+  final FocusNode _sourcesFocusNode =
+      FocusNode(debugLabel: 'tv_first_run_sources');
+
+  bool get _allAccepted => _accepted.length == _acknowledgements.length;
+
+  @override
+  void dispose() {
+    for (final node in _acknowledgementFocusNodes) {
+      node.dispose();
+    }
+    _enterFocusNode.dispose();
+    _sourcesFocusNode.dispose();
+    super.dispose();
+  }
+
+  void _toggle(int index, bool? value) {
+    setState(() {
+      if (value == true) {
+        _accepted.add(index);
+      } else {
+        _accepted.remove(index);
+      }
+    });
+  }
+
+  KeyEventResult _handleAcknowledgementKey(int index, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    FocusNode? target;
+    if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+      if (index == 0 || index == 2) {
+        target = _acknowledgementFocusNodes[index + 1];
+      } else if (index == 4) {
+        target = _enterFocusNode;
+      }
+    } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+      if (index == 1 || index == 3) {
+        target = _acknowledgementFocusNodes[index - 1];
+      }
+    } else if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+      if (index <= 2) {
+        target = _acknowledgementFocusNodes[index + 2];
+      } else if (index == 3) {
+        target = _sourcesFocusNode;
+      }
+    } else if (event.logicalKey == LogicalKeyboardKey.arrowUp && index >= 2) {
+      target = _acknowledgementFocusNodes[index - 2];
+    }
+    if (target == null || !target.canRequestFocus) {
+      return KeyEventResult.ignored;
+    }
+    target.requestFocus();
+    return KeyEventResult.handled;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Scaffold(
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final wideLayout = constraints.maxWidth >= 900;
+            return SizedBox(
+              width: double.infinity,
+              child: FocusTraversalGroup(
+                policy: ReadingOrderTraversalPolicy(),
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(
+                    wideLayout ? 48 : 22,
+                    wideLayout ? 40 : 28,
+                    wideLayout ? 48 : 22,
+                    24,
+                  ),
+                  children: [
+                    Text(
+                      'Welcome to Juicr TV',
+                      style: textTheme.headlineMedium?.copyWith(
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Juicr is a media tool: a clean way to browse, organize, and play sources you choose to use.',
+                      style: textTheme.bodyLarge?.copyWith(
+                        color: colors.onSurface.withValues(alpha: 0.72),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Text(
+                      'Before the app opens',
+                      style: textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    GridView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: wideLayout ? 2 : 1,
+                        crossAxisSpacing: 12,
+                        mainAxisSpacing: 10,
+                        childAspectRatio: wideLayout ? 3.75 : 3.1,
+                      ),
+                      itemCount: _acknowledgements.length + 1,
+                      itemBuilder: (context, index) {
+                        if (index == _acknowledgements.length) {
+                          return _TvFirstRunActions(
+                            allAccepted: _allAccepted,
+                            enterFocusNode: _enterFocusNode,
+                            sourcesFocusNode: _sourcesFocusNode,
+                            onEnter: widget.onEnterHome,
+                            onSetUpSources: widget.onSetUpSources,
+                          );
+                        }
+                        final acknowledgement = _acknowledgements[index];
+                        return FocusTraversalOrder(
+                          order: NumericFocusOrder(index.toDouble()),
+                          child: Focus(
+                            onKeyEvent: (node, event) =>
+                                _handleAcknowledgementKey(index, event),
+                            child: _TvFirstRunAcknowledgementTile(
+                              icon: acknowledgement.$1,
+                              title: acknowledgement.$2,
+                              text: acknowledgement.$3,
+                              value: _accepted.contains(index),
+                              focusNode: _acknowledgementFocusNodes[index],
+                              autofocus: index == 0,
+                              onChanged: (value) => _toggle(index, value),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _TvFirstRunAcknowledgementTile extends StatelessWidget {
+  const _TvFirstRunAcknowledgementTile({
+    required this.icon,
+    required this.title,
+    required this.text,
+    required this.value,
+    required this.focusNode,
+    required this.autofocus,
+    required this.onChanged,
+  });
+
+  final IconData icon;
+  final String title;
+  final String text;
+  final bool value;
+  final FocusNode focusNode;
+  final bool autofocus;
+  final ValueChanged<bool?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Semantics(
+      button: true,
+      checked: value,
+      label: title,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => onChanged(!value),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          padding: const EdgeInsets.fromLTRB(16, 14, 10, 14),
+          decoration: BoxDecoration(
+            color: value
+                ? colors.primary.withValues(alpha: 0.16)
+                : colors.surfaceContainerHighest.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                icon,
+                color: value
+                    ? colors.primary
+                    : colors.onSurface.withValues(alpha: 0.62),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title,
+                        style: const TextStyle(fontWeight: FontWeight.w900)),
+                    const SizedBox(height: 4),
+                    Text(
+                      text,
+                      style: TextStyle(
+                        color: colors.onSurface.withValues(alpha: 0.68),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Checkbox(
+                value: value,
+                focusNode: focusNode,
+                autofocus: autofocus,
+                onChanged: onChanged,
+                semanticLabel: title,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TvFirstRunActions extends StatelessWidget {
+  const _TvFirstRunActions({
+    required this.allAccepted,
+    required this.enterFocusNode,
+    required this.sourcesFocusNode,
+    required this.onEnter,
+    required this.onSetUpSources,
+  });
+
+  final bool allAccepted;
+  final FocusNode enterFocusNode;
+  final FocusNode sourcesFocusNode;
+  final VoidCallback onEnter;
+  final VoidCallback onSetUpSources;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 8, 0, 4),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Text(
+            allAccepted
+                ? 'Thanks. Juicr TV is ready.'
+                : 'Check each acknowledgement to continue.',
+            style: TextStyle(
+              color: allAccepted
+                  ? colors.primary
+                  : colors.onSurface.withValues(alpha: 0.56),
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 10,
+            runSpacing: 8,
+            children: [
+              TextButton(
+                focusNode: enterFocusNode,
+                onPressed: allAccepted ? onEnter : null,
+                child: const Text('Enter Juicr'),
+              ),
+              FilledButton.icon(
+                focusNode: sourcesFocusNode,
+                onPressed: allAccepted ? onSetUpSources : null,
+                icon: const Icon(Icons.settings_input_component_rounded),
+                label: const Text('Set up sources'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -366,6 +825,29 @@ class _TvHydratedHomeSignals {
   final List<_TvItem> juicrTopSignal;
 }
 
+class _TvArtwork {
+  const _TvArtwork({this.poster, this.background, this.logo});
+
+  factory _TvArtwork.fromItem(_TvItem item) => _TvArtwork(
+        poster: item.poster,
+        background: item.background,
+        logo: item.logo,
+      );
+
+  final String? poster;
+  final String? background;
+  final String? logo;
+}
+
+_TvItem _applyTvArtwork(_TvItem item, _TvArtwork? artwork) {
+  if (artwork == null) return item;
+  return item.withArtwork(
+    poster: artwork.poster,
+    background: artwork.background,
+    logo: artwork.logo,
+  );
+}
+
 class _TvCatalogLaneRequest {
   const _TvCatalogLaneRequest({
     required this.kind,
@@ -373,6 +855,7 @@ class _TvCatalogLaneRequest {
     required this.type,
     required this.catalogSort,
     this.fallbackType,
+    this.year = '',
     this.pages = 3,
   });
 
@@ -381,11 +864,14 @@ class _TvCatalogLaneRequest {
   final String type;
   final String catalogSort;
   final String? fallbackType;
+  final String year;
   final int pages;
 }
 
 class TvHomePage extends StatefulWidget {
-  const TvHomePage({super.key});
+  const TvHomePage({super.key, this.initialTab = 0});
+
+  final int initialTab;
 
   @override
   State<TvHomePage> createState() => _TvHomePageState();
@@ -425,22 +911,24 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   final _series = <_TvItem>[];
   final _animation = <_TvItem>[];
   final _liveTv = <_TvItem>[];
+  _TvCatalogConfig _catalogConfig = const _TvCatalogConfig();
   final _discoveryLaneItems = <String, List<_TvItem>>{};
   final _discoveryLanePages = <String, int>{};
   final _discoveryLaneLoading = <String>{};
   final _discoveryLaneExhausted = <String>{};
+  final _discoveryLaneFailed = <String>{};
   final _upcomingPicks = <_TvItem>[];
   List<_TvItem> _heroEditorialItems = const <_TvItem>[];
   List<_TvItem> _topSignalRemoteItems = const <_TvItem>[];
   List<_TvItem> _todaySignalRemoteItems = const <_TvItem>[];
   List<_TvItem> _juicrTopSignalRemoteItems = const <_TvItem>[];
-  final _homeArtworkByKey = <String, _TvItem>{};
+  final _homeArtworkByKey = <String, _TvArtwork>{};
   final _homeArtworkHydrationKeys = <String>{};
   final _homeArtworkHydrationAttempts = <String, int>{};
   int _homeArtworkHydrationGeneration = 0;
   bool _homeArtworkHydrating = false;
   Future<void>? _catalogLoadFuture;
-  DateTime? _catalogLoadedAt;
+  int _catalogLoadGeneration = 0;
   final _recentItems = <_TvItem>[];
   final _likedItemKeys = <String>{};
   final _watchedProgress = <String, _TvPlaybackProgress>{};
@@ -495,6 +983,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _selectedTab = widget.initialTab.clamp(0, _tabItems.length - 1);
     WidgetsBinding.instance.addObserver(this);
     FocusManager.instance.addListener(_tracePrimaryFocus);
     unawaited(_restoreTvLibraryState());
@@ -633,238 +1122,19 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       _items.isNotEmpty ||
       _discoveryLaneItems.values.any((lane) => lane.isNotEmpty);
 
-  bool get _hasFreshCatalogSnapshot {
-    final loadedAt = _catalogLoadedAt;
-    if (!_hasCatalogSnapshot || loadedAt == null) return false;
-    return DateTime.now().difference(loadedAt) < const Duration(minutes: 20);
-  }
-
-  Map<String, dynamic> _catalogWarmItemJson(_TvItem item) {
-    return {
-      'id': item.id,
-      'type': item.type,
-      'title': item.title,
-      if ((item.poster ?? '').trim().isNotEmpty) 'poster': item.poster,
-      if ((item.background ?? '').trim().isNotEmpty)
-        'background': item.background,
-      if ((item.logo ?? '').trim().isNotEmpty) 'logo': item.logo,
-      if ((item.year ?? '').trim().isNotEmpty) 'year': item.year,
-      if (item.tmdbId != null) 'tmdbId': item.tmdbId,
-      if (item.genres.isNotEmpty) 'genres': item.genres,
-      if ((item.description ?? '').trim().isNotEmpty)
-        'description': item.description,
-      if ((item.imdbRating ?? '').trim().isNotEmpty)
-        'imdbRating': item.imdbRating,
-      if ((item.releaseDate ?? '').trim().isNotEmpty)
-        'releaseDate': item.releaseDate,
-      if (item.isUpcoming) 'isUpcoming': true,
-      if ((item.runtime ?? '').trim().isNotEmpty) 'runtime': item.runtime,
-    };
-  }
-
-  _TvItem? _catalogWarmItemFromJson(Object? value) {
-    if (value is! Map) return null;
-    try {
-      final json = Map<String, dynamic>.from(value);
-      final fallbackType = (json['type'] ?? 'movie').toString();
-      final item = _TvItem.fromJson(json, fallbackType: fallbackType);
-      if (item.id.trim().isEmpty || item.title.trim().isEmpty) return null;
-      if (!_hasTvDiscoveryArtwork(item)) return null;
-      return item;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  List<Map<String, dynamic>> _catalogWarmItemsJson(
-    Iterable<_TvItem> items, {
-    int limit = 80,
-  }) {
-    return items.take(limit).map(_catalogWarmItemJson).toList(growable: false);
-  }
-
-  List<_TvItem> _catalogWarmItemsFromJson(Object? value) {
-    if (value is! List) return const <_TvItem>[];
-    return value.map(_catalogWarmItemFromJson).nonNulls.toList(growable: false);
-  }
-
-  Map<String, List<_TvItem>> _catalogWarmLanesFromJson(Object? value) {
-    if (value is! Map) return const <String, List<_TvItem>>{};
-    final lanes = <String, List<_TvItem>>{};
-    for (final entry in value.entries) {
-      final key = entry.key.toString();
-      final items = _catalogWarmItemsFromJson(entry.value);
-      if (items.isNotEmpty) lanes[key] = items;
-    }
-    return lanes;
-  }
-
-  Future<bool> _restoreCatalogWarmSnapshot(SharedPreferences prefs) async {
-    try {
-      final encoded = prefs.getString(_tvCatalogWarmSnapshotPrefsKey);
-      if (encoded == null || encoded.trim().isEmpty) return false;
-      final decoded = jsonDecode(encoded);
-      if (decoded is! Map) return false;
-      final snapshot = Map<String, dynamic>.from(decoded);
-      final items = _catalogWarmItemsFromJson(snapshot['items']);
-      final lanes = _catalogWarmLanesFromJson(snapshot['lanes']);
-      if (items.isEmpty && lanes.values.every((lane) => lane.isEmpty)) {
-        return false;
-      }
-      final loadedAtMs = int.tryParse(
-        (snapshot['loadedAtMs'] ?? '').toString(),
-      );
-      final loadedAt = loadedAtMs == null
-          ? DateTime.now()
-          : DateTime.fromMillisecondsSinceEpoch(loadedAtMs);
-      final editorial = snapshot['editorial'] is Map
-          ? _TvHomeEditorialEdition.fromJson(
-              Map<String, dynamic>.from(snapshot['editorial'] as Map),
-            )
-          : null;
-      final heroItems = _catalogWarmItemsFromJson(snapshot['hero']);
-      final topSignalItems = _catalogWarmItemsFromJson(snapshot['topSignal']);
-      final todaySignalItems = _catalogWarmItemsFromJson(
-        snapshot['todaySignal'],
-      );
-      final juicrTopSignalItems = _catalogWarmItemsFromJson(
-        snapshot['juicrTopSignal'],
-      );
-      final upcomingPicks = lanes[_tvDiscoveryLaneKey(
-            _TvDiscoveryKind.movie,
-            _TvDiscoverySort.upcoming,
-          )] ??
-          const <_TvItem>[];
-      if (!mounted) return false;
-      setState(() {
-        _items
-          ..clear()
-          ..addAll(items);
-        _movies
-          ..clear()
-          ..addAll(items.where((item) => item.type == 'movie'));
-        _series
-          ..clear()
-          ..addAll(items.where((item) => item.type == 'series'));
-        _animation
-          ..clear()
-          ..addAll(items.where(_isAnimationOrAnimationItem));
-        _liveTv
-          ..clear()
-          ..addAll(
-            items.where(
-              (item) =>
-                  _matchesDiscoveryLaneKind(item, _TvDiscoveryKind.liveTv),
-            ),
-          );
-        _discoveryLaneItems
-          ..clear()
-          ..addAll(lanes);
-        _discoveryLanePages
-          ..clear()
-          ..addAll({for (final key in lanes.keys) key: 1});
-        _discoveryLaneLoading.clear();
-        _discoveryLaneExhausted.clear();
-        _upcomingPicks
-          ..clear()
-          ..addAll(upcomingPicks);
-        _heroEditorialItems = heroItems;
-        _topSignalRemoteItems = topSignalItems;
-        _todaySignalRemoteItems = todaySignalItems;
-        _juicrTopSignalRemoteItems = juicrTopSignalItems;
-        _homeEditorial = editorial?.hasUsableRails == true ? editorial : null;
-        final homeSnapshotItems = <_TvItem>[
-          ...heroItems,
-          ...topSignalItems,
-          ...todaySignalItems,
-          ...juicrTopSignalItems,
-        ];
-        _homeArtworkByKey.clear();
-        _homeArtworkByKey.addAll(_homeArtworkMap(homeSnapshotItems));
-        _homeArtworkHydrationKeys.clear();
-        _homeArtworkHydrationKeys.addAll(
-          homeSnapshotItems
-              .where((item) => (item.logo ?? '').trim().isNotEmpty)
-              .expand(_homeArtworkKeys),
-        );
-        _homeArtworkHydrationAttempts.clear();
-        _homeArtworkHydrationGeneration += 1;
-        _catalogLoadedAt = loadedAt;
-        _loading = false;
-        _error = null;
-        _reconcileRecentItemsWithCatalog();
-      });
-      debugPrint(
-        'Juicr TV catalog warm snapshot restored '
-        'items=${items.length} lanes=${lanes.length}',
-      );
-      return true;
-    } catch (error) {
-      debugPrint(
-        'Juicr TV catalog warm snapshot skipped '
-        'bucket=catalog_snapshot_restore errorType=${error.runtimeType}',
-      );
-      return false;
-    }
-  }
-
-  Future<void> _saveCatalogWarmSnapshot() async {
-    final hasSnapshotPayload = _items.isNotEmpty ||
-        _discoveryLaneItems.values.any((lane) => lane.isNotEmpty) ||
-        _heroEditorialItems.isNotEmpty ||
-        _topSignalRemoteItems.isNotEmpty ||
-        _todaySignalRemoteItems.isNotEmpty ||
-        _juicrTopSignalRemoteItems.isNotEmpty;
-    if (!hasSnapshotPayload) return;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final lanes = <String, List<Map<String, dynamic>>>{
-        for (final entry in _discoveryLaneItems.entries)
-          if (entry.value.isNotEmpty)
-            entry.key: _catalogWarmItemsJson(entry.value, limit: 48),
-      };
-      final snapshot = {
-        'version': 1,
-        'loadedAtMs':
-            (_catalogLoadedAt ?? DateTime.now()).millisecondsSinceEpoch,
-        'items': _catalogWarmItemsJson(_items, limit: 360),
-        'hero': _catalogWarmItemsJson(_heroEditorialItems, limit: 12),
-        if (_homeEditorial != null) 'editorial': _homeEditorial!.toJson(),
-        'topSignal': _catalogWarmItemsJson(_topSignalRemoteItems, limit: 24),
-        'todaySignal': _catalogWarmItemsJson(
-          _todaySignalRemoteItems,
-          limit: 24,
-        ),
-        'juicrTopSignal': _catalogWarmItemsJson(
-          _juicrTopSignalRemoteItems,
-          limit: 12,
-        ),
-        'lanes': lanes,
-      };
-      await prefs.setString(
-        _tvCatalogWarmSnapshotPrefsKey,
-        jsonEncode(snapshot),
-      );
-    } catch (error) {
-      debugPrint(
-        'Juicr TV catalog warm snapshot save skipped '
-        'bucket=catalog_snapshot_save errorType=${error.runtimeType}',
-      );
-    }
-  }
-
   Future<void> _loadCatalog({bool force = false}) async {
     if (!_tvSettings.hasCatalogSource) {
+      _catalogLoadGeneration += 1;
       _clearCatalogForDisabledSource();
       return;
     }
-    if (!force && _hasFreshCatalogSnapshot) return;
     final existingLoad = _catalogLoadFuture;
     if (existingLoad != null) {
       await existingLoad;
-      return;
+      if (!force || !_tvSettings.hasCatalogSource) return;
     }
-    final future = _loadCatalogInner(force: force);
+    final generation = ++_catalogLoadGeneration;
+    final future = _loadCatalogInner(force: force, generation: generation);
     _catalogLoadFuture = future;
     try {
       await future;
@@ -875,155 +1145,125 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _loadCatalogInner({required bool force}) async {
+  bool _ownsCatalogLoad(int generation) =>
+      mounted &&
+      generation == _catalogLoadGeneration &&
+      _tvSettings.hasCatalogSource;
+
+  bool _shouldDisplayCatalogItem(_TvItem item) => tvShouldShowCatalogItem(
+        showMatureContent: _tvSettings.showMatureContent,
+        hasMatureContentSignal: item.hasMatureContentSignal,
+      );
+
+  Future<void> _loadCatalogInner({
+    required bool force,
+    required int generation,
+  }) async {
+    if (force) {
+      _TvApi.clearCatalogCache();
+    }
     setState(() {
       _catalogRefreshing = true;
-      _loading = !_hasCatalogSnapshot;
+      _loading = true;
       _error = null;
+      _items.clear();
+      _movies.clear();
+      _series.clear();
+      _animation.clear();
+      _liveTv.clear();
+      _discoveryLaneItems.clear();
+      _discoveryLanePages.clear();
+      _discoveryLaneLoading.clear();
+      _discoveryLaneExhausted.clear();
+      _discoveryLaneFailed.clear();
+      _upcomingPicks.clear();
+      _homeEditorial = null;
+      _heroEditorialItems = const <_TvItem>[];
+      _topSignalRemoteItems = const <_TvItem>[];
+      _todaySignalRemoteItems = const <_TvItem>[];
+      _juicrTopSignalRemoteItems = const <_TvItem>[];
+      _homeArtworkByKey.clear();
+      _homeArtworkHydrationKeys.clear();
+      _homeArtworkHydrationAttempts.clear();
+      _homeArtworkHydrationGeneration += 1;
     });
     try {
-      final catalogRequests = <_TvCatalogLaneRequest>[
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.movie,
-          sort: _TvDiscoverySort.popular,
-          type: 'movie',
-          catalogSort: _TvDiscoverySort.popular.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.movie,
-          sort: _TvDiscoverySort.nowPlaying,
-          type: 'movie',
-          catalogSort: _TvDiscoverySort.nowPlaying.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.movie,
-          sort: _TvDiscoverySort.topRated,
-          type: 'movie',
-          catalogSort: _TvDiscoverySort.topRated.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.movie,
-          sort: _TvDiscoverySort.featured,
-          type: 'movie',
-          catalogSort: _TvDiscoverySort.featured.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.movie,
-          sort: _TvDiscoverySort.upcoming,
-          type: 'movie',
-          catalogSort: _TvDiscoverySort.upcoming.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.series,
-          sort: _TvDiscoverySort.popular,
-          type: 'series',
-          catalogSort: _TvDiscoverySort.popular.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.series,
-          sort: _TvDiscoverySort.airingToday,
-          type: 'series',
-          catalogSort: _TvDiscoverySort.airingToday.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.series,
-          sort: _TvDiscoverySort.onTv,
-          type: 'series',
-          catalogSort: _TvDiscoverySort.onTv.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.series,
-          sort: _TvDiscoverySort.topRated,
-          type: 'series',
-          catalogSort: _TvDiscoverySort.topRated.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.series,
-          sort: _TvDiscoverySort.featured,
-          type: 'series',
-          catalogSort: _TvDiscoverySort.featured.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.animation,
-          sort: _TvDiscoverySort.popular,
-          type: 'animation',
-          fallbackType: 'movie',
-          catalogSort: _TvDiscoverySort.popular.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.animation,
-          sort: _TvDiscoverySort.onTv,
-          type: 'animation',
-          fallbackType: 'series',
-          catalogSort: _TvDiscoverySort.onTv.catalogSortId,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.liveTv,
-          sort: _TvDiscoverySort.popular,
-          type: 'live_tv',
-          catalogSort: _TvDiscoverySort.popular.catalogSortId,
-          pages: 2,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.liveTv,
-          sort: _TvDiscoverySort.newest,
-          type: 'live_tv',
-          catalogSort: _TvDiscoverySort.newest.catalogSortId,
-          pages: 2,
-        ),
-        _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.liveTv,
-          sort: _TvDiscoverySort.featured,
-          type: 'live_tv',
-          catalogSort: _TvDiscoverySort.featured.catalogSortId,
-          pages: 2,
-        ),
-        const _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.liveTv,
-          sort: _TvDiscoverySort.popular,
-          type: 'livetv',
-          catalogSort: 'top',
-          pages: 1,
-        ),
-        const _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.liveTv,
-          sort: _TvDiscoverySort.popular,
-          type: 'channel',
-          catalogSort: 'top',
-          pages: 1,
-        ),
-        const _TvCatalogLaneRequest(
-          kind: _TvDiscoveryKind.liveTv,
-          sort: _TvDiscoverySort.popular,
-          type: 'channels',
-          catalogSort: 'top',
-          pages: 1,
-        ),
+      final allowBuiltInVod = _tvSettings.defaultSourceConsentAccepted &&
+          _tvSettings.builtInCatalog;
+      final allowBuiltInLiveTv =
+          _tvSettings.defaultSourceConsentAccepted && _tvSettings.builtInLiveTv;
+      final configFuture = _api.catalogConfig();
+      final editorial = await _safeHomeEditorial();
+      final catalogConfig = await configFuture;
+      if (!_ownsCatalogLoad(generation)) return;
+      setState(() => _catalogConfig = catalogConfig);
+      if (editorial == null || !editorial.hasCompleteHomeContract) {
+        setState(() {
+          _loading = false;
+          _catalogRefreshing = false;
+          _error = 'Home is unavailable right now. Try again shortly.';
+        });
+        _focusNavigationAfterFrame();
+        return;
+      }
+      final criticalCatalogRequests = <_TvCatalogLaneRequest>[
+        if (allowBuiltInVod) ...[
+          _TvCatalogLaneRequest(
+            kind: _TvDiscoveryKind.movie,
+            sort: _TvDiscoverySort.popular,
+            type: 'movie',
+            catalogSort: _TvDiscoverySort.popular.catalogSortId,
+            pages: 1,
+          ),
+          _TvCatalogLaneRequest(
+            kind: _TvDiscoveryKind.movie,
+            sort: _TvDiscoverySort.upcoming,
+            type: 'movie',
+            catalogSort: _TvDiscoverySort.upcoming.catalogSortId,
+            year: editorial.upcoming.year,
+            pages: 1,
+          ),
+          _TvCatalogLaneRequest(
+            kind: _TvDiscoveryKind.series,
+            sort: _TvDiscoverySort.popular,
+            type: 'series',
+            catalogSort: _TvDiscoverySort.popular.catalogSortId,
+            pages: 1,
+          ),
+          _TvCatalogLaneRequest(
+            kind: _TvDiscoveryKind.animation,
+            sort: _TvDiscoverySort.popular,
+            type: 'animation',
+            fallbackType: 'movie',
+            catalogSort: _TvDiscoverySort.popular.catalogSortId,
+            pages: 1,
+          ),
+        ],
+        if (allowBuiltInLiveTv)
+          _TvCatalogLaneRequest(
+            kind: _TvDiscoveryKind.liveTv,
+            sort: _TvDiscoverySort.popular,
+            type: tvLiveTvCatalogType,
+            catalogSort: _TvDiscoverySort.popular.catalogSortId,
+            pages: 1,
+          ),
       ];
       var catalogFetchHadError = false;
       void markCatalogFetchError() => catalogFetchHadError = true;
 
-      final results = await Future.wait<Object?>([
-        for (final request in catalogRequests)
-          _safeCatalog(
-            type: request.type,
-            fallbackType: request.fallbackType,
-            sort: request.catalogSort,
-            pages: request.pages,
-            onError: markCatalogFetchError,
-          ),
-        _safeHomeEditorial(),
-      ]).timeout(const Duration(seconds: 35));
-      final editorialResult = results[catalogRequests.length];
-      final editorial =
-          editorialResult is _TvHomeEditorialEdition ? editorialResult : null;
+      final catalogResults = await _loadCatalogRequestsBounded(
+        criticalCatalogRequests,
+        maxConcurrent: 3,
+        onError: markCatalogFetchError,
+      ).timeout(const Duration(seconds: 35));
+      if (!_ownsCatalogLoad(generation)) return;
       final merged = <String, _TvItem>{};
       final discoveryLaneMaps = <String, Map<String, _TvItem>>{};
       final discoveryLanePages = <String, int>{};
-      for (var index = 0; index < catalogRequests.length; index++) {
-        final list = results[index];
-        if (list is! List<_TvItem>) continue;
-        final request = catalogRequests[index];
+      for (var index = 0; index < criticalCatalogRequests.length; index++) {
+        if (index >= catalogResults.length) continue;
+        final list = catalogResults[index];
+        final request = criticalCatalogRequests[index];
         final laneKey = _tvDiscoveryLaneKey(request.kind, request.sort);
         discoveryLanePages[laneKey] = math.max(
           discoveryLanePages[laneKey] ?? 0,
@@ -1055,46 +1295,32 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           const <_TvItem>[];
       final hasLoadedCatalog = all.isNotEmpty ||
           discoveryLanes.values.any((lane) => lane.isNotEmpty);
-      if (!hasLoadedCatalog && _hasCatalogSnapshot) {
-        debugPrint(
-          'Juicr TV catalog refresh retained snapshot '
-          'bucket=empty_refresh hadNetworkError=$catalogFetchHadError',
-        );
-        if (!mounted) return;
-        setState(() {
-          _loading = false;
-          _error = null;
-          _discoveryLaneLoading.clear();
-        });
-        return;
-      }
-      if (!hasLoadedCatalog) {
+      final hasLoadedVodCatalog = all.any(
+        (item) =>
+            item.type == 'movie' ||
+            item.type == 'series' ||
+            _isAnimationOrAnimationItem(item),
+      );
+      if (!hasLoadedCatalog ||
+          (_tvSettings.builtInCatalog && !hasLoadedVodCatalog)) {
         debugPrint(
           'Juicr TV catalog hydrate stopped '
           'bucket=empty_initial hadNetworkError=$catalogFetchHadError',
         );
-        if (!mounted) return;
+        if (!_ownsCatalogLoad(generation)) return;
         setState(() {
           _loading = false;
           _error = 'Catalog is unavailable right now. Try again shortly.';
           _discoveryLaneLoading.clear();
           _discoveryLaneExhausted.clear();
+          _discoveryLaneFailed.clear();
         });
         _focusNavigationAfterFrame();
         return;
       }
-      final previousEditorial = _homeEditorial;
-      final previousEditionKey = previousEditorial == null
-          ? ''
-          : '${previousEditorial.editionId}|${previousEditorial.editionDate}';
-      final nextEditionKey = editorial == null
-          ? ''
-          : '${editorial.editionId}|${editorial.editionDate}';
-      final preserveHomeSignals =
-          previousEditionKey.isNotEmpty && previousEditionKey == nextEditionKey;
-      final heroEditorial = editorial?.hero;
+      final heroEditorial = editorial.hero;
       var curatedHeroItems = const <_TvItem>[];
-      if (heroEditorial != null && _hasHomeEditorialScope(heroEditorial)) {
+      if (_hasHomeEditorialScope(heroEditorial)) {
         try {
           final heroItems = await _loadCuratedHeroItems(
             heroEditorial,
@@ -1108,7 +1334,26 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           );
         }
       }
-      if (!mounted) return;
+      final hydratedHomeSignals = await _hydrateHomeSignalRails(
+        editorial,
+        seedItems: all,
+      ).timeout(
+        const Duration(seconds: 35),
+        onTimeout: () => const _TvHydratedHomeSignals(),
+      );
+      if (!_ownsCatalogLoad(generation)) return;
+      final visibleCuratedHeroItems = curatedHeroItems
+          .where(_shouldDisplayCatalogItem)
+          .toList(growable: false);
+      final visibleTopSignal = hydratedHomeSignals.topSignal
+          .where(_shouldDisplayCatalogItem)
+          .toList(growable: false);
+      final visibleTodaySignal = hydratedHomeSignals.todaySignal
+          .where(_shouldDisplayCatalogItem)
+          .toList(growable: false);
+      final visibleJuicrTopSignal = hydratedHomeSignals.juicrTopSignal
+          .where(_shouldDisplayCatalogItem)
+          .toList(growable: false);
       setState(() {
         _items
           ..clear()
@@ -1138,27 +1383,25 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           ..addAll(discoveryLanePages);
         _discoveryLaneLoading.clear();
         _discoveryLaneExhausted.clear();
+        _discoveryLaneFailed.clear();
         _upcomingPicks
           ..clear()
           ..addAll(upcomingPicks);
-        _heroEditorialItems = curatedHeroItems;
-        if (!preserveHomeSignals) {
-          _topSignalRemoteItems = const <_TvItem>[];
-          _todaySignalRemoteItems = const <_TvItem>[];
-          _juicrTopSignalRemoteItems = const <_TvItem>[];
-        }
+        _heroEditorialItems = visibleCuratedHeroItems;
+        _topSignalRemoteItems = visibleTopSignal;
+        _todaySignalRemoteItems = visibleTodaySignal;
+        _juicrTopSignalRemoteItems = visibleJuicrTopSignal;
         _homeArtworkByKey.clear();
-        _homeArtworkByKey.addAll(_homeArtworkMap(curatedHeroItems));
+        _homeArtworkByKey.addAll(_homeArtworkMap(visibleCuratedHeroItems));
         _homeArtworkHydrationKeys.clear();
         _homeArtworkHydrationKeys.addAll(
-          curatedHeroItems
+          visibleCuratedHeroItems
               .where((item) => (item.logo ?? '').trim().isNotEmpty)
               .expand(_homeArtworkKeys),
         );
         _homeArtworkHydrationAttempts.clear();
         _homeArtworkHydrationGeneration += 1;
         _homeEditorial = editorial;
-        _catalogLoadedAt = DateTime.now();
         _loading = false;
         _reconcileRecentItemsWithCatalog();
       });
@@ -1166,38 +1409,83 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         if (!mounted || _selectedItem != null || _searchOpen) return;
         _focusSelectedTabFirstItem();
       });
-      unawaited(_saveCatalogWarmSnapshot());
-      unawaited(_refreshHomeSignalRails(editorial, seedItems: all));
+      _ensureSelectedDiscoveryLaneLoaded();
       unawaited(_refreshHomeRailArtwork());
     } catch (error) {
-      if (!mounted) return;
-      if (_hasCatalogSnapshot) {
-        debugPrint(
-          'Juicr TV catalog refresh retained snapshot '
-          'bucket=refresh_exception errorType=${error.runtimeType}',
-        );
-        setState(() {
-          _loading = false;
-          _error = null;
-          _discoveryLaneLoading.clear();
-        });
-        return;
-      }
+      if (!_ownsCatalogLoad(generation)) return;
       setState(() {
         _loading = false;
         _error = 'Catalog is unavailable right now. Try again shortly.';
       });
     } finally {
-      if (mounted && _catalogRefreshing) {
+      if (_ownsCatalogLoad(generation) && _catalogRefreshing) {
         setState(() => _catalogRefreshing = false);
       }
     }
+  }
+
+  Future<List<List<_TvItem>>> _loadCatalogRequestsBounded(
+    List<_TvCatalogLaneRequest> requests, {
+    required int maxConcurrent,
+    void Function()? onError,
+    int? page,
+    String genre = 'All genres',
+  }) async {
+    if (requests.isEmpty) return const <List<_TvItem>>[];
+    final results = List<List<_TvItem>?>.filled(requests.length, null);
+    var nextIndex = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        final index = nextIndex;
+        if (index >= requests.length) return;
+        nextIndex += 1;
+        final request = requests[index];
+        if (page == null) {
+          results[index] = await _safeCatalog(
+            type: request.type,
+            fallbackType: request.fallbackType,
+            sort: request.catalogSort,
+            year: request.year,
+            pages: request.pages,
+            onError: onError,
+          );
+          continue;
+        }
+        try {
+          results[index] = await _catalogPageWithRetry(
+            type: request.type,
+            fallbackType: request.fallbackType,
+            sort: request.catalogSort,
+            page: page,
+            genre: genre,
+            year: request.year,
+          );
+        } catch (error) {
+          onError?.call();
+          debugPrint(
+            'Juicr TV discovery load more skipped '
+            'lane=${request.type} page=$page '
+            'bucket=${_apiErrorBucket(error)} '
+            'errorType=${error.runtimeType}',
+          );
+          results[index] = const <_TvItem>[];
+        }
+      }
+    }
+
+    final workerCount = math.min(maxConcurrent.clamp(1, 3), requests.length);
+    await Future.wait(List.generate(workerCount, (_) => worker()));
+    return results
+        .map((items) => items ?? const <_TvItem>[])
+        .toList(growable: false);
   }
 
   Future<List<_TvItem>> _safeCatalog({
     required String type,
     required String sort,
     String? fallbackType,
+    String year = '',
     int pages = 1,
     void Function()? onError,
   }) async {
@@ -1210,6 +1498,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           fallbackType: fallbackType,
           sort: sort,
           page: page,
+          year: year,
         );
         if (items.isEmpty) break;
         for (final item in items) {
@@ -1234,6 +1523,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     required int page,
     String? fallbackType,
     String? genre,
+    String year = '',
   }) async {
     Object? lastError;
     for (var attempt = 0; attempt < 2; attempt += 1) {
@@ -1245,6 +1535,8 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
               sort: sort,
               page: page,
               genre: genre ?? '',
+              year: year,
+              showMatureContent: _tvSettings.showMatureContent,
             )
             .timeout(const Duration(seconds: 8));
       } catch (error) {
@@ -1258,15 +1550,24 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   }
 
   Future<_TvHomeEditorialEdition?> _safeHomeEditorial() async {
-    try {
-      return await _api.homeEditorial().timeout(const Duration(seconds: 8));
-    } catch (error) {
-      debugPrint(
-        'Juicr TV home editorial skipped '
-        'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
-      );
-      return null;
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        final editorial = await _api.homeEditorial().timeout(
+              const Duration(seconds: 12),
+            );
+        if (editorial != null) return editorial;
+      } catch (error) {
+        debugPrint(
+          'Juicr TV home editorial attempt unavailable '
+          'attempt=${attempt + 1} bucket=${_apiErrorBucket(error)} '
+          'errorType=${error.runtimeType}',
+        );
+      }
+      if (attempt == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 260));
+      }
     }
+    return null;
   }
 
   void _clearCatalogForDisabledSource() {
@@ -1294,6 +1595,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       _discoveryLanePages.clear();
       _discoveryLaneLoading.clear();
       _discoveryLaneExhausted.clear();
+      _discoveryLaneFailed.clear();
       _upcomingPicks.clear();
       _heroEditorialItems = const <_TvItem>[];
       _topSignalRemoteItems = const <_TvItem>[];
@@ -1304,13 +1606,14 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       _homeArtworkHydrationAttempts.clear();
       _homeArtworkHydrationGeneration += 1;
       _homeEditorial = null;
-      _catalogLoadedAt = null;
     });
   }
 
   Future<void> _loadMoreDiscoveryLane() async {
+    final generation = _catalogLoadGeneration;
+    final kind = _discoveryKind;
     final laneKey = _tvDiscoveryLaneKey(
-      _discoveryKind,
+      kind,
       _discoverySort,
       genre: _discoveryGenre,
     );
@@ -1318,18 +1621,18 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         _discoveryLaneExhausted.contains(laneKey)) {
       return;
     }
-    final type = switch (_discoveryKind) {
+    final type = switch (kind) {
       _TvDiscoveryKind.movie => 'movie',
       _TvDiscoveryKind.series => 'series',
       _TvDiscoveryKind.animation => 'animation',
       _TvDiscoveryKind.liveTv => 'live_tv',
     };
-    final fallbackType = _fallbackTypeForDiscovery(
-      _discoveryKind,
-      _discoverySort,
-    );
+    final fallbackType = _fallbackTypeForDiscovery(kind, _discoverySort);
     var nextPage = (_discoveryLanePages[laneKey] ?? 0) + 1;
-    setState(() => _discoveryLaneLoading.add(laneKey));
+    setState(() {
+      _discoveryLaneLoading.add(laneKey);
+      _discoveryLaneFailed.remove(laneKey);
+    });
     try {
       final existing = <String, _TvItem>{
         for (final item in _discoveryLaneItems[laneKey] ?? const <_TvItem>[])
@@ -1338,6 +1641,8 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       var exhausted = false;
       var addedCount = 0;
       final items = await _loadMoreDiscoveryCatalogPage(
+        kind: kind,
+        discoverySort: _discoverySort,
         type: type,
         fallbackType: fallbackType,
         sort: _discoverySort.catalogSortId,
@@ -1349,20 +1654,21 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       }
       for (final item in items) {
         final normalized = _normalizeCatalogLane(item);
-        if (!_matchesDiscoveryLaneKind(normalized, _discoveryKind)) continue;
+        if (!_matchesDiscoveryLaneKind(normalized, kind)) continue;
         final itemKey = '${normalized.type}:${normalized.id}';
         if (existing.containsKey(itemKey)) continue;
         existing[itemKey] = normalized;
         addedCount += 1;
       }
       if (addedCount == 0) exhausted = true;
-      if (!mounted) return;
+      if (!_ownsCatalogLoad(generation)) return;
       setState(() {
         _discoveryLanePages[laneKey] = math.max(
           _discoveryLanePages[laneKey] ?? 0,
           nextPage,
         );
         if (exhausted) _discoveryLaneExhausted.add(laneKey);
+        _discoveryLaneFailed.remove(laneKey);
         _discoveryLaneItems[laneKey] = existing.values.toList(growable: false);
       });
     } catch (error) {
@@ -1371,29 +1677,28 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         'lane=$laneKey page=$nextPage bucket=${_apiErrorBucket(error)} '
         'errorType=${error.runtimeType}',
       );
-      if (mounted) {
+      if (_ownsCatalogLoad(generation)) {
         setState(() {
-          _discoveryLaneItems.putIfAbsent(laneKey, () => const <_TvItem>[]);
-          _discoveryLaneExhausted.add(laneKey);
+          _discoveryLaneFailed.add(laneKey);
         });
       }
     } finally {
-      if (mounted) {
+      if (_ownsCatalogLoad(generation)) {
         setState(() => _discoveryLaneLoading.remove(laneKey));
-      } else {
-        _discoveryLaneLoading.remove(laneKey);
       }
     }
   }
 
   Future<List<_TvItem>> _loadMoreDiscoveryCatalogPage({
+    required _TvDiscoveryKind kind,
+    required _TvDiscoverySort discoverySort,
     required String type,
     required String sort,
     required int page,
     required String genre,
     String? fallbackType,
   }) async {
-    if (_discoveryKind != _TvDiscoveryKind.liveTv) {
+    if (kind != _TvDiscoveryKind.liveTv) {
       return _catalogPageWithRetry(
         type: type,
         fallbackType: fallbackType,
@@ -1403,34 +1708,59 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       );
     }
 
-    const liveCatalogAliases = ['live_tv', 'livetv', 'channel', 'channels'];
-    final merged = <String, _TvItem>{};
-    final results = await Future.wait<List<_TvItem>>(
-      liveCatalogAliases.map((alias) async {
-        try {
-          return await _catalogPageWithRetry(
-            type: alias,
-            fallbackType: alias == 'live_tv' ? 'live' : null,
-            sort: sort,
-            page: page,
-            genre: genre,
-          );
-        } catch (error) {
-          debugPrint(
-            'Juicr TV discovery load more skipped '
-            'lane=$alias page=$page bucket=${_apiErrorBucket(error)} '
-            'errorType=${error.runtimeType}',
-          );
-          return const <_TvItem>[];
-        }
-      }),
+    return _loadFilteredLiveTvCatalogPage(
+      playlist: discoverySort.liveTvPlaylist,
+      sort: sort,
+      virtualPage: page,
+      genre: genre,
+      maxPages: tvLiveTvFilteredScanMaxPages,
     );
-    for (final list in results) {
-      for (final item in list) {
-        merged['${item.type}:${item.id}'] = item;
+  }
+
+  Future<List<_TvItem>> _loadFilteredLiveTvCatalogPage({
+    required TvLiveTvPlaylist playlist,
+    required String sort,
+    required int virtualPage,
+    required String genre,
+    required int maxPages,
+  }) async {
+    final rootFilter = genre.trim().isEmpty ||
+        genre.trim().toLowerCase() == 'all genres' ||
+        genre.trim().toLowerCase() == 'all countries';
+    final pagesToScan = rootFilter ? 1 : maxPages;
+    final firstServerPage = ((virtualPage - 1) * pagesToScan) + 1;
+    final merged = <String, _TvItem>{};
+    for (var offset = 0; offset < pagesToScan; offset += 1) {
+      final items = await _catalogPageWithRetry(
+        type: tvLiveTvCatalogType,
+        sort: sort,
+        page: firstServerPage + offset,
+        genre: genre,
+      );
+      if (items.isEmpty) break;
+      for (final item in items) {
+        final normalized = _normalizeCatalogLane(item);
+        if (!_matchesDiscoveryLaneKind(normalized, _TvDiscoveryKind.liveTv) ||
+            (tvShouldApplyClientLiveTvGenreFilter(playlist) &&
+                !_matchesExactDiscoveryGenre(normalized, genre))) {
+          continue;
+        }
+        merged['${normalized.type}:${normalized.id}'] = normalized;
       }
     }
     return merged.values.toList(growable: false);
+  }
+
+  bool _matchesExactDiscoveryGenre(_TvItem item, String genre) {
+    final selected = genre.trim().toLowerCase();
+    if (selected.isEmpty ||
+        selected == 'all genres' ||
+        selected == 'all countries') {
+      return true;
+    }
+    return item.genres.any(
+      (value) => value.trim().toLowerCase() == selected,
+    );
   }
 
   Future<_TvHydratedHomeSignals> _hydrateHomeSignalRails(
@@ -1438,62 +1768,28 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     required List<_TvItem> seedItems,
   }) async {
     if (editorial == null) return const _TvHydratedHomeSignals();
-    final today = await _hydrateHomeSignalRail(
-      editorial.todaySignal,
-      seedItems: seedItems,
-      limit: 20,
-    );
-    final top = await _hydrateHomeSignalRail(
-      editorial.topSignal,
-      seedItems: [...seedItems, ...today],
-      limit: 20,
-    );
-    final juicrTop = await _hydrateHomeSignalRail(
-      editorial.juicrTopSignal,
-      seedItems: [...seedItems, ...today, ...top],
-      limit: 10,
-    );
+    final rails = await Future.wait<List<_TvItem>>([
+      _hydrateHomeSignalRail(
+        editorial.todaySignal,
+        seedItems: seedItems,
+        limit: 20,
+      ),
+      _hydrateHomeSignalRail(
+        editorial.topSignal,
+        seedItems: seedItems,
+        limit: 20,
+      ),
+      _hydrateHomeSignalRail(
+        editorial.juicrTopSignal,
+        seedItems: seedItems,
+        limit: 10,
+      ),
+    ]);
     return _TvHydratedHomeSignals(
-      topSignal: top,
-      todaySignal: today,
-      juicrTopSignal: juicrTop,
+      topSignal: rails[1],
+      todaySignal: rails[0],
+      juicrTopSignal: rails[2],
     );
-  }
-
-  Future<void> _refreshHomeSignalRails(
-    _TvHomeEditorialEdition? editorial, {
-    required List<_TvItem> seedItems,
-  }) async {
-    if (editorial == null) return;
-    final editionKey = '${editorial.editionId}|${editorial.editionDate}';
-    final hydrated = await _hydrateHomeSignalRails(
-      editorial,
-      seedItems: seedItems,
-    );
-    if (!mounted) return;
-    final current = _homeEditorial;
-    final currentKey =
-        current == null ? '' : '${current.editionId}|${current.editionDate}';
-    if (currentKey != editionKey) return;
-    final hasTopSignal = hydrated.topSignal.isNotEmpty;
-    final hasTodaySignal = hydrated.todaySignal.isNotEmpty;
-    final hasJuicrTopSignal = hydrated.juicrTopSignal.isNotEmpty;
-    if (!hasTopSignal && !hasTodaySignal && !hasJuicrTopSignal) {
-      debugPrint(
-        'Juicr TV home signal retained previous rails '
-        'bucket=empty_signal_refresh',
-      );
-      return;
-    }
-    setState(() {
-      if (hasTopSignal) _topSignalRemoteItems = hydrated.topSignal;
-      if (hasTodaySignal) _todaySignalRemoteItems = hydrated.todaySignal;
-      if (hasJuicrTopSignal) {
-        _juicrTopSignalRemoteItems = hydrated.juicrTopSignal;
-      }
-    });
-    unawaited(_refreshHomeRailArtwork());
-    unawaited(_saveCatalogWarmSnapshot());
   }
 
   Future<void> _refreshHomeRailArtwork() async {
@@ -1545,7 +1841,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     if (pending.isEmpty) return;
     var shouldContinue = pendingEntries.length > batchLimit;
     _homeArtworkHydrating = true;
-    final byKey = <String, _TvItem>{};
+    final byKey = <String, _TvArtwork>{};
     try {
       final hydrated = await Future.wait(
         pending.entries.map((entry) async {
@@ -1563,14 +1859,15 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
             (item.logo ?? '').trim().isNotEmpty ||
             (item.description ?? '').trim().isNotEmpty;
         if (hasArtwork) {
-          byKey[entry.key] = item;
+          final artwork = _TvArtwork.fromItem(item);
+          byKey[entry.key] = artwork;
           for (final key in _homeArtworkKeys(item)) {
-            byKey[key] = item;
+            byKey[key] = artwork;
           }
           final requested = pending[entry.key];
           if (requested != null) {
             for (final key in _homeArtworkKeys(requested)) {
-              byKey[key] = item;
+              byKey[key] = artwork;
             }
           }
         }
@@ -1586,7 +1883,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       shouldContinue = shouldContinue ||
           pending.entries.any((entry) {
             if (!visibleKeys.contains(entry.key)) return false;
-            final decorated = entry.value.merge(byKey[entry.key] ?? entry.value);
+            final decorated = _applyTvArtwork(entry.value, byKey[entry.key]);
             if (_hasCompleteTvArtwork(_applyHomeArtwork(decorated))) {
               return false;
             }
@@ -1620,9 +1917,6 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         );
         _heroEditorialItems = _mergedArtworkList(_heroEditorialItems, byKey);
       });
-      if (mounted && generation == _homeArtworkHydrationGeneration) {
-        await _saveCatalogWarmSnapshot();
-      }
     }
     if (shouldContinue && mounted) {
       unawaited(
@@ -1633,24 +1927,28 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     }
   }
 
-  void _mergeArtworkInto(List<_TvItem> items, Map<String, _TvItem> hydrated) {
+  void _mergeArtworkInto(
+      List<_TvItem> items, Map<String, _TvArtwork> hydrated) {
     for (var index = 0; index < items.length; index++) {
       final other = _homeArtworkFor(items[index], hydrated);
-      if (other != null) items[index] = items[index].merge(other);
+      if (other != null) items[index] = _applyTvArtwork(items[index], other);
     }
   }
 
   List<_TvItem> _mergedArtworkList(
     List<_TvItem> items,
-    Map<String, _TvItem> hydrated,
+    Map<String, _TvArtwork> hydrated,
   ) {
     return [
       for (final item in items)
-        item.merge(_homeArtworkFor(item, hydrated) ?? item),
+        _applyTvArtwork(item, _homeArtworkFor(item, hydrated)),
     ];
   }
 
-  _TvItem? _homeArtworkFor(_TvItem item, Map<String, _TvItem> hydrated) {
+  _TvArtwork? _homeArtworkFor(
+    _TvItem item,
+    Map<String, _TvArtwork> hydrated,
+  ) {
     for (final key in _homeArtworkKeys(item)) {
       final other = hydrated[key];
       if (other != null) return other;
@@ -1659,18 +1957,19 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   }
 
   _TvItem _applyHomeArtwork(_TvItem item) {
-    return item.merge(_homeArtworkFor(item, _homeArtworkByKey) ?? item);
+    return _applyTvArtwork(item, _homeArtworkFor(item, _homeArtworkByKey));
   }
 
-  Map<String, _TvItem> _homeArtworkMap(Iterable<_TvItem> items) {
-    final byKey = <String, _TvItem>{};
+  Map<String, _TvArtwork> _homeArtworkMap(Iterable<_TvItem> items) {
+    final byKey = <String, _TvArtwork>{};
     for (final item in items) {
       final hasArtwork = _hasPrimaryTvArtwork(item) ||
           (item.logo ?? '').trim().isNotEmpty ||
           (item.description ?? '').trim().isNotEmpty;
       if (!hasArtwork) continue;
+      final artwork = _TvArtwork.fromItem(item);
       for (final key in _homeArtworkKeys(item)) {
-        byKey[key] = item;
+        byKey[key] = artwork;
       }
     }
     return byKey;
@@ -1682,91 +1981,50 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     required int limit,
   }) async {
     if (editorial.items.isEmpty) return const <_TvItem>[];
-    const visibleLogoLimit = 8;
-    final ranked = <_TvItem>[];
-    final signalByKey = <String, _TvHomeEditorialTrendItem>{};
-    final seen = <String>{};
+    final signals = editorial.items.take(limit).toList(growable: false);
+    final resolved = List<_TvItem?>.filled(signals.length, null);
     final seedPool = _availableHomeItems(seedItems).toList();
-    for (final signal in editorial.items.take(limit)) {
-      try {
-        var match = _findHomeSignalSeedMatch(seedPool, signal);
-        match ??= await _findHomeSignalRemoteMatch(signal);
-        if (match == null || match.poster == null) continue;
-        final normalized = _normalizeCatalogLane(match);
-        final key = _homeUsedKey(normalized);
-        if (seen.add(key)) {
-          signalByKey[key] = signal;
-          ranked.add(normalized);
+    var nextIndex = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        final index = nextIndex;
+        if (index >= signals.length) return;
+        nextIndex += 1;
+        final signal = signals[index];
+        try {
+          var match = _findHomeSignalSeedMatch(seedPool, signal);
+          if (match == null || match.poster == null) {
+            final remoteMatch = await _findHomeSignalRemoteMatch(signal);
+            if (remoteMatch != null) {
+              match = match == null ? remoteMatch : match.merge(remoteMatch);
+            }
+          }
+          if (match == null || match.poster == null) {
+            throw StateError('authoritative_home_item_unavailable');
+          }
+          resolved[index] = _normalizeCatalogLane(match);
+        } catch (error) {
+          debugPrint(
+            'Juicr TV home signal item skipped '
+            'bucket=home_signal_hydrate errorType=${error.runtimeType}',
+          );
+          rethrow;
         }
-      } catch (error) {
-        debugPrint(
-          'Juicr TV home signal item skipped '
-          'bucket=home_signal_hydrate errorType=${error.runtimeType}',
-        );
       }
     }
+
+    final workerCount = math.min(3, signals.length);
+    await Future.wait(List.generate(workerCount, (_) => worker()));
+    if (resolved.any((item) => item == null)) {
+      throw StateError('authoritative_home_rail_incomplete');
+    }
+    final ranked = resolved.cast<_TvItem>();
     debugPrint(
       'Juicr TV home signal hydrated '
       'rail=${editorial.id.ifEmpty(editorial.title)} requested=${editorial.items.length} matched=${ranked.length}',
     );
-    final visibleItems = ranked.take(visibleLogoLimit).toList(growable: false);
-    if (visibleItems.every((item) => (item.logo ?? '').trim().isNotEmpty)) {
-      return ranked;
-    }
-    final hydratedVisible = await Future.wait([
-      for (final normalized in visibleItems)
-        _hydrateHomeSignalArtwork(
-          normalized,
-          signalByKey[_homeUsedKey(normalized)] ??
-              _TvHomeEditorialTrendItem(
-                type: normalized.type,
-                title: normalized.title,
-              ),
-        ),
-    ]);
-    return [
-      for (var index = 0; index < ranked.length; index += 1)
-        if (index < hydratedVisible.length) hydratedVisible[index] else ranked[index],
-    ];
-  }
-
-  Future<_TvItem> _hydrateHomeSignalArtwork(
-    _TvItem item,
-    _TvHomeEditorialTrendItem signal,
-  ) async {
-    if ((item.logo ?? '').trim().isNotEmpty || signal.tmdbId == null) {
-      return item;
-    }
-    for (final type in _homeSignalTypes(signal)) {
-      try {
-        final metaSeed = _TvItem(
-          id: 'tmdb:${signal.tmdbId}',
-          type: type,
-          title: signal.title,
-          color: item.color,
-          poster: item.poster,
-          background: item.background,
-          year: signal.year,
-          tmdbId: signal.tmdbId,
-          imdbId: item.imdbId,
-          genres: item.genres,
-          description: item.description,
-          imdbRating: item.imdbRating,
-          releaseDate: item.releaseDate,
-          runtime: item.runtime,
-        );
-        final meta =
-            await _api.meta(metaSeed).timeout(const Duration(seconds: 12));
-        final merged = item.merge(meta);
-        if ((merged.logo ?? '').trim().isNotEmpty) return merged;
-      } catch (error) {
-        debugPrint(
-          'Juicr TV home signal artwork skipped '
-          'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
-        );
-      }
-    }
-    return item;
+    return ranked;
   }
 
   _TvItem? _findHomeSignalSeedMatch(
@@ -1823,6 +2081,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           search: signal.title,
           deepSearch: true,
           preferDefaultCatalog: true,
+          showMatureContent: _tvSettings.showMatureContent,
         )
         .timeout(const Duration(seconds: 7));
     for (final item in result) {
@@ -1852,7 +2111,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     final signalType = signal.type == 'animation' ? 'series' : signal.type;
     final itemType = item.type == 'animation' ? 'series' : item.type;
     if (signalType.isNotEmpty && itemType != signalType) return false;
-    if (signal.tmdbId != null && item.tmdbId == signal.tmdbId) return true;
+    if (signal.tmdbId != null) return item.tmdbId == signal.tmdbId;
     final itemTitle = _normalizeHomeText(item.title);
     final signalTitle = _normalizeHomeText(signal.title);
     if (itemTitle.isEmpty || signalTitle.isEmpty || itemTitle != signalTitle) {
@@ -1870,15 +2129,6 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       return item.withType('animation');
     }
     return item;
-  }
-
-  bool _hasTvDiscoveryArtwork(_TvItem item) {
-    if (_isExplicitLiveTvType(item.type)) {
-      return item.poster != null ||
-          item.background != null ||
-          item.logo != null;
-    }
-    return item.poster != null || item.background != null;
   }
 
   bool _hasPrimaryTvArtwork(_TvItem item) {
@@ -1920,11 +2170,11 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     if (kind == _TvDiscoveryKind.animation) {
       return sort == _TvDiscoverySort.onTv ? 'series' : 'movie';
     }
-    if (kind == _TvDiscoveryKind.liveTv) return 'live';
     return null;
   }
 
   bool _isAnimationOrAnimationItem(_TvItem item) {
+    if (_isExplicitLiveTvType(item.type)) return false;
     if (item.type == 'animation') {
       return _hasAnimationSignal(item);
     }
@@ -1992,9 +2242,6 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     }
     if (!mounted) return;
     setState(() => _tvSettings = restored);
-    if (_tvSettings.hasCatalogSource && prefs != null) {
-      await _restoreCatalogWarmSnapshot(prefs);
-    }
     unawaited(_loadCatalog(force: true));
   }
 
@@ -2013,31 +2260,8 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   Future<void> _restoreVerifiedPlaybackSessions() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final encoded = prefs.getString(_tvVerifiedPlaybackSessionsPrefsKey);
-      if (encoded == null || encoded.trim().isEmpty) return;
-      final decoded = jsonDecode(encoded);
-      if (decoded is! Map) return;
-      final restored = <String, List<_TvVerifiedPlaybackSession>>{};
-      for (final entry in decoded.entries) {
-        final key = entry.key.toString().trim();
-        if (key.isEmpty || entry.value is! List) continue;
-        final sessions = <_TvVerifiedPlaybackSession>[
-          for (final raw in (entry.value as List).whereType<Map>())
-            _TvVerifiedPlaybackSession.fromJson(
-              Map<String, dynamic>.from(raw),
-            ),
-        ].where(_verifiedPlaybackSessionUsable).toList(growable: false);
-        if (sessions.isNotEmpty) restored[key] = _rankVerifiedSessions(sessions);
-      }
-      if (!mounted) return;
-      setState(() {
-        _verifiedPlaybackSessions
-          ..clear()
-          ..addAll(restored);
-      });
-      debugPrint(
-        'Juicr TV verified playback cache restored keys=${restored.length}',
-      );
+      await prefs.remove(_tvVerifiedPlaybackSessionsPrefsKey);
+      debugPrint('Juicr TV verified playback cache starts memory-only');
     } catch (error) {
       debugPrint(
         'Juicr TV verified playback cache restore skipped '
@@ -2049,18 +2273,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   Future<void> _persistVerifiedPlaybackSessions() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final encoded = jsonEncode(
-        _verifiedPlaybackSessions.map(
-          (key, value) => MapEntry(
-            key,
-            _rankVerifiedSessions(value)
-                .take(3)
-                .map((entry) => entry.toJson())
-                .toList(growable: false),
-          ),
-        ),
-      );
-      await prefs.setString(_tvVerifiedPlaybackSessionsPrefsKey, encoded);
+      await prefs.remove(_tvVerifiedPlaybackSessionsPrefsKey);
     } catch (error) {
       debugPrint(
         'Juicr TV verified playback cache save skipped '
@@ -2133,6 +2346,10 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       final progress = _TvPlaybackProgress(
         position: Duration(milliseconds: entry.value.positionMillis),
         duration: Duration(milliseconds: entry.value.durationMillis ?? 0),
+        credibleWatched: Duration(
+          milliseconds:
+              entry.value.credibleWatchedMillis ?? entry.value.positionMillis,
+        ),
       );
       final item = _itemForProgressKey(entry.key, recentByProgressKey);
       if (item != null && _isSuspiciousLongFormProgress(item, progress)) {
@@ -2185,7 +2402,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         final remoteSnapshot = remote?.snapshot;
         if (remoteSnapshot != null && remoteSnapshot.isNotEmpty) {
           _accountLibraryRevision = remote!.revision;
-          final accountState = const TvLibraryState().mergeMobileLibraryBackup(
+          final accountState = store.state.mergeMobileLibraryBackup(
             remoteSnapshot,
           );
           await store.save(accountState);
@@ -2218,7 +2435,10 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           snapshot: store.state.toMobileLibraryBackup(),
           baseRevision: _accountLibraryRevision,
         );
-        if (retry.ok) _accountLibraryRevision = retry.revision;
+        if (!retry.ok || retry.conflict) {
+          throw StateError('account_library_conflict_unsettled');
+        }
+        _accountLibraryRevision = retry.revision;
       } else if (push.ok) {
         _accountLibraryRevision = push.revision;
       }
@@ -2641,6 +2861,28 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   int get _completedLibraryCount =>
       _libraryStore?.state.completedKeys.length ?? 0;
 
+  List<_TvItem> get _completedItems {
+    final state = _libraryStore?.state;
+    if (state == null || state.completedKeys.isEmpty) {
+      return const <_TvItem>[];
+    }
+    final snapshots = <String, _TvItem>{};
+    for (final snapshot in state.recentItems) {
+      final item = _itemFromRecentSnapshot(snapshot);
+      if (item == null) continue;
+      snapshots[snapshot.key] = item;
+      snapshots[_itemKey(item)] = item;
+    }
+    final completed = <String, _TvItem>{};
+    for (final key in state.completedKeys) {
+      final item = _itemForProgressKey(key, snapshots);
+      if (item != null && !_isLiveTvItem(item)) {
+        completed[_itemKey(item)] = item;
+      }
+    }
+    return completed.values.toList(growable: false);
+  }
+
   int get _activeWatchSeconds {
     if (_accountSignedIn && _accountActiveWatchSeconds != null) {
       return _accountActiveWatchSeconds!;
@@ -2661,10 +2903,6 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   List<_TvRail> get _rails {
     final editorial = _homeEditorial;
     final rails = <_TvRail>[];
-    final usedKeys = <String>{
-      for (final item in _homeHeroItems.take(8)) _homeUsedKey(item),
-    };
-
     void addRail({
       required _TvHomeEditorialRail editorial,
       required List<_TvItem> primary,
@@ -2676,7 +2914,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       final items = _backfilledHomeRailItems(
         primary,
         fallbackPool: const <_TvItem>[],
-        usedKeys: usedKeys,
+        usedKeys: const <String>{},
         limit: limit,
         preservePrimaryRank: preservePrimaryRank,
       );
@@ -2690,7 +2928,6 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           posterCards: posterCards,
         ),
       );
-      usedKeys.addAll(items.map(_homeUsedKey));
     }
 
     final todayEditorial = editorial?.todaySignal;
@@ -2701,11 +2938,9 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       );
       addRail(
         editorial: todayEditorial,
-        primary: todayRemoteItems.isNotEmpty
-            ? todayRemoteItems
-            : _itemsForEditorial(todayEditorial),
+        primary: todayRemoteItems,
         limit: 20,
-        preservePrimaryRank: todayRemoteItems.isNotEmpty,
+        preservePrimaryRank: true,
       );
     }
 
@@ -2717,11 +2952,9 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       );
       addRail(
         editorial: weekEditorial,
-        primary: weekRemoteItems.isNotEmpty
-            ? weekRemoteItems
-            : _itemsForEditorial(weekEditorial),
+        primary: weekRemoteItems,
         limit: 20,
-        preservePrimaryRank: weekRemoteItems.isNotEmpty,
+        preservePrimaryRank: true,
       );
     }
 
@@ -2733,49 +2966,30 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       );
       addRail(
         editorial: topTenEditorial,
-        primary: topTenRemoteItems.isNotEmpty
-            ? topTenRemoteItems
-            : _itemsForEditorial(topTenEditorial),
+        primary: topTenRemoteItems,
         limit: 10,
-        preservePrimaryRank: topTenRemoteItems.isNotEmpty,
+        preservePrimaryRank: true,
       );
     }
 
-    final rawUpcomingEditorial = _hasHomeEditorialScope(editorial?.upcoming)
-        ? editorial!.upcoming
-        : const _TvHomeEditorialRail(
-            id: 'upcomingEditorial',
-            title: 'Upcoming This Year',
-            subtitle: '',
-          );
-    final upcomingEditorial = _TvHomeEditorialRail(
-      id: rawUpcomingEditorial.id,
-      title: 'Upcoming This Year',
-      subtitle: '',
-      kind: rawUpcomingEditorial.kind,
-      types: rawUpcomingEditorial.types,
-      genres: rawUpcomingEditorial.genres,
-      sort: rawUpcomingEditorial.sort,
-      perType: rawUpcomingEditorial.perType,
-      requireGenreMatch: rawUpcomingEditorial.requireGenreMatch,
-      intent: rawUpcomingEditorial.intent,
-      curationKind: rawUpcomingEditorial.curationKind,
-      releaseWindow: rawUpcomingEditorial.releaseWindow,
-      theme: rawUpcomingEditorial.theme,
-      seasonalWindow: rawUpcomingEditorial.seasonalWindow,
-      query: rawUpcomingEditorial.query,
-      items: rawUpcomingEditorial.items,
-    );
+    if (_hasHomeEditorialScope(editorial?.saved)) {
+      addRail(
+        editorial: editorial!.saved,
+        primary: _likedItems,
+        limit: 12,
+        showRank: false,
+      );
+    }
+
+    if (!_hasHomeEditorialScope(editorial?.upcoming)) return rails;
+    final upcomingEditorial = editorial!.upcoming;
     final upcomingLaneItems = _discoveryLaneItems[_tvDiscoveryLaneKey(
           _TvDiscoveryKind.movie,
           _TvDiscoverySort.upcoming,
         )] ??
         const <_TvItem>[];
-    final upcomingPrimary = upcomingLaneItems.isNotEmpty
-        ? upcomingLaneItems
-        : (_upcomingPicks.isNotEmpty
-            ? _upcomingPicks
-            : _itemsForEditorial(upcomingEditorial));
+    final upcomingPrimary =
+        upcomingLaneItems.isNotEmpty ? upcomingLaneItems : _upcomingPicks;
     if (upcomingPrimary.isNotEmpty) {
       addRail(
         editorial: upcomingEditorial,
@@ -2786,17 +3000,6 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       );
     }
 
-    addRail(
-      editorial: const _TvHomeEditorialRail(
-        id: 'savedForLater',
-        title: 'Saved For Later',
-        subtitle: 'Titles you marked to revisit.',
-      ),
-      primary: _likedItems,
-      limit: 12,
-      showRank: false,
-    );
-
     return rails;
   }
 
@@ -2805,15 +3008,6 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       return [
         for (final item in _heroEditorialItems.take(8)) _applyHomeArtwork(item),
       ];
-    }
-    final editorial = _homeEditorial;
-    if (editorial != null && _hasHomeEditorialScope(editorial.hero)) {
-      final curated = _itemsForEditorial(editorial.hero);
-      if (curated.isNotEmpty) {
-        return [
-          for (final item in curated.take(8)) _applyHomeArtwork(item),
-        ];
-      }
     }
     return const <_TvItem>[];
   }
@@ -2830,10 +3024,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     const heroLimit = 12;
     const heroCandidateLimit = 36;
     if (!_hasHeroEditorialScope(editorial)) {
-      return _itemsForEditorial(
-        editorial,
-        seedItems,
-      ).take(heroLimit).toList(growable: false);
+      return const <_TvItem>[];
     }
     final types = editorial.types.isEmpty
         ? const ['movie', 'series', 'animation']
@@ -2841,6 +3032,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     final genre =
         editorial.genres.isEmpty ? 'All genres' : editorial.genres.first;
     final perType = editorial.perType.clamp(1, 12).toInt();
+    final maxPages = _curatedHeroMaxPages(editorial);
     final buckets = await Future.wait<List<_TvItem>>([
       for (final type in types)
         _loadCuratedHeroBucket(
@@ -2848,6 +3040,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           editorial: editorial,
           genre: genre,
           limit: perType,
+          maxPages: maxPages,
         ),
     ]);
     final interleaved = _interleaveHeroBuckets(
@@ -2856,8 +3049,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     if (interleaved.isNotEmpty) {
       return interleaved.take(heroLimit).toList(growable: false);
     }
-    final editorialFallback = _itemsForEditorial(editorial, seedItems);
-    return editorialFallback.take(heroLimit).toList(growable: false);
+    return const <_TvItem>[];
   }
 
   Future<_TvItem> _hydrateHeroArtworkItem(_TvItem item) async {
@@ -2921,11 +3113,12 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     required _TvHomeEditorialRail editorial,
     required String genre,
     required int limit,
+    required int maxPages,
   }) async {
     final gathered = <_TvItem>[];
     final seen = <String>{};
     for (final sort in _curatedHeroSortFallbacks(editorial.sort)) {
-      for (var page = 1; page <= 3; page += 1) {
+      for (var page = 1; page <= maxPages; page += 1) {
         try {
           final items = await _api
               .catalog(
@@ -2936,6 +3129,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
                 search: editorial.query,
                 deepSearch: editorial.query.isNotEmpty,
                 preferDefaultCatalog: true,
+                showMatureContent: _tvSettings.showMatureContent,
               )
               .timeout(const Duration(seconds: 8));
           if (items.isEmpty) break;
@@ -2945,8 +3139,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
             if (seen.add(_homeUsedKey(item))) gathered.add(item);
           }
           final isDailyGenre =
-              editorial.curationKind.trim().toLowerCase() ==
-                  'tmdb_daily_genre';
+              editorial.curationKind.trim().toLowerCase() == 'tmdb_daily_genre';
           final matches = isDailyGenre
               ? gathered.take(limit).toList(growable: false)
               : _bestEditorialMatches(
@@ -2975,6 +3168,12 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
             limit,
             allowUnknownGenre: true,
           );
+  }
+
+  int _curatedHeroMaxPages(_TvHomeEditorialRail editorial) {
+    final curationKind = editorial.curationKind.trim().toLowerCase();
+    if (curationKind == 'tmdb_daily_genre') return 1;
+    return editorial.pageOneOnly ? 1 : 3;
   }
 
   List<String> _curatedHeroSortFallbacks(String preferred) {
@@ -3195,58 +3394,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         .replaceAll(RegExp(r'\s+'), ' ');
   }
 
-  List<_TvItem> _itemsForEditorial(
-    _TvHomeEditorialRail editorial, [
-    List<_TvItem>? sourceItems,
-  ]) {
-    var candidates = _availableHomeItems(sourceItems ?? _items);
-    final ranked = _rankedItemsForEditorial(editorial, candidates);
-    if (ranked.isNotEmpty) return ranked;
-    if (editorial.types.isNotEmpty) {
-      final types = editorial.types.toSet();
-      candidates =
-          candidates.where((item) => types.contains(item.type)).toList();
-    }
-    if (editorial.query.isNotEmpty) {
-      final query = _normalizeHomeText(editorial.query);
-      candidates = candidates.where((item) {
-        final haystack = _normalizeHomeText(
-          [item.title, item.id, item.year ?? '', ...item.genres].join(' '),
-        );
-        return query.isEmpty || haystack.contains(query);
-      }).toList();
-    }
-    if (editorial.genres.isNotEmpty) {
-      final genres =
-          editorial.genres.map((genre) => genre.toLowerCase()).toSet();
-      final genreMatches = candidates.where((item) {
-        return item.genres.any((genre) => genres.contains(genre.toLowerCase()));
-      }).toList();
-      if (genreMatches.isNotEmpty || editorial.requireGenreMatch) {
-        candidates = genreMatches;
-      }
-    }
-    if (_requiresCurrentReleaseWindow(editorial)) {
-      final currentYear = DateTime.now().year;
-      final current = candidates
-          .where((item) => _yearInt(item.year) >= currentYear - 1)
-          .toList();
-      if (current.isNotEmpty || editorial.requireGenreMatch) {
-        candidates = current;
-      }
-    }
-    if (editorial.sort == 'year') {
-      candidates.sort((a, b) => (_yearInt(b.year)).compareTo(_yearInt(a.year)));
-    } else if (editorial.sort.toLowerCase().contains('imdb')) {
-      candidates.sort(
-        (a, b) => (_ratingDouble(
-          b.imdbRating,
-        )).compareTo(_ratingDouble(a.imdbRating)),
-      );
-    }
-    return _stableDailyShuffle(candidates, seed: editorial.title.hashCode);
-  }
-
+  // ignore: unused_element
   List<_TvItem> _rankedItemsForEditorial(
     _TvHomeEditorialRail editorial,
     List<_TvItem> candidates,
@@ -3283,6 +3431,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     return intent.contains('current') || window.contains('current_year');
   }
 
+  // ignore: unused_element
   List<_TvItem> _stableDailyShuffle(List<_TvItem> items, {required int seed}) {
     final copy = [...items];
     final random = math.Random(_editorialBucket(offset: seed.abs() % 997));
@@ -3480,6 +3629,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       }
     }
     if (!mounted) return;
+    _lastBackDispatchAt = DateTime.now();
     final homeRouteIsCurrent = ModalRoute.of(context)?.isCurrent ?? true;
     if (!homeRouteIsCurrent) {
       _restoreTvFocusAfterRoutePop(previousFocus);
@@ -3548,7 +3698,11 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     }
   }
 
-  String _itemKey(_TvItem item) => '${item.type}:${item.id}';
+  String _itemKey(_TvItem item) => tvCanonicalPlaybackItemKey(
+        type: item.type,
+        id: item.id,
+        tmdbId: item.tmdbId,
+      );
 
   _TvItem? _itemFromRecentSnapshot(TvRecentItemSnapshot snapshot) {
     final itemType = snapshot.itemType ?? snapshot.key.split(':').first;
@@ -3682,11 +3836,40 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   }
 
   void _updateTvSettings(_TvSettingsState next) {
+    String catalogAuthority(_TvSettingsState settings) => jsonEncode({
+          'defaultConsent': settings.defaultSourceConsentAccepted,
+          'addOnConsent': settings.addOnConsentAccepted,
+          'builtInCatalog': settings.builtInCatalog,
+          'builtInLiveTv': settings.builtInLiveTv,
+          'showMatureContent': settings.showMatureContent,
+          'addOns': [
+            for (final addon in settings.userAddOns)
+              if (addon.enabled)
+                {
+                  'id': addon.id,
+                  'manifest': addon.manifest,
+                },
+          ],
+        });
     final shouldRefreshCatalog =
-        _tvSettings.builtInCatalog != next.builtInCatalog ||
-            _tvSettings.builtInLiveTv != next.builtInLiveTv;
+        catalogAuthority(_tvSettings) != catalogAuthority(next);
+    String playbackAuthority(_TvSettingsState settings) =>
+        tvPlaybackAuthorityFingerprint(
+          builtInPlayback: settings.builtInPlayback,
+          enabledAddOns: [
+            for (final addOn in settings.userAddOns)
+              if (addOn.enabled) '${addOn.id}\n${addOn.manifest}',
+          ],
+        );
+    final shouldResetVerifiedPlaybackCache = tvPlaybackAuthorityChanged(
+      playbackAuthority(_tvSettings),
+      playbackAuthority(next),
+    );
     setState(() {
       _tvSettings = next;
+      if (shouldResetVerifiedPlaybackCache) {
+        _verifiedPlaybackSessions.clear();
+      }
       if (!next.keepHistory) {
         _recentItems.clear();
         unawaited(
@@ -3697,8 +3880,15 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         );
       }
     });
-    unawaited(_persistTvSettings(next));
+    if (shouldResetVerifiedPlaybackCache) {
+      unawaited(_persistVerifiedPlaybackSessions());
+    }
     if (shouldRefreshCatalog) {
+      _catalogLoadGeneration += 1;
+      if (!next.hasCatalogSource) _clearCatalogForDisabledSource();
+    }
+    unawaited(_persistTvSettings(next));
+    if (shouldRefreshCatalog && next.hasCatalogSource) {
       unawaited(_loadCatalog(force: true));
     }
   }
@@ -3754,6 +3944,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   }
 
   void _handleBackPressed() {
+    if (TvDialogBackStackGuard.blocksPageBack) return;
     final now = DateTime.now();
     final duplicateBack = _lastBackDispatchAt != null &&
         now.difference(_lastBackDispatchAt!) <
@@ -3772,13 +3963,6 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       setState(() => _expandedRail = null);
       return;
     }
-    final navigationHasFocus =
-        _navigationRailKey.currentState?.hasFocus == true;
-    if (!navigationHasFocus) {
-      _lastExitBackPressAt = null;
-      _navigationRailKey.currentState?.focusSelected();
-      return;
-    }
     if (_selectedTab != 0) {
       _lastExitBackPressAt = null;
       _cancelPreparingPlayback();
@@ -3790,6 +3974,13 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       });
       _lastPageFocusNodes[0] = _homeHeroWatchFocusNode;
       _restoreHomeHero();
+      return;
+    }
+    final navigationHasFocus =
+        _navigationRailKey.currentState?.hasFocus == true;
+    if (!navigationHasFocus) {
+      _lastExitBackPressAt = null;
+      _navigationRailKey.currentState?.focusSelected();
       return;
     }
     final shouldExit = _lastExitBackPressAt != null &&
@@ -3814,7 +4005,12 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         kind: _discoveryKind,
         sort: _discoverySort,
         genre: _discoveryGenre,
-        genres: _availableDiscoveryGenres,
+        genresByKind: {
+          for (final kind in _TvDiscoveryKind.values)
+            kind: _availableDiscoveryGenresFor(kind),
+        },
+        liveTvGenres: _catalogConfig.liveTvGenres,
+        liveTvCountries: _catalogConfig.liveTvCountries,
         onChanged: (selection) {
           if (!mounted) return;
           setState(() {
@@ -3840,7 +4036,14 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     });
   }
 
-  List<String> get _availableDiscoveryGenres {
+  List<String> _availableDiscoveryGenresFor(_TvDiscoveryKind kind) {
+    if (kind == _TvDiscoveryKind.liveTv) {
+      return tvLiveTvFilterOptions(
+        playlist: _discoverySort.liveTvPlaylist,
+        serverGenres: _catalogConfig.liveTvGenres,
+        serverCountries: _catalogConfig.liveTvCountries,
+      );
+    }
     final genres = <String, String>{};
     final candidates = <String, _TvItem>{
       for (final item in _items) '${item.type}:${item.id}': item,
@@ -3848,7 +4051,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         for (final item in entry.value) '${item.type}:${item.id}': item,
     }.values;
     for (final item in candidates) {
-      if (!_matchesDiscoveryLaneKind(item, _discoveryKind)) continue;
+      if (!_matchesDiscoveryLaneKind(item, kind)) continue;
       for (final rawGenre in item.genres) {
         final genre = rawGenre.trim();
         if (genre.isEmpty) continue;
@@ -4167,14 +4370,20 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   ) {
     final ordered = [
       for (final session in sessions)
-        if (_tvSettings.p2pPlaybackEnabled || !_isP2pPlaybackSession(session))
+        if (_tvSettings.p2pPlaybackActive || !_isP2pPlaybackSession(session))
           session,
     ];
     int rank(_PlaybackSession session) {
       final type = session.sourceType.toLowerCase();
       final p2p = _isP2pPlaybackSession(session);
-      if (p2p && !_tvSettings.p2pSourcePrioritiesEnabled) return 20;
       if (p2p) return 10 + _p2pPlaybackSessionRank(session);
+      final candidateRank = tvPlaybackPreferenceCandidateRank(
+        engine: _tvSettings.playbackEngine,
+        preferredQuality: _tvSettings.preferredQuality,
+        type: session.sourceType,
+        quality: session.quality,
+        compatibilityRisk: session.compatibilityRisk,
+      );
       final adaptive = type.contains('hls') ||
           type.contains('m3u8') ||
           type.contains('dash') ||
@@ -4184,8 +4393,8 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         'Best available' => adaptive
             ? 0
             : direct
-                ? 1
-                : 2,
+                ? candidateRank
+                : 30,
         'Data saver' => direct
             ? 0
             : adaptive
@@ -4194,19 +4403,24 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         _ => adaptive
             ? 0
             : direct
-                ? 1
-                : 2,
+                ? candidateRank
+                : 30,
       };
     }
 
-    ordered.sort((left, right) => rank(left).compareTo(rank(right)));
-    if (!_tvSettings.p2pPlaybackEnabled ||
+    final deterministicallyOrdered =
+        tvDeterministicRankedPlaybackCandidateOrder(
+      ordered,
+      rankOf: rank,
+      identityOf: (session) => session.candidateId,
+    );
+    if (!_tvSettings.p2pPlaybackActive ||
         !_tvSettings.p2pSourcePrioritiesEnabled) {
-      return ordered;
+      return deterministicallyOrdered;
     }
     final p2pQualityCounts = <String, int>{};
     return [
-      for (final session in ordered)
+      for (final session in deterministicallyOrdered)
         if (!_isP2pPlaybackSession(session) ||
             (p2pQualityCounts.update(
                   _playbackQualityBucket(session.sourceType.toLowerCase()),
@@ -4229,34 +4443,20 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   }
 
   int _p2pPlaybackSessionRank(_PlaybackSession session) {
-    final type = session.sourceType.toLowerCase();
-    final risky = _tvSettings.p2pAvoidRiskyFormats &&
-        (type.contains('cam') ||
-            type.contains('ts') ||
-            type.contains('telecine') ||
-            type.contains('telesync') ||
-            type.contains('scr'));
-    final riskyPenalty = risky ? 8 : 0;
-    final qualityRank = _playbackQualityRank(type);
-    return switch (_tvSettings.p2pPriorityMode) {
-      kTvP2pPriorityQualityFirst => qualityRank + riskyPenalty,
-      kTvP2pPriorityAvailabilityFirst => riskyPenalty,
-      kTvP2pPrioritySmallerFasterFiles =>
-        _playbackSizeRank(type) + riskyPenalty,
-      kTvP2pPriorityBalanced =>
-        ((qualityRank + _playbackSizeRank(type)) ~/ 2) + riskyPenalty,
-      _ => riskyPenalty + math.min(qualityRank, _playbackSizeRank(type)),
-    };
-  }
-
-  int _playbackQualityRank(String type) {
-    if (type.contains('2160') || type.contains('4k') || type.contains('uhd')) {
-      return 0;
-    }
-    if (type.contains('1080')) return 1;
-    if (type.contains('720')) return 2;
-    if (type.contains('480')) return 3;
-    return 4;
+    return tvP2pPlaybackCandidateRank(
+      mode: _tvSettings.p2pSourcePrioritiesEnabled
+          ? _tvSettings.p2pPriorityMode
+          : kTvP2pPrioritySmartStart,
+      quality: session.quality,
+      label: session.p2pDescriptor?.displayName ?? '',
+      trackerCount: session.p2pDescriptor?.trackerCount ?? 0,
+      avoidRiskyFormats: _tvSettings.p2pSourcePrioritiesEnabled
+          ? _tvSettings.p2pAvoidRiskyFormats
+          : true,
+      sizeLimitMb: _tvSettings.p2pSourcePrioritiesEnabled
+          ? _tvSettings.p2pSizeLimitMb
+          : 0,
+    );
   }
 
   String _playbackQualityBucket(String type) {
@@ -4269,22 +4469,8 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     return 'auto';
   }
 
-  int _playbackSizeRank(String type) {
-    final match = RegExp(r'(\d+(?:\.\d+)?)\s*(gb|mb)').firstMatch(type);
-    if (match == null) return 2;
-    final amount = double.tryParse(match.group(1) ?? '') ?? 0;
-    final unit = match.group(2) ?? 'mb';
-    final sizeMb = unit == 'gb' ? amount * 1024 : amount;
-    final limit = _tvSettings.p2pSizeLimitMb;
-    if (limit > 0 && sizeMb > limit) return 10;
-    if (sizeMb <= 1400) return 0;
-    if (sizeMb <= 4096) return 1;
-    if (sizeMb <= 8192) return 2;
-    return 3;
-  }
-
   String _playbackProgressKey(_TvItem item, int season, int episode) {
-    return '${item.type}:${item.id}:$season:$episode';
+    return '${_itemKey(item)}:$season:$episode';
   }
 
   String _verifiedPlaybackSessionKey(_TvItem item, int season, int episode) {
@@ -4306,7 +4492,8 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       return false;
     }
     if (entry.confidence < 8) return false;
-    if (_isP2pPlaybackSession(entry.session) && !_tvSettings.p2pPlaybackEnabled) {
+    if (_isP2pPlaybackSession(entry.session) &&
+        !_tvSettings.p2pPlaybackActive) {
       return false;
     }
     return true;
@@ -4420,10 +4607,11 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   }
 
   bool _shouldOfferResume(_TvPlaybackProgress progress) {
-    if (!_tvSettings.resumePrompt) return false;
-    if (progress.position <= Duration.zero) return false;
-    if (progress.duration <= Duration.zero) return true;
-    return progress.duration - progress.position > const Duration(minutes: 2);
+    return tvPlaybackProgressCanResume(
+      position: progress.position,
+      duration: progress.duration,
+      enabled: _tvSettings.resumePrompt,
+    );
   }
 
   _TvPlaybackProgress? _resumeProgressFor(
@@ -4432,7 +4620,15 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     int episode,
   ) {
     final progress = _watchedProgressForPlayback(item, season, episode);
-    if (progress == null || !_shouldOfferResume(progress)) return null;
+    final offered = progress != null && _shouldOfferResume(progress);
+    debugPrint(
+      'Juicr TV resume eligibility '
+      'present=${progress != null} '
+      'position=${progress?.position.inSeconds ?? 0}s '
+      'duration=${progress?.duration.inSeconds ?? 0}s '
+      'preference=${_tvSettings.resumePrompt} offered=$offered',
+    );
+    if (!offered) return null;
     return progress;
   }
 
@@ -4444,10 +4640,16 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     final exactKey = _playbackProgressKey(item, season, episode);
     final itemKey = _itemKey(item);
     final legacyItemKey = item.id.trim();
+    final legacyTypedItemKey = legacyItemKey.isEmpty
+        ? ''
+        : '${_normalizeType(item.type)}:$legacyItemKey';
     final candidates = <String>[
       exactKey,
+      if (legacyTypedItemKey.isNotEmpty) '$legacyTypedItemKey:$season:$episode',
       if (legacyItemKey.isNotEmpty) '$legacyItemKey:$season:$episode',
       if (season == 1 && episode == 1) itemKey,
+      if (season == 1 && episode == 1 && legacyTypedItemKey.isNotEmpty)
+        legacyTypedItemKey,
       if (season == 1 && episode == 1 && legacyItemKey.isNotEmpty)
         legacyItemKey,
     ];
@@ -4470,13 +4672,18 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
       _latestWatchedProgressForItem(_TvItem item) {
     final itemKey = _itemKey(item);
     final legacyItemKey = item.id.trim();
+    final legacyTypedItemKey = legacyItemKey.isEmpty
+        ? ''
+        : '${_normalizeType(item.type)}:$legacyItemKey';
     ({int season, int episode})? parseKey(String key) {
       if (key == itemKey ||
+          (legacyTypedItemKey.isNotEmpty && key == legacyTypedItemKey) ||
           (legacyItemKey.isNotEmpty && key == legacyItemKey)) {
         return (season: 1, episode: 1);
       }
       final prefixes = <String>[
         '$itemKey:',
+        if (legacyTypedItemKey.isNotEmpty) '$legacyTypedItemKey:',
         if (legacyItemKey.isNotEmpty) '$legacyItemKey:',
       ];
       for (final prefix in prefixes) {
@@ -4552,6 +4759,20 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         );
       return;
     }
+    final requestedProgress =
+        _watchedProgressForPlayback(item, season, episode);
+    await tvResetCompletedProgressBeforeReplay(
+      position: requestedProgress?.position,
+      duration: requestedProgress?.duration,
+      clear: () async {
+        final progressKey = _playbackProgressKey(item, season, episode);
+        _watchedProgress.remove(progressKey);
+        await _libraryStore?.clearProgress(progressKey);
+        _scheduleAccountLibraryPush();
+        if (mounted) setState(() {});
+      },
+    );
+    if (!mounted) return;
     final target = _resolvePlaybackTarget(item, season, episode);
     final targetSeason = target.season;
     final targetEpisode = target.episode;
@@ -4577,6 +4798,11 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
     if (!mounted || requestGeneration != _playRequestGeneration) return;
     try {
       final resumeProgress = target.progress;
+      debugPrint(
+        'Juicr TV playback resume handoff '
+        'present=${resumeProgress != null} '
+        'position=${resumeProgress?.position.inSeconds ?? 0}s',
+      );
       if (!mounted) return;
       final cachedSessions = _verifiedPlaybackSessionsFor(verifiedCacheKey);
       final hasVerifiedPlaybackCache = cachedSessions.isNotEmpty;
@@ -4586,20 +4812,35 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
           'key=[redacted] count=${cachedSessions.length}',
         );
       }
-      Future<List<_PlaybackSession>> fetchFreshPlaybackSessions(
-        String reason,
-      ) async {
+      Future<List<_PlaybackSession>> fetchFreshPlaybackSessions(String reason,
+          [Set<String> rejectedKeys = const <String>{}]) async {
         try {
           final sessions = await _api
               .playbackSessions(
                 item,
+                settings: _tvSettings,
                 season: targetSeason,
                 episode: targetEpisode,
               )
               .timeout(const Duration(seconds: 45));
-          final ordered = _orderedPlaybackSessions(sessions);
+          final eligible = tvExcludeRejectedPlaybackSessions<_PlaybackSession>(
+            sessions: sessions,
+            rejectedKeys: rejectedKeys,
+            keyOf: (session) {
+              final p2p = session.p2pDescriptor;
+              if (p2p != null) return tvP2pRouteIdentityKey(p2p);
+              return <String>[
+                session.mediaUrl.trim(),
+                session.sourceType.trim().toLowerCase(),
+                session.quality.trim().toLowerCase(),
+              ].join('|');
+            },
+          );
+          final ordered = _orderedPlaybackSessions(eligible);
           debugPrint(
             'Juicr TV fresh playback $reason ready '
+            'total=${sessions.length} '
+            'excluded=${sessions.length - eligible.length} '
             'count=${ordered.length}',
           );
           return ordered;
@@ -4648,17 +4889,20 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
             subtitleLanguage: _tvSettings.subtitleLanguage,
             onSubtitlePreferenceChanged: _persistSubtitlePreference,
             onSubtitleDelayChanged: _persistSubtitleDelay,
-            resolveSubtitles: () => _subtitlesForPlayback(
+            resolveSubtitles: (season, episode) => _subtitlesForPlayback(
               item,
-              season: targetSeason,
-              episode: targetEpisode,
+              season: season,
+              episode: episode,
             ),
-            resolveFreshSessions: () async {
+            resolveFreshSessions: (rejectedKeys) async {
               debugPrint(
                 'Juicr TV fresh playback refresh requested '
                 'cacheKey=[redacted]',
               );
-              return fetchFreshPlaybackSessions('player refresh');
+              return fetchFreshPlaybackSessions(
+                'player refresh',
+                rejectedKeys,
+              );
             },
             onProgress: (season, episode, progress) {
               final progressKey = _playbackProgressKey(item, season, episode);
@@ -4668,6 +4912,13 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
                 progress,
                 markHistory: true,
               );
+            },
+            onProgressReset: (season, episode) async {
+              final progressKey = _playbackProgressKey(item, season, episode);
+              _watchedProgress.remove(progressKey);
+              await _libraryStore?.clearProgress(progressKey);
+              _scheduleAccountLibraryPush();
+              if (mounted) setState(() {});
             },
             onVerifiedSession: (session, engineId) {
               _rememberVerifiedPlaybackSession(
@@ -4709,9 +4960,18 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         }
         return;
       }
-      final progress = result is _TvPlaybackProgress ? result : null;
+      final playbackResult = result is _TvPlaybackResult ? result : null;
+      final progress = playbackResult?.progress ??
+          (result is _TvPlaybackProgress ? result : null);
       if (progress != null) {
-        _savePlaybackProgressForItem(item, playbackKey, progress);
+        final finalPlaybackKey = playbackResult == null
+            ? playbackKey
+            : _playbackProgressKey(
+                item,
+                playbackResult.season,
+                playbackResult.episode,
+              );
+        _savePlaybackProgressForItem(item, finalPlaybackKey, progress);
       }
       if (_tvSettings.keepHistory) _rememberItem(item);
       if (returnToDetailsOnClose) {
@@ -4755,7 +5015,8 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
         'Juicr TV suspicious progress save skipped key=[redacted] '
         'duration=${progress.duration.inSeconds}s',
       );
-      unawaited(_libraryStore?.clearProgress(playbackKey) ?? Future<void>.value());
+      unawaited(
+          _libraryStore?.clearProgress(playbackKey) ?? Future<void>.value());
       return;
     }
     final normalizedProgress = progress.duration > Duration.zero
@@ -4764,18 +5025,37 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
             position: progress.position,
             duration: Duration.zero,
           );
-    _watchedProgress[playbackKey] = normalizedProgress;
+    final existingProgress = _watchedProgress[playbackKey];
+    final durableProgress = existingProgress == null
+        ? normalizedProgress
+        : _TvPlaybackProgress(
+            position: tvPlaybackProgressFloor(
+              current: existingProgress.position,
+              incoming: normalizedProgress.position,
+            ),
+            duration: tvPlaybackProgressFloor(
+              current: existingProgress.duration,
+              incoming: normalizedProgress.duration,
+            ),
+            credibleWatched: tvPlaybackProgressFloor(
+              current: existingProgress.credibleWatched,
+              incoming: normalizedProgress.credibleWatched,
+            ),
+          );
+    _watchedProgress[playbackKey] = durableProgress;
     unawaited(
       _libraryStore?.updateProgress(
             key: playbackKey,
-            positionMillis: normalizedProgress.position.inMilliseconds,
-            durationMillis: normalizedProgress.duration > Duration.zero
-                ? normalizedProgress.duration.inMilliseconds
+            positionMillis: durableProgress.position.inMilliseconds,
+            credibleWatchedMillis:
+                durableProgress.credibleWatched.inMilliseconds,
+            durationMillis: durableProgress.duration > Duration.zero
+                ? durableProgress.duration.inMilliseconds
                 : null,
           ) ??
           Future<void>.value(),
     );
-    if (_isPlaybackComplete(normalizedProgress)) {
+    if (_isPlaybackComplete(durableProgress)) {
       unawaited(
         _libraryStore?.markCompleted(playbackKey) ?? Future<void>.value(),
       );
@@ -4787,12 +5067,10 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
   }
 
   bool _isPlaybackComplete(_TvPlaybackProgress progress) {
-    if (progress.duration <= Duration.zero) return false;
-    final remaining = progress.duration - progress.position;
-    return progress.position >= const Duration(minutes: 3) &&
-        (progress.position.inMilliseconds / progress.duration.inMilliseconds) >=
-            0.92 &&
-        remaining <= const Duration(minutes: 5);
+    return tvPlaybackProgressIsComplete(
+      position: progress.position,
+      duration: progress.duration,
+    );
   }
 
   _TvItem? _itemForProgressKey(
@@ -5141,6 +5419,12 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
                     ActivateIntent(),
                 SingleActivator(LogicalKeyboardKey.escape): DismissIntent(),
                 SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),
+                SingleActivator(LogicalKeyboardKey.browserBack):
+                    DismissIntent(),
+                SingleActivator(LogicalKeyboardKey.navigateOut):
+                    DismissIntent(),
+                SingleActivator(LogicalKeyboardKey.gameButtonB):
+                    DismissIntent(),
                 SingleActivator(LogicalKeyboardKey.arrowLeft):
                     DirectionalFocusIntent(TraversalDirection.left),
                 SingleActivator(LogicalKeyboardKey.arrowRight):
@@ -5205,6 +5489,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
                                 liveTv: _liveTv,
                                 discoveryLaneItems: _discoveryLaneItems,
                                 recentItems: _continueItems,
+                                completedItems: _completedItems,
                                 likedItems: _likedItems,
                                 libraryLists:
                                     _libraryStore?.state.libraryLists ??
@@ -5212,31 +5497,38 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
                                 discoveryKind: _discoveryKind,
                                 discoverySort: _discoverySort,
                                 discoveryGenre: _discoveryGenre,
-                                discoveryLoading: _discoveryLaneLoading
-                                        .contains(
-                                      _tvDiscoveryLaneKey(
-                                        _discoveryKind,
-                                        _discoverySort,
-                                        genre: _discoveryGenre,
-                                      ),
-                                    ) ||
-                                    (_tvSettings.hasCatalogSource &&
-                                        !_discoveryLaneItems.containsKey(
+                                discoveryLoading:
+                                    _discoveryLaneLoading.contains(
                                           _tvDiscoveryLaneKey(
                                             _discoveryKind,
                                             _discoverySort,
                                             genre: _discoveryGenre,
                                           ),
-                                        ) &&
-                                        !_discoveryLaneExhausted.contains(
-                                          _tvDiscoveryLaneKey(
-                                            _discoveryKind,
-                                            _discoverySort,
-                                            genre: _discoveryGenre,
-                                          ),
-                                        )),
+                                        ) ||
+                                        (_tvSettings.hasCatalogSource &&
+                                            !_discoveryLaneItems.containsKey(
+                                              _tvDiscoveryLaneKey(
+                                                _discoveryKind,
+                                                _discoverySort,
+                                                genre: _discoveryGenre,
+                                              ),
+                                            ) &&
+                                            !_discoveryLaneExhausted.contains(
+                                              _tvDiscoveryLaneKey(
+                                                _discoveryKind,
+                                                _discoverySort,
+                                                genre: _discoveryGenre,
+                                              ),
+                                            )),
                                 discoveryExhausted:
                                     _discoveryLaneExhausted.contains(
+                                  _tvDiscoveryLaneKey(
+                                    _discoveryKind,
+                                    _discoverySort,
+                                    genre: _discoveryGenre,
+                                  ),
+                                ),
+                                discoveryFailed: _discoveryLaneFailed.contains(
                                   _tvDiscoveryLaneKey(
                                     _discoveryKind,
                                     _discoverySort,
@@ -5343,6 +5635,7 @@ class _TvHomePageState extends State<TvHomePage> with WidgetsBindingObserver {
                           key: _searchOverlayKey,
                           api: _api,
                           items: _items,
+                          settings: _tvSettings,
                           onClose: () => _closeOverlay(focusNavigation: true),
                           onOpenItem: _openItem,
                         ),

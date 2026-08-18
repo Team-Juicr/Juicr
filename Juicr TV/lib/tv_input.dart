@@ -1,5 +1,16 @@
 import 'package:flutter/services.dart';
 
+Duration tvPlaybackNestedDialogParentCloseDelay({
+  required DateTime childClosedAt,
+  required DateTime now,
+}) {
+  const suppressionWindow = Duration(milliseconds: 420);
+  final elapsed = now.difference(childClosedAt);
+  if (elapsed >= suppressionWindow) return Duration.zero;
+  if (elapsed <= Duration.zero) return suppressionWindow;
+  return suppressionWindow - elapsed;
+}
+
 enum TvRemoteActionBucket {
   dpadUp,
   dpadDown,
@@ -186,6 +197,17 @@ enum TvPlaybackRemoteCommand {
   showControls,
 }
 
+const Duration tvRemotePlaybackSkipInterval = Duration(seconds: 15);
+
+Duration? tvPlaybackSkipOffsetForCommand(TvPlaybackRemoteCommand command) {
+  return switch (command) {
+    TvPlaybackRemoteCommand.seekBack =>
+      Duration(seconds: -tvRemotePlaybackSkipInterval.inSeconds),
+    TvPlaybackRemoteCommand.seekForward => tvRemotePlaybackSkipInterval,
+    _ => null,
+  };
+}
+
 class TvPlaybackRemoteActionResolver {
   const TvPlaybackRemoteActionResolver();
 
@@ -221,6 +243,78 @@ class TvPlaybackRemoteActionResolver {
 }
 
 const tvPlaybackRemoteActionResolver = TvPlaybackRemoteActionResolver();
+
+enum TvPlaybackRevealFocusTarget { contextual, lock }
+
+class TvPlaybackRevealFocusPolicy {
+  const TvPlaybackRevealFocusPolicy();
+
+  TvPlaybackRevealFocusTarget targetFor({
+    required TvRemoteActionBucket bucket,
+    required bool controlsLocked,
+  }) {
+    return controlsLocked
+        ? TvPlaybackRevealFocusTarget.lock
+        : TvPlaybackRevealFocusTarget.contextual;
+  }
+}
+
+const tvPlaybackRevealFocusPolicy = TvPlaybackRevealFocusPolicy();
+
+bool tvNativePlaybackCommandExecutesImmediately(
+  TvPlaybackRemoteCommand command,
+) {
+  return command == TvPlaybackRemoteCommand.togglePlay ||
+      command == TvPlaybackRemoteCommand.play ||
+      command == TvPlaybackRemoteCommand.pause ||
+      command == TvPlaybackRemoteCommand.stop ||
+      command == TvPlaybackRemoteCommand.seekBack ||
+      command == TvPlaybackRemoteCommand.seekForward;
+}
+
+bool tvPlaybackDialogCloseNeedsHiddenHudRefresh({
+  required int remainingDialogDepth,
+}) {
+  return remainingDialogDepth == 0;
+}
+
+bool tvNativeLockedRemoteShouldUnlock({
+  required TvRemoteActionBucket bucket,
+  required bool unlockFocused,
+  required bool isRepeat,
+}) {
+  return bucket == TvRemoteActionBucket.select &&
+      unlockFocused &&
+      !isRepeat;
+}
+
+class TvPlaybackDialogKeyOwnership {
+  const TvPlaybackDialogKeyOwnership();
+
+  bool shouldPassThrough(TvPlaybackRemoteCommand? command) {
+    return command != TvPlaybackRemoteCommand.close;
+  }
+}
+
+const tvPlaybackDialogKeyOwnership = TvPlaybackDialogKeyOwnership();
+
+class TvHiddenHudRemoteCapturePolicy {
+  const TvHiddenHudRemoteCapturePolicy();
+
+  bool shouldCapture({
+    required bool initialized,
+    required bool controlsVisible,
+    required bool switchingSource,
+    required bool dialogOpen,
+  }) {
+    return initialized &&
+        !controlsVisible &&
+        !switchingSource &&
+        !dialogOpen;
+  }
+}
+
+const tvHiddenHudRemoteCapturePolicy = TvHiddenHudRemoteCapturePolicy();
 
 class TvRemoteDebugSnapshot {
   const TvRemoteDebugSnapshot({

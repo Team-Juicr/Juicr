@@ -2,25 +2,53 @@ package app.juicr.flutter
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.speech.RecognizerIntent
+import android.util.Log
 import android.view.KeyEvent
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import app.juicr.flutter.update.UpdateBridge
 import java.util.Locale
 
 class MainActivity : FlutterActivity() {
     private var pendingVoiceResult: MethodChannel.Result? = null
     private var remoteKeyChannel: MethodChannel? = null
+    private var hiddenHudRemoteCapture = false
+    private val p2pRuntimeBridge by lazy { P2pRuntimeBridge(applicationContext) }
+    private var appUpdateBridge: UpdateBridge? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        appUpdateBridge?.dispose()
+        appUpdateBridge = UpdateBridge(
+            applicationContext,
+            flutterEngine.dartExecutor.binaryMessenger,
+            "tv",
+        )
         remoteKeyChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             REMOTE_KEY_CHANNEL
-        )
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setHiddenHudCapture" -> {
+                        hiddenHudRemoteCapture = call.argument<Boolean>("active") == true
+                        Log.i(
+                            REMOTE_LOG_TAG,
+                            "Juicr TV hidden HUD capture active=$hiddenHudRemoteCapture"
+                        )
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
         flutterEngine
             .platformViewsController
             .registry
@@ -54,6 +82,84 @@ class MainActivity : FlutterActivity() {
                 "open" -> openQuickLink(call.argument<String>("url").orEmpty(), result)
                 else -> result.notImplemented()
             }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            P2P_BRIDGE_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isAvailable" -> result.success(p2pRuntimeBridge.isAvailable())
+                "availabilityStatus" -> result.success(p2pRuntimeBridge.availabilityStatus())
+                "open" -> {
+                    try {
+                        val trackers = (call.argument<Any>("trackers") as? List<*>)
+                            ?.mapNotNull { it?.toString() }
+                            ?: emptyList()
+                        val localUrl = p2pRuntimeBridge.open(
+                            infoHash = call.argument<String>("infoHash").orEmpty(),
+                            fileIdx = call.argument<Int>("fileIdx"),
+                            trackers = trackers,
+                            displayName = call.argument<String>("displayName"),
+                            quality = call.argument<String>("quality"),
+                            generation = call.argument<Number>("generation")?.toLong()
+                        )
+                        result.success(localUrl)
+                    } catch (error: Throwable) {
+                        result.error(
+                            "p2p_open_failed",
+                            "Advanced playback could not start.",
+                            mapOf("bucket" to P2pRuntimePolicy.errorBucket(error))
+                        )
+                    }
+                }
+                "isReady" -> result.success(
+                    p2pRuntimeBridge.isReady(
+                        call.argument<Number>("generation")?.toLong()
+                    )
+                )
+                "readinessStatus" -> result.success(
+                    p2pRuntimeBridge.readinessStatus(
+                        call.argument<Number>("generation")?.toLong()
+                    )
+                )
+                "networkBucket" -> result.success(networkBucket())
+                "stopAll" -> {
+                    p2pRuntimeBridge.stopAll(
+                        call.argument<Number>("generation")?.toLong()
+                    )
+                    result.success(true)
+                }
+                "stopGeneration" -> {
+                    p2pRuntimeBridge.stopGeneration(
+                        call.argument<Number>("generation")?.toLong()
+                    )
+                    result.success(true)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        appUpdateBridge?.onHostResume()
+    }
+
+    private fun networkBucket(): String {
+        return try {
+            val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return "unavailable"
+            val network = manager.activeNetwork ?: return "offline"
+            val capabilities = manager.getNetworkCapabilities(network) ?: return "unavailable"
+            when {
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+                else -> "other"
+            }
+        } catch (_: Throwable) {
+            "unavailable"
         }
     }
 
@@ -180,7 +286,14 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (isTvRemoteKey(event.keyCode)) {
+        if (event.action == KeyEvent.ACTION_DOWN && isHiddenHudRevealKey(event.keyCode)) {
+            Log.i(
+                REMOTE_LOG_TAG,
+                "Juicr TV hidden HUD directional key capture=$hiddenHudRemoteCapture"
+            )
+        }
+        if (isNativePlaybackMediaKey(event.keyCode) ||
+            (hiddenHudRemoteCapture && isHiddenHudRevealKey(event.keyCode))) {
             remoteKeyChannel?.invokeMethod(
                 "key",
                 mapOf(
@@ -189,11 +302,12 @@ class MainActivity : FlutterActivity() {
                     "repeatCount" to event.repeatCount
                 )
             )
+            return true
         }
         return super.dispatchKeyEvent(event)
     }
 
-    private fun isTvRemoteKey(keyCode: Int): Boolean {
+    private fun isHiddenHudRevealKey(keyCode: Int): Boolean {
         return when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP,
             KeyEvent.KEYCODE_DPAD_DOWN,
@@ -203,15 +317,39 @@ class MainActivity : FlutterActivity() {
             KeyEvent.KEYCODE_ENTER,
             KeyEvent.KEYCODE_NUMPAD_ENTER,
             KeyEvent.KEYCODE_SPACE,
+            KeyEvent.KEYCODE_SEARCH,
+            KeyEvent.KEYCODE_MENU,
+            KeyEvent.KEYCODE_INFO,
+            KeyEvent.KEYCODE_CAPTIONS,
+            KeyEvent.KEYCODE_SETTINGS,
+            KeyEvent.KEYCODE_PAGE_UP,
+            KeyEvent.KEYCODE_PAGE_DOWN,
+            KeyEvent.KEYCODE_CHANNEL_UP,
+            KeyEvent.KEYCODE_CHANNEL_DOWN -> true
+            else -> false
+        }
+    }
+
+    private fun isNativePlaybackMediaKey(keyCode: Int): Boolean {
+        return when (keyCode) {
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
             KeyEvent.KEYCODE_MEDIA_PLAY,
             KeyEvent.KEYCODE_MEDIA_PAUSE,
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
-            KeyEvent.KEYCODE_MEDIA_REWIND,
-            KeyEvent.KEYCODE_BACK,
-            KeyEvent.KEYCODE_ESCAPE -> true
+            KeyEvent.KEYCODE_MEDIA_REWIND -> true
             else -> false
         }
+    }
+
+    override fun onDestroy() {
+        hiddenHudRemoteCapture = false
+        remoteKeyChannel?.setMethodCallHandler(null)
+        appUpdateBridge?.dispose()
+        appUpdateBridge = null
+        if (isFinishing) {
+            p2pRuntimeBridge.stopAll()
+        }
+        super.onDestroy()
     }
 
     companion object {
@@ -219,7 +357,9 @@ class MainActivity : FlutterActivity() {
         private const val TRAILER_CHANNEL = "app.juicr.flutter/trailer"
         private const val QUICK_LINK_CHANNEL = "app.juicr.flutter/quick_links"
         private const val REMOTE_KEY_CHANNEL = "app.juicr.flutter/tv_remote_keys"
+        private const val REMOTE_LOG_TAG = "JuicrTvRemote"
         private const val MEDIA3_PLAYER_VIEW = "app.juicr.flutter/media3_player"
+        private const val P2P_BRIDGE_CHANNEL = "app.juicr.flutter/p2p_bridge"
         private const val VOICE_REQUEST_CODE = 7301
     }
 }

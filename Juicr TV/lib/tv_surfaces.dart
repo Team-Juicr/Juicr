@@ -7,6 +7,353 @@ const MethodChannel _tvQuickLinkChannel = MethodChannel(
   'app.juicr.flutter/quick_links',
 );
 
+class TvRemoteGuideLine {
+  const TvRemoteGuideLine(this.title, this.description);
+
+  final String title;
+  final String description;
+}
+
+class TvRemoteUxCopy {
+  const TvRemoteUxCopy._();
+
+  static const autoplayTitle = 'Autoplay next episode';
+  static const autoplaySubtitle =
+      'Automatically start the next episode when the current episode finishes.';
+  static const subtitleStyleSubtitle =
+      'Configure caption size, color, and background.';
+  static const playerGuideLines = <TvRemoteGuideLine>[
+    TvRemoteGuideLine(
+      'Reveal the HUD',
+      'Press a navigation, Select, or media key to reveal hidden player controls.',
+    ),
+    TvRemoteGuideLine(
+      'Lock and seek',
+      'Lock hides the HUD until you unlock it. Left and Right seek only while the seekbar is focused.',
+    ),
+    TvRemoteGuideLine(
+      'Skip controls',
+      'Use skip back, skip forward, or Skip intro when those controls are available.',
+    ),
+    TvRemoteGuideLine(
+      'Sources and settings',
+      'Open Sources to change the playback choice. Open Settings for playback and subtitle controls.',
+    ),
+    TvRemoteGuideLine(
+      'Resume and next episode',
+      'Resume can continue saved progress. Next episode appears when episode metadata is available, and autoplay starts it only when enabled.',
+    ),
+    TvRemoteGuideLine(
+      'Back or Escape',
+      'Back or Escape closes the current player overlay first, then returns to title details.',
+    ),
+  ];
+}
+
+class TvInformationalContent extends StatelessWidget {
+  const TvInformationalContent({required this.child, super.key});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return ExcludeFocus(child: child);
+  }
+}
+
+class TvDialogFocusRestorer {
+  TvDialogFocusRestorer._(this._opener);
+
+  final FocusNode? _opener;
+
+  factory TvDialogFocusRestorer.capture() {
+    final opener = FocusManager.instance.primaryFocus;
+    return TvDialogFocusRestorer._(
+      opener != null && opener.canRequestFocus ? opener : null,
+    );
+  }
+
+  void restore() {
+    final opener = _opener;
+    if (opener == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (opener.context != null && opener.canRequestFocus) {
+        opener.requestFocus();
+      }
+    });
+  }
+}
+
+class TvDialogFocusOwner extends StatefulWidget {
+  const TvDialogFocusOwner({required this.child, super.key});
+
+  final Widget child;
+
+  @override
+  State<TvDialogFocusOwner> createState() => _TvDialogFocusOwnerState();
+}
+
+bool tvIsDialogBackKey(LogicalKeyboardKey key) {
+  return key == LogicalKeyboardKey.escape ||
+      key == LogicalKeyboardKey.goBack ||
+      key == LogicalKeyboardKey.browserBack ||
+      key == LogicalKeyboardKey.navigateOut ||
+      key == LogicalKeyboardKey.gameButtonB;
+}
+
+class TvDialogBackStackGuard {
+  TvDialogBackStackGuard._();
+
+  static int _activeRouteCount = 0;
+
+  static bool get blocksPageBack => _activeRouteCount > 0;
+
+  static void registerRoute() {
+    _activeRouteCount += 1;
+  }
+
+  static void unregisterRoute() {
+    if (_activeRouteCount > 0) _activeRouteCount -= 1;
+  }
+}
+
+class TvDialogRouteLayer extends StatefulWidget {
+  const TvDialogRouteLayer({required this.child, super.key});
+
+  final Widget child;
+
+  @override
+  State<TvDialogRouteLayer> createState() => _TvDialogRouteLayerState();
+}
+
+class _TvDialogRouteLayerState extends State<TvDialogRouteLayer> {
+  bool _allowPop = false;
+  bool _dismissalQueued = false;
+
+  @override
+  void initState() {
+    super.initState();
+    TvDialogBackStackGuard.registerRoute();
+  }
+
+  @override
+  void dispose() {
+    TvDialogBackStackGuard.unregisterRoute();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    void close([Object? result]) {
+      if (_dismissalQueued || _allowPop) return;
+      _dismissalQueued = true;
+      setState(() => _allowPop = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Navigator.of(context).pop<Object?>(result);
+      });
+    }
+
+    return PopScope(
+      canPop: _allowPop,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) close(result);
+      },
+      child: CallbackShortcuts(
+        bindings: <ShortcutActivator, VoidCallback>{
+          const SingleActivator(LogicalKeyboardKey.escape): () => close(),
+          const SingleActivator(LogicalKeyboardKey.goBack): () => close(),
+          const SingleActivator(LogicalKeyboardKey.browserBack): () => close(),
+          const SingleActivator(LogicalKeyboardKey.navigateOut): () => close(),
+          const SingleActivator(LogicalKeyboardKey.gameButtonB): () => close(),
+        },
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+class TvDialogInnerLayer extends StatefulWidget {
+  const TvDialogInnerLayer({
+    required this.onBack,
+    required this.child,
+    super.key,
+  });
+
+  final VoidCallback onBack;
+  final Widget child;
+
+  @override
+  State<TvDialogInnerLayer> createState() => _TvDialogInnerLayerState();
+}
+
+class _TvDialogInnerLayerState extends State<TvDialogInnerLayer> {
+  bool _dismissalQueued = false;
+
+  @override
+  Widget build(BuildContext context) {
+    void handleBack() {
+      if (_dismissalQueued) return;
+      _dismissalQueued = true;
+      widget.onBack();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _dismissalQueued = false;
+      });
+    }
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) handleBack();
+      },
+      child: CallbackShortcuts(
+        bindings: <ShortcutActivator, VoidCallback>{
+          const SingleActivator(LogicalKeyboardKey.escape): handleBack,
+          const SingleActivator(LogicalKeyboardKey.goBack): handleBack,
+          const SingleActivator(LogicalKeyboardKey.browserBack): handleBack,
+          const SingleActivator(LogicalKeyboardKey.navigateOut): handleBack,
+          const SingleActivator(LogicalKeyboardKey.gameButtonB): handleBack,
+        },
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+class TvDialogFormFocusOwner extends StatelessWidget {
+  const TvDialogFormFocusOwner({
+    required this.fieldFocusNode,
+    required this.actionFocusNodes,
+    required this.child,
+    super.key,
+  });
+
+  final FocusNode fieldFocusNode;
+  final List<FocusNode> actionFocusNodes;
+  final Widget child;
+
+  void _move(LogicalKeyboardKey key) {
+    final current = FocusManager.instance.primaryFocus;
+    if (current == fieldFocusNode && key == LogicalKeyboardKey.arrowDown) {
+      if (actionFocusNodes.isNotEmpty) actionFocusNodes.first.requestFocus();
+      return;
+    }
+    if (current == null) return;
+    final index = actionFocusNodes.indexOf(current);
+    if (index < 0) return;
+    if (key == LogicalKeyboardKey.arrowUp) {
+      fieldFocusNode.requestFocus();
+    } else if (key == LogicalKeyboardKey.arrowLeft && index > 0) {
+      actionFocusNodes[index - 1].requestFocus();
+    } else if (key == LogicalKeyboardKey.arrowRight &&
+        index + 1 < actionFocusNodes.length) {
+      actionFocusNodes[index + 1].requestFocus();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+            _move(LogicalKeyboardKey.arrowDown),
+        const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
+            _move(LogicalKeyboardKey.arrowUp),
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+            _move(LogicalKeyboardKey.arrowLeft),
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+            _move(LogicalKeyboardKey.arrowRight),
+      },
+      child: child,
+    );
+  }
+}
+
+class _TvDialogFocusOwnerState extends State<TvDialogFocusOwner> {
+  final FocusScopeNode _scopeNode = FocusScopeNode(
+    debugLabel: 'tv-dialog-focus-owner',
+  );
+  bool _recoveryScheduled = false;
+  Timer? _recoveryTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    FocusManager.instance.addListener(_handlePrimaryFocusChanged);
+    _scheduleRecovery();
+  }
+
+  @override
+  void didUpdateWidget(covariant TvDialogFocusOwner oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _scheduleRecovery();
+  }
+
+  @override
+  void dispose() {
+    FocusManager.instance.removeListener(_handlePrimaryFocusChanged);
+    _recoveryTimer?.cancel();
+    _scopeNode.dispose();
+    super.dispose();
+  }
+
+  bool get _ownsPrimaryFocus {
+    final primaryFocus = FocusManager.instance.primaryFocus;
+    return primaryFocus?.context != null &&
+        primaryFocus?.canRequestFocus == true &&
+        (primaryFocus?.ancestors.contains(_scopeNode) ?? false);
+  }
+
+  FocusNode? _firstMeaningfulDescendant() {
+    for (final node in _scopeNode.traversalDescendants) {
+      if (node.context != null && node.canRequestFocus && !node.skipTraversal) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  void _handlePrimaryFocusChanged() {
+    if (_ownsPrimaryFocus) return;
+    _scheduleRecovery();
+  }
+
+  void _scheduleRecovery() {
+    if (_recoveryScheduled) return;
+    _recoveryScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _recoveryScheduled = false;
+      if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
+      if (_ownsPrimaryFocus) {
+        _recoveryTimer?.cancel();
+        _recoveryTimer = null;
+        return;
+      }
+      final target = _firstMeaningfulDescendant();
+      if (target != null) {
+        target.requestFocus();
+        return;
+      }
+      _recoveryTimer ??= Timer(const Duration(milliseconds: 80), () {
+        _recoveryTimer = null;
+        _scheduleRecovery();
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusTraversalGroup(
+      policy: ReadingOrderTraversalPolicy(),
+      child: FocusScope(
+        node: _scopeNode,
+        autofocus: true,
+        child: widget.child,
+      ),
+    );
+  }
+}
+
 Future<bool> _openTvExternalTrailer(_TvTrailer trailer) async {
   if (!trailer.isExternalLaunchable) return false;
   try {
@@ -36,6 +383,7 @@ class _TvDiscoverySurface extends StatelessWidget {
     required this.genre,
     required this.loadingMore,
     required this.exhausted,
+    required this.failed,
     required this.onOpenItem,
     required this.onFocusNavigation,
     required this.entryFocusNode,
@@ -58,6 +406,7 @@ class _TvDiscoverySurface extends StatelessWidget {
   final String genre;
   final bool loadingMore;
   final bool exhausted;
+  final bool failed;
   final Future<void> Function(_TvItem item) onOpenItem;
   final VoidCallback onFocusNavigation;
   final FocusNode entryFocusNode;
@@ -83,29 +432,57 @@ class _TvDiscoverySurface extends StatelessWidget {
       for (final entry in discoveryLaneItems.entries)
         if (entry.key.startsWith('${kind.name}:')) ...entry.value,
     ];
-    final laneItems = genreLaneItems ?? baseLaneItems ?? const <_TvItem>[];
+    final useActiveLaneOnly = kind == _TvDiscoveryKind.liveTv;
+    final hasScopedLiveTvFilter =
+        useActiveLaneOnly && genre != 'All genres' && genre != 'All countries';
+    final laneItems = useActiveLaneOnly
+        ? tvSelectLiveTvDisplayLane<_TvItem>(
+            hasScopedFilter: hasScopedLiveTvFilter,
+            scopedItems: genreLaneItems,
+            baseItems: baseLaneItems ?? const <_TvItem>[],
+          )
+        : genreLaneItems ?? baseLaneItems;
+    final sourceItems = laneItems ??
+        (useActiveLaneOnly
+            ? const <_TvItem>[]
+            : broadLaneItems.isEmpty
+                ? fallbackItems
+                : broadLaneItems);
     final laneSource = _filteredCatalogItems(
-      laneItems.isEmpty
-          ? broadLaneItems.isEmpty
-              ? fallbackItems
-              : broadLaneItems
-          : laneItems,
+      sourceItems,
       kind,
       genre,
+      applyGenreFilter: !useActiveLaneOnly ||
+          tvShouldApplyClientLiveTvGenreFilter(sort.liveTvPlaylist),
     );
     final fallbackSource = _filteredCatalogItems(fallbackItems, kind, genre);
     final items = _sortedCatalogItems(
-      laneSource.isEmpty ? fallbackSource : laneSource,
+      useActiveLaneOnly
+          ? laneSource
+          : laneSource.isEmpty
+              ? fallbackSource
+              : laneSource,
       sort,
-      preserveLaneOrder: laneSource.isNotEmpty && laneItems.isNotEmpty,
+      preserveLaneOrder: laneSource.isNotEmpty && laneItems != null,
     );
     final visibleItems = items;
 
     if (visibleItems.isEmpty) {
       if (loadingMore) {
-        return const Padding(
-          padding: EdgeInsets.only(top: 32, bottom: 70),
-          child: _TvCatalogSkeletonGrid(),
+        return Padding(
+          padding: const EdgeInsets.only(top: 32, bottom: 70),
+          child: _TvCatalogSkeletonGrid(
+            catalogType: kind.name,
+          ),
+        );
+      }
+      if (failed) {
+        return _TvCatalogFailureState(
+          height: MediaQuery.sizeOf(context).height - 210,
+          focusNode: entryFocusNode,
+          onFocusNavigation: onFocusNavigation,
+          onFocusHeader: onFocusHeader,
+          onRetry: onLoadMore,
         );
       }
       return _TvEmptyCatalogState(
@@ -138,19 +515,22 @@ class _TvDiscoverySurface extends StatelessWidget {
       loadingMore: loadingMore,
       exhausted: exhausted,
       landscapeCards: kind == _TvDiscoveryKind.liveTv,
+      logoFirst: kind == _TvDiscoveryKind.liveTv,
+      containArtwork: kind == _TvDiscoveryKind.liveTv,
     );
   }
 
   List<_TvItem> _filteredCatalogItems(
     List<_TvItem> source,
     _TvDiscoveryKind kind,
-    String genre,
-  ) {
+    String genre, {
+    bool applyGenreFilter = true,
+  }) {
     final seen = <String>{};
     final items = <_TvItem>[];
     for (final item in source) {
       if (!_matchesDiscoveryKind(item, kind)) continue;
-      if (!_matchesDiscoveryGenre(item, genre)) continue;
+      if (applyGenreFilter && !_matchesDiscoveryGenre(item, genre)) continue;
       final key = '${item.type}:${item.id}:${item.title.toLowerCase()}';
       if (!seen.add(key)) continue;
       items.add(item);
@@ -212,7 +592,11 @@ class _TvDiscoverySurface extends StatelessWidget {
 
   bool _matchesDiscoveryGenre(_TvItem item, String genre) {
     final selected = _normalDiscoveryToken(genre);
-    if (selected.isEmpty || selected == 'all genres') return true;
+    if (selected.isEmpty ||
+        selected == 'all genres' ||
+        selected == 'all countries') {
+      return true;
+    }
     return item.genres.any(
       (itemGenre) => _normalDiscoveryToken(itemGenre) == selected,
     );
@@ -228,9 +612,68 @@ class _TvDiscoverySurface extends StatelessWidget {
   }
 }
 
+class _TvCatalogFailureState extends StatelessWidget {
+  const _TvCatalogFailureState({
+    required this.height,
+    required this.focusNode,
+    required this.onFocusNavigation,
+    required this.onFocusHeader,
+    required this.onRetry,
+  });
+
+  final double height;
+  final FocusNode focusNode;
+  final VoidCallback onFocusNavigation;
+  final VoidCallback onFocusHeader;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: height < 300 ? 300 : height,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Discovery is temporarily unavailable.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: _tvTheme.text,
+                fontSize: 22,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: _tvSpacing),
+            Text(
+              'Try this catalog again when your connection is ready.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: _tvTheme.muted,
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: _tvSpacing * 1.5),
+            _TvTextButton(
+              icon: Icons.refresh_rounded,
+              label: 'Retry',
+              focusNode: focusNode,
+              onArrowLeft: onFocusNavigation,
+              onArrowUp: onFocusHeader,
+              onPressed: onRetry,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _TvLibrarySurface extends StatelessWidget {
   const _TvLibrarySurface({
     required this.recentItems,
+    required this.completedItems,
     required this.likedItems,
     required this.libraryLists,
     required this.filter,
@@ -255,6 +698,7 @@ class _TvLibrarySurface extends StatelessWidget {
   });
 
   final List<_TvItem> recentItems;
+  final List<_TvItem> completedItems;
   final List<_TvItem> likedItems;
   final List<TvLibraryList> libraryLists;
   final _TvLibraryFilter filter;
@@ -350,6 +794,8 @@ class _TvLibrarySurface extends StatelessWidget {
     switch (filter) {
       case _TvLibraryFilter.continueWatching:
         return recentItems;
+      case _TvLibraryFilter.completed:
+        return completedItems;
       case _TvLibraryFilter.lists:
       case _TvLibraryFilter.metrics:
       case _TvLibraryFilter.ranking:
@@ -375,6 +821,7 @@ class _TvLibrarySurface extends StatelessWidget {
   String get _title {
     return switch (filter) {
       _TvLibraryFilter.continueWatching => 'Continue watching',
+      _TvLibraryFilter.completed => 'Completed',
       _TvLibraryFilter.lists => 'Lists',
       _TvLibraryFilter.movies => 'Liked movies',
       _TvLibraryFilter.series => 'Liked series',
@@ -389,6 +836,7 @@ class _TvLibrarySurface extends StatelessWidget {
     return switch (filter) {
       _TvLibraryFilter.continueWatching =>
         'Titles with playback left on this TV.',
+      _TvLibraryFilter.completed => 'Finished titles from your synced history.',
       _TvLibraryFilter.lists => 'Custom watchlists on this TV.',
       _TvLibraryFilter.movies => 'Movies you hearted on this TV.',
       _TvLibraryFilter.series => 'Series you hearted on this TV.',
@@ -402,6 +850,7 @@ class _TvLibrarySurface extends StatelessWidget {
   String get _emptyTitle {
     return switch (filter) {
       _TvLibraryFilter.continueWatching => 'Nothing to continue yet.',
+      _TvLibraryFilter.completed => 'No completed titles yet.',
       _TvLibraryFilter.lists => 'No lists yet.',
       _TvLibraryFilter.movies => 'No liked movies yet.',
       _TvLibraryFilter.series => 'No liked series yet.',
@@ -416,6 +865,8 @@ class _TvLibrarySurface extends StatelessWidget {
     return switch (filter) {
       _TvLibraryFilter.continueWatching =>
         'Start watching a title and unfinished playback will appear here.',
+      _TvLibraryFilter.completed =>
+        'Completed movies and episodes will appear here after sync.',
       _TvLibraryFilter.lists =>
         'Create a list from a title details page to organize it here.',
       _TvLibraryFilter.movies =>
@@ -786,9 +1237,9 @@ class _TvLibraryRankingSurfaceState extends State<_TvLibraryRankingSurface> {
     FocusNode(debugLabel: 'tv-ranking-weekly'),
     FocusNode(debugLabel: 'tv-ranking-all'),
   ];
-  final _rankFocusNode = FocusNode(debugLabel: 'tv-ranking-rank-card');
-  final _messageFocusNode = FocusNode(debugLabel: 'tv-ranking-message');
-  final _rowFocusNodes = <FocusNode>[];
+  final _contentActionFocusNode = FocusNode(
+    debugLabel: 'tv-ranking-content-action',
+  );
   late String _scope = _normalizeTvLeaderboardScope(widget.selectedScope);
   late Future<_TvLeaderboardResult?> _future = _load();
 
@@ -810,23 +1261,8 @@ class _TvLibraryRankingSurfaceState extends State<_TvLibraryRankingSurface> {
     for (final node in _scopeFocusNodes) {
       node.dispose();
     }
-    _rankFocusNode.dispose();
-    _messageFocusNode.dispose();
-    for (final node in _rowFocusNodes) {
-      node.dispose();
-    }
+    _contentActionFocusNode.dispose();
     super.dispose();
-  }
-
-  void _syncRowFocusNodes(int count) {
-    while (_rowFocusNodes.length > count) {
-      _rowFocusNodes.removeLast().dispose();
-    }
-    while (_rowFocusNodes.length < count) {
-      _rowFocusNodes.add(
-        FocusNode(debugLabel: 'tv-ranking-row-${_rowFocusNodes.length}'),
-      );
-    }
   }
 
   Future<_TvLeaderboardResult?> _load() async {
@@ -859,13 +1295,20 @@ class _TvLibraryRankingSurfaceState extends State<_TvLibraryRankingSurface> {
     _scopeFocusNodes[index].requestFocus();
   }
 
-  void _focusRank() {
-    _rankFocusNode.requestFocus();
+  void _focusContentAction() {
+    if (_contentActionFocusNode.context != null &&
+        _contentActionFocusNode.canRequestFocus) {
+      _contentActionFocusNode.requestFocus();
+      return;
+    }
+    _focusScope(_selectedScopeIndex);
   }
 
-  void _focusRow(int index) {
-    if (index < 0 || index >= _rowFocusNodes.length) return;
-    _rowFocusNodes[index].requestFocus();
+  void _retryLeaderboard() {
+    setState(() => _future = _load());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusScope(_selectedScopeIndex);
+    });
   }
 
   @override
@@ -907,7 +1350,7 @@ class _TvLibraryRankingSurfaceState extends State<_TvLibraryRankingSurface> {
                         ? () => _focusScope(index)
                         : () => _focusScope(index + 1),
                     onArrowUp: widget.onFocusHeader,
-                    onArrowDown: _focusRank,
+                    onArrowDown: _focusContentAction,
                   ),
                 ),
                 if (index < scopes.length - 1)
@@ -920,6 +1363,8 @@ class _TvLibraryRankingSurfaceState extends State<_TvLibraryRankingSurface> {
             _TvLeaderboardSignInGate(
               activeWatchLabel: widget.activeWatchLabel,
               onSignIn: widget.onSignIn,
+              focusNode: _contentActionFocusNode,
+              onArrowUp: () => _focusScope(_selectedScopeIndex),
             )
           else
             FutureBuilder<_TvLeaderboardResult?>(
@@ -927,73 +1372,60 @@ class _TvLibraryRankingSurfaceState extends State<_TvLibraryRankingSurface> {
               future: _future,
               builder: (context, snapshot) {
                 if (snapshot.connectionState != ConnectionState.done) {
-                  _syncRowFocusNodes(1);
                   return Column(
                     children: [
                       _TvLeaderboardRankCard(
                         scope: _scope,
                         watchTimeLabel: widget.activeWatchLabel,
-                        focusNode: _rankFocusNode,
-                        onArrowUp: () => _focusScope(_selectedScopeIndex),
-                        onArrowDown: () => _focusRow(0),
                       ),
                       const SizedBox(height: _tvSpacing),
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: _tvSpacing),
-                        child: _TvLeaderboardLoadingRow(
-                          focusNode: _rowFocusNodes[0],
-                          onArrowUp: _focusRank,
-                          onArrowDown: () => _focusRow(0),
-                        ),
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: _tvSpacing),
+                        child: _TvLeaderboardLoadingRow(),
                       ),
                     ],
                   );
                 }
                 if (snapshot.hasError || snapshot.data == null) {
-                  _syncRowFocusNodes(0);
                   return Column(
                     children: [
                       _TvLeaderboardRankCard(
                         scope: _scope,
                         watchTimeLabel: widget.activeWatchLabel,
-                        focusNode: _rankFocusNode,
-                        onArrowUp: () => _focusScope(_selectedScopeIndex),
-                        onArrowDown: () => _messageFocusNode.requestFocus(),
                       ),
                       const SizedBox(height: _tvSpacing),
-                      _TvLeaderboardMessageRow(
+                      const _TvLeaderboardMessageRow(
                         icon: Icons.wifi_off_rounded,
                         message:
                             'Could not load rankings. Try again in a moment.',
-                        focusNode: _messageFocusNode,
-                        onArrowUp: _focusRank,
-                        onArrowDown: () => _messageFocusNode.requestFocus(),
+                      ),
+                      const SizedBox(height: _tvSpacing),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: _TvTextButton(
+                          icon: Icons.refresh_rounded,
+                          label: 'Retry',
+                          focusNode: _contentActionFocusNode,
+                          onArrowUp: () => _focusScope(_selectedScopeIndex),
+                          onPressed: _retryLeaderboard,
+                        ),
                       ),
                     ],
                   );
                 }
                 final result = snapshot.data!;
-                _syncRowFocusNodes(result.rows.length);
                 return Column(
                   children: [
                     _TvLeaderboardRankCard(
                       scope: _scope,
                       watchTimeLabel: widget.activeWatchLabel,
                       viewer: result.viewer,
-                      focusNode: _rankFocusNode,
-                      onArrowUp: () => _focusScope(_selectedScopeIndex),
-                      onArrowDown: result.rows.isEmpty
-                          ? () => _messageFocusNode.requestFocus()
-                          : () => _focusRow(0),
                     ),
                     const SizedBox(height: _tvSpacing),
                     if (result.rows.isEmpty)
-                      _TvLeaderboardMessageRow(
+                      const _TvLeaderboardMessageRow(
                         icon: Icons.emoji_events_outlined,
                         message: 'No opted-in viewers yet.',
-                        focusNode: _messageFocusNode,
-                        onArrowUp: _focusRank,
-                        onArrowDown: () => _messageFocusNode.requestFocus(),
                       )
                     else
                       for (var index = 0; index < result.rows.length; index++)
@@ -1001,13 +1433,6 @@ class _TvLibraryRankingSurfaceState extends State<_TvLibraryRankingSurface> {
                           padding: const EdgeInsets.only(bottom: _tvSpacing),
                           child: _TvLeaderboardEntryRow(
                             entry: result.rows[index],
-                            focusNode: _rowFocusNodes[index],
-                            onArrowUp: index == 0
-                                ? _focusRank
-                                : () => _focusRow(index - 1),
-                            onArrowDown: index == result.rows.length - 1
-                                ? () => _focusRow(index)
-                                : () => _focusRow(index + 1),
                           ),
                         ),
                   ],
@@ -1094,16 +1519,22 @@ class _TvLeaderboardSignInGate extends StatelessWidget {
   const _TvLeaderboardSignInGate({
     required this.activeWatchLabel,
     required this.onSignIn,
+    this.focusNode,
+    this.onArrowUp,
   });
 
   final String activeWatchLabel;
   final VoidCallback onSignIn;
+  final FocusNode? focusNode;
+  final VoidCallback? onArrowUp;
 
   @override
   Widget build(BuildContext context) {
     return _TvFocusable(
       autoReveal: true,
+      focusNode: focusNode,
       onPressed: onSignIn,
+      onArrowUp: onArrowUp,
       builder: (focused) {
         return AnimatedContainer(
           duration: _tvDuration(140),
@@ -1171,37 +1602,22 @@ class _TvLeaderboardRankCard extends StatelessWidget {
     required this.scope,
     required this.watchTimeLabel,
     this.viewer,
-    this.focusNode,
-    this.onArrowUp,
-    this.onArrowDown,
   });
 
   final String scope;
   final String watchTimeLabel;
   final _TvLeaderboardViewer? viewer;
-  final FocusNode? focusNode;
-  final VoidCallback? onArrowUp;
-  final VoidCallback? onArrowDown;
 
   @override
   Widget build(BuildContext context) {
-    return _TvFocusable(
-      autoReveal: true,
-      focusNode: focusNode,
-      onPressed: () {},
-      onArrowUp: onArrowUp,
-      onArrowDown: onArrowDown,
-      builder: (focused) => AnimatedContainer(
-        duration: _tvDuration(140),
+    return TvInformationalContent(
+      child: Container(
         width: double.infinity,
         padding: const EdgeInsets.all(22),
         decoration: BoxDecoration(
           color: _tvTheme.row,
           borderRadius: BorderRadius.circular(22),
-          border: Border.all(
-            color: focused ? _tvSolidFocusBorder : _tvTheme.rowBorder,
-            width: focused ? 2 : 1,
-          ),
+          border: Border.all(color: _tvTheme.rowBorder),
         ),
         child: Row(
           children: [
@@ -1257,34 +1673,19 @@ class _TvLeaderboardRankCard extends StatelessWidget {
 class _TvLeaderboardEntryRow extends StatelessWidget {
   const _TvLeaderboardEntryRow({
     required this.entry,
-    this.focusNode,
-    this.onArrowUp,
-    this.onArrowDown,
   });
 
   final _TvLeaderboardEntry entry;
-  final FocusNode? focusNode;
-  final VoidCallback? onArrowUp;
-  final VoidCallback? onArrowDown;
 
   @override
   Widget build(BuildContext context) {
-    return _TvFocusable(
-      autoReveal: true,
-      focusNode: focusNode,
-      onPressed: () {},
-      onArrowUp: onArrowUp,
-      onArrowDown: onArrowDown,
-      builder: (focused) => AnimatedContainer(
-        duration: _tvDuration(140),
+    return TvInformationalContent(
+      child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
         decoration: BoxDecoration(
           color: _tvTheme.row,
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: focused ? _tvSolidFocusBorder : _tvTheme.rowBorder,
-            width: focused ? 2 : 1,
-          ),
+          border: Border.all(color: _tvTheme.rowBorder),
         ),
         child: Row(
           children: [
@@ -1333,35 +1734,18 @@ class _TvLeaderboardEntryRow extends StatelessWidget {
 }
 
 class _TvLeaderboardLoadingRow extends StatelessWidget {
-  const _TvLeaderboardLoadingRow({
-    this.focusNode,
-    this.onArrowUp,
-    this.onArrowDown,
-  });
-
-  final FocusNode? focusNode;
-  final VoidCallback? onArrowUp;
-  final VoidCallback? onArrowDown;
+  const _TvLeaderboardLoadingRow();
 
   @override
   Widget build(BuildContext context) {
-    return _TvFocusable(
-      autoReveal: true,
-      focusNode: focusNode,
-      onPressed: () {},
-      onArrowUp: onArrowUp,
-      onArrowDown: onArrowDown,
-      builder: (focused) => AnimatedContainer(
-        duration: _tvDuration(140),
+    return TvInformationalContent(
+      child: Container(
         width: double.infinity,
         padding: const EdgeInsets.all(18),
         decoration: BoxDecoration(
           color: _tvTheme.row,
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: focused ? _tvSolidFocusBorder : _tvTheme.rowBorder,
-            width: focused ? 2 : 1,
-          ),
+          border: Border.all(color: _tvTheme.rowBorder),
         ),
         child: Row(
           children: [
@@ -1396,36 +1780,21 @@ class _TvLeaderboardMessageRow extends StatelessWidget {
   const _TvLeaderboardMessageRow({
     required this.icon,
     required this.message,
-    this.focusNode,
-    this.onArrowUp,
-    this.onArrowDown,
   });
 
   final IconData icon;
   final String message;
-  final FocusNode? focusNode;
-  final VoidCallback? onArrowUp;
-  final VoidCallback? onArrowDown;
 
   @override
   Widget build(BuildContext context) {
-    return _TvFocusable(
-      autoReveal: true,
-      focusNode: focusNode,
-      onPressed: () {},
-      onArrowUp: onArrowUp,
-      onArrowDown: onArrowDown,
-      builder: (focused) => AnimatedContainer(
-        duration: _tvDuration(140),
+    return TvInformationalContent(
+      child: Container(
         width: double.infinity,
         padding: const EdgeInsets.all(18),
         decoration: BoxDecoration(
           color: _tvTheme.row,
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: focused ? _tvSolidFocusBorder : _tvTheme.rowBorder,
-            width: focused ? 2 : 1,
-          ),
+          border: Border.all(color: _tvTheme.rowBorder),
         ),
         child: Row(
           children: [
@@ -1472,9 +1841,12 @@ class _TvEmptyCatalogState extends StatelessWidget {
     required this.title,
     required this.subtitle,
     this.height,
-    this.focusNode,
-    this.onFocusNavigation,
-    this.onFocusHeader,
+    // ignore: unused_element_parameter
+    FocusNode? focusNode,
+    // ignore: unused_element_parameter
+    VoidCallback? onFocusNavigation,
+    // ignore: unused_element_parameter
+    VoidCallback? onFocusHeader,
     // ignore: unused_element_parameter
     this.verticalOffset = _tvEmptyStateVisualOffset,
   });
@@ -1482,9 +1854,6 @@ class _TvEmptyCatalogState extends StatelessWidget {
   final String title;
   final String subtitle;
   final double? height;
-  final FocusNode? focusNode;
-  final VoidCallback? onFocusNavigation;
-  final VoidCallback? onFocusHeader;
   final double verticalOffset;
 
   @override
@@ -1522,22 +1891,12 @@ class _TvEmptyCatalogState extends StatelessWidget {
         ),
       ),
     );
-    final focusableContent = focusNode == null
-        ? content
-        : _TvFocusable(
-            focusNode: focusNode,
-            onPressed: () {},
-            onArrowLeft: onFocusNavigation,
-            onArrowUp: onFocusHeader,
-            onArrowRight: () => focusNode!.requestFocus(),
-            onArrowDown: () => focusNode!.requestFocus(),
-            builder: (_) => content,
-          );
+    final informationalContent = TvInformationalContent(child: content);
     final targetHeight = height;
-    if (targetHeight == null) return focusableContent;
+    if (targetHeight == null) return informationalContent;
     return SizedBox(
       height: targetHeight < 300 ? 300 : targetHeight,
-      child: focusableContent,
+      child: informationalContent,
     );
   }
 }
@@ -1824,8 +2183,8 @@ class _TvSettingsSurface extends StatelessWidget {
             'Progress is kept for the current TV session.',
           ),
           _TvSettingsLine(
-            'Next episode',
-            'Series playback can continue from the playback HUD.',
+            TvRemoteUxCopy.autoplayTitle,
+            TvRemoteUxCopy.autoplaySubtitle,
           ),
         ],
       ),
@@ -2476,7 +2835,7 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         initialSnapshot: _fallbackTvReleaseSnapshot(
           _tvReleaseChannelForVersion(_tvAppVersion),
         ),
-        onOpenDownload: _openDownloadLink,
+        onOpenReleasePage: _openDownloadLink,
       ),
     );
     _restoreLastActionFocus();
@@ -2843,6 +3202,16 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
     _TvSettingsState current,
     ValueChanged<_TvSettingsState> update,
   ) async {
+    if (!kTvP2pRuntimeAvailable) {
+      await _showStatusDialog(
+        context,
+        title: 'Advanced P2P playback',
+        message:
+            'Unavailable on this TV build. Direct and account-backed add-on streams remain available.',
+        icon: Icons.info_outline_rounded,
+      );
+      return;
+    }
     if (!await _confirmTvP2pConsent(context, current, update)) return;
     if (!context.mounted) return;
     final latest = _current.hasP2pConsent ? _current : current;
@@ -2876,6 +3245,20 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         onAccountSignOut: widget.onAccountSignOut,
         onAccountSync: widget.onAccountSync,
         onSettingsChanged: update,
+      ),
+    );
+    _restoreLastActionFocus();
+  }
+
+  Future<void> _openPlayerGuide(BuildContext context) async {
+    await _showTvDialog<void>(
+      context: context,
+      builder: (dialogContext) => _TvInfoLinesDialog(
+        title: 'Player guide',
+        icon: Icons.smart_display_outlined,
+        lines: TvRemoteUxCopy.playerGuideLines
+            .map((line) => _TvSettingsLine(line.title, line.description))
+            .toList(growable: false),
       ),
     );
     _restoreLastActionFocus();
@@ -2985,6 +3368,18 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
               }
             }()),
           ),
+          _TvSettingsAction(
+            title: 'Show mature content',
+            subtitle:
+                'Adult flags are imperfect. Some mature or erotic films may still appear because catalog labels can differ by title, cut, or region.',
+            value: current.showMatureContent ? 'On' : 'Off',
+            icon: Icons.visibility_outlined,
+            onPressed: () => update(
+              current.copyWith(
+                showMatureContent: !current.showMatureContent,
+              ),
+            ),
+          ),
         ];
       case 'Playback':
         return [
@@ -3043,20 +3438,26 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
           ),
           _TvSettingsAction(
             title: 'Subtitle style',
-            subtitle: 'Configure caption size, color, background, and delay.',
+            subtitle: TvRemoteUxCopy.subtitleStyleSubtitle,
             value: 'Configure',
             icon: Icons.format_color_text_rounded,
             onPressed: () =>
                 unawaited(_openSubtitleStyleSettings(context, current, update)),
           ),
           _TvSettingsAction(
-            title: 'Next episode',
-            subtitle:
-                'Keep series continuation controls available in the playback HUD.',
+            title: TvRemoteUxCopy.autoplayTitle,
+            subtitle: TvRemoteUxCopy.autoplaySubtitle,
             value: current.nextEpisode ? 'On' : 'Off',
             icon: Icons.skip_next_rounded,
             onPressed: () =>
                 update(current.copyWith(nextEpisode: !current.nextEpisode)),
+          ),
+          _TvSettingsAction(
+            title: 'Player guide',
+            subtitle: 'Review the remote controls available during playback.',
+            value: 'Open',
+            icon: Icons.help_outline_rounded,
+            onPressed: () => unawaited(_openPlayerGuide(context)),
           ),
         ];
       case 'Sources':
@@ -3105,21 +3506,28 @@ class _TvSettingsSectionDialogState extends State<_TvSettingsSectionDialog> {
         return [
           _TvSettingsAction(
             title: 'Advanced P2P playback',
-            subtitle:
-                'Consent-guarded P2P playback for enabled add-ons.',
-            value: !current.hasUserAddOns
-                ? 'Add-on'
-                : current.p2pPlaybackEnabled
-                    ? 'On'
-                    : 'Off',
-            icon: Icons.hub_outlined,
-            onPressed: () => current.hasUserAddOns
-                ? update(
-                    current.copyWith(
-                      p2pPlaybackEnabled: !current.p2pPlaybackEnabled,
-                    ),
-                  )
-                : unawaited(_showAdvancedP2pNeedsAddOn(context)),
+            subtitle: !kTvP2pRuntimeAvailable
+                ? 'Unavailable on this TV build. Direct add-on streams still work.'
+                : 'Consent-guarded P2P playback for enabled add-ons.',
+            value: !kTvP2pRuntimeAvailable
+                ? 'Unavailable'
+                : !current.hasUserAddOns
+                    ? 'Add-on'
+                    : current.p2pPlaybackEnabled
+                        ? 'On'
+                        : 'Off',
+            icon: kTvP2pRuntimeAvailable
+                ? Icons.hub_outlined
+                : Icons.info_outline_rounded,
+            onPressed: () => !kTvP2pRuntimeAvailable
+                ? unawaited(_openAdvancedP2pPlayback(context, current, update))
+                : current.hasUserAddOns
+                    ? update(
+                        current.copyWith(
+                          p2pPlaybackEnabled: !current.p2pPlaybackEnabled,
+                        ),
+                      )
+                    : unawaited(_showAdvancedP2pNeedsAddOn(context)),
           ),
           _TvSettingsAction(
             title: 'Advanced source priorities',
@@ -3413,58 +3821,62 @@ class _TvInfoLinesDialog extends StatefulWidget {
 }
 
 class _TvInfoLinesDialogState extends State<_TvInfoLinesDialog> {
-  final List<FocusNode> _lineFocusNodes = <FocusNode>[];
+  final ScrollController _scrollController = ScrollController();
+  final FocusNode _scrollFocusNode = FocusNode(
+    debugLabel: 'tv-info-dialog-scroll-down',
+  );
+  final FocusNode _backFocusNode = FocusNode(
+    debugLabel: 'tv-info-dialog-back',
+  );
+  bool _scrollable = false;
 
   @override
   void initState() {
     super.initState();
-    _syncLineFocusNodes();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _focusLine(0));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreFocus());
   }
 
   @override
   void didUpdateWidget(covariant _TvInfoLinesDialog oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _syncLineFocusNodes();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreFocus());
   }
 
   @override
   void dispose() {
-    for (final node in _lineFocusNodes) {
-      node.dispose();
-    }
+    _scrollController.dispose();
+    _scrollFocusNode.dispose();
+    _backFocusNode.dispose();
     super.dispose();
   }
 
-  void _syncLineFocusNodes() {
-    while (_lineFocusNodes.length < widget.lines.length) {
-      _lineFocusNodes.add(
-        FocusNode(debugLabel: 'tv-info-dialog-line-${_lineFocusNodes.length}'),
-      );
-    }
-    while (_lineFocusNodes.length > widget.lines.length) {
-      _lineFocusNodes.removeLast().dispose();
-    }
+  void _restoreFocus() {
+    if (!mounted) return;
+    final scrollable = _scrollController.hasClients &&
+        _scrollController.position.maxScrollExtent > 0;
+    if (_scrollable != scrollable) setState(() => _scrollable = scrollable);
+    (scrollable ? _scrollFocusNode : _backFocusNode).requestFocus();
   }
 
-  void _focusLine(int index) {
-    if (!mounted || _lineFocusNodes.isEmpty) return;
-    final nextIndex = index.clamp(0, _lineFocusNodes.length - 1);
-    final node = _lineFocusNodes[nextIndex];
-    node.requestFocus();
-    final context = node.context;
-    if (context == null) return;
-    Scrollable.ensureVisible(
-      context,
-      duration: _tvDuration(160),
+  void _scrollNext() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final atEnd = position.pixels >= position.maxScrollExtent - 1;
+    final target = atEnd
+        ? 0.0
+        : math.min(
+            position.maxScrollExtent,
+            position.pixels + position.viewportDimension * 0.72,
+          );
+    _scrollController.animateTo(
+      target,
+      duration: _tvDuration(180),
       curve: Curves.easeOutCubic,
-      alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    _syncLineFocusNodes();
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 150, vertical: 56),
@@ -3502,35 +3914,24 @@ class _TvInfoLinesDialogState extends State<_TvInfoLinesDialog> {
             const SizedBox(height: _tvSpacing),
             Flexible(
               child: SingleChildScrollView(
+                controller: _scrollController,
                 child: Column(
                   children: [
                     for (var index = 0; index < widget.lines.length; index++)
                       Padding(
                         padding: const EdgeInsets.only(bottom: _tvSpacing),
-                        child: _TvFocusable(
-                          autofocus: index == 0,
-                          autoReveal: true,
-                          focusNode: _lineFocusNodes[index],
-                          onPressed: () {},
-                          onArrowUp: () => _focusLine(index - 1),
-                          onArrowDown: () => _focusLine(index + 1),
-                          builder: (focused) {
-                            final line = widget.lines[index];
-                            return AnimatedContainer(
-                              duration: _tvDuration(140),
-                              width: double.infinity,
-                              padding: const EdgeInsets.all(_tvSpacing),
-                              decoration: BoxDecoration(
-                                color: _tvTheme.row,
-                                borderRadius: BorderRadius.circular(18),
-                                border: focused
-                                    ? Border.all(
-                                        color: _tvSolidFocusBorder,
-                                        width: 2.5,
-                                      )
-                                    : Border.all(color: _tvTheme.rowBorder),
-                              ),
-                              child: Column(
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(_tvSpacing),
+                          decoration: BoxDecoration(
+                            color: _tvTheme.row,
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(color: _tvTheme.rowBorder),
+                          ),
+                          child: Builder(
+                            builder: (context) {
+                              final line = widget.lines[index];
+                              return Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
@@ -3552,14 +3953,39 @@ class _TvInfoLinesDialogState extends State<_TvInfoLinesDialog> {
                                     ),
                                   ),
                                 ],
-                              ),
-                            );
-                          },
+                              );
+                            },
+                          ),
                         ),
                       ),
                   ],
                 ),
               ),
+            ),
+            const SizedBox(height: _tvSpacing),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                if (_scrollable) ...[
+                  _TvTextButton(
+                    icon: Icons.swap_vert_rounded,
+                    label: 'Scroll',
+                    focusNode: _scrollFocusNode,
+                    onArrowRight: _backFocusNode.requestFocus,
+                    onPressed: _scrollNext,
+                  ),
+                  const SizedBox(width: _tvSpacing),
+                ],
+                _TvTextButton(
+                  icon: Icons.arrow_back_rounded,
+                  label: 'Back',
+                  autofocus: true,
+                  focusNode: _backFocusNode,
+                  onArrowLeft:
+                      _scrollable ? _scrollFocusNode.requestFocus : null,
+                  onPressed: () => Navigator.of(context).maybePop(),
+                ),
+              ],
             ),
           ],
         ),
@@ -3625,20 +4051,26 @@ class _TvChangelogDialog extends StatefulWidget {
 }
 
 class _TvChangelogDialogState extends State<_TvChangelogDialog> {
-  final List<FocusNode> _sectionFocusNodes = <FocusNode>[];
+  final ScrollController _scrollController = ScrollController();
+  final FocusNode _scrollFocusNode = FocusNode(
+    debugLabel: 'tv-changelog-scroll',
+  );
+  final FocusNode _backFocusNode = FocusNode(
+    debugLabel: 'tv-changelog-back',
+  );
+  bool _scrollable = false;
 
   @override
   void initState() {
     super.initState();
-    _syncSectionFocusNodes();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _focusSection(0));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreFocus());
   }
 
   @override
   void dispose() {
-    for (final node in _sectionFocusNodes) {
-      node.dispose();
-    }
+    _scrollController.dispose();
+    _scrollFocusNode.dispose();
+    _backFocusNode.dispose();
     super.dispose();
   }
 
@@ -3651,38 +4083,33 @@ class _TvChangelogDialogState extends State<_TvChangelogDialog> {
     );
   }
 
-  void _syncSectionFocusNodes() {
-    final count = _sections.length;
-    while (_sectionFocusNodes.length < count) {
-      _sectionFocusNodes.add(
-        FocusNode(
-          debugLabel: 'tv-changelog-section-${_sectionFocusNodes.length}',
-        ),
-      );
-    }
-    while (_sectionFocusNodes.length > count) {
-      _sectionFocusNodes.removeLast().dispose();
-    }
+  void _restoreFocus() {
+    if (!mounted) return;
+    final scrollable = _scrollController.hasClients &&
+        _scrollController.position.maxScrollExtent > 0;
+    if (_scrollable != scrollable) setState(() => _scrollable = scrollable);
+    (scrollable ? _scrollFocusNode : _backFocusNode).requestFocus();
   }
 
-  void _focusSection(int index) {
-    if (!mounted || _sectionFocusNodes.isEmpty) return;
-    final nextIndex = index.clamp(0, _sectionFocusNodes.length - 1);
-    final node = _sectionFocusNodes[nextIndex];
-    node.requestFocus();
-    final context = node.context;
-    if (context == null) return;
-    Scrollable.ensureVisible(
-      context,
-      duration: _tvDuration(160),
+  void _scrollNext() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final atEnd = position.pixels >= position.maxScrollExtent - 1;
+    final target = atEnd
+        ? 0.0
+        : math.min(
+            position.maxScrollExtent,
+            position.pixels + position.viewportDimension * 0.72,
+          );
+    _scrollController.animateTo(
+      target,
+      duration: _tvDuration(180),
       curve: Curves.easeOutCubic,
-      alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    _syncSectionFocusNodes();
     final release = widget.snapshot.latest;
     final title = widget.snapshot.channel == _TvReleaseUpdateChannel.nightly
         ? 'Nightly changelog'
@@ -3724,35 +4151,24 @@ class _TvChangelogDialogState extends State<_TvChangelogDialog> {
             const SizedBox(height: _tvSpacing),
             Flexible(
               child: SingleChildScrollView(
+                controller: _scrollController,
                 child: Column(
                   children: [
                     for (var index = 0; index < sections.length; index++)
                       Padding(
                         padding: const EdgeInsets.only(bottom: _tvSpacing),
-                        child: _TvFocusable(
-                          autofocus: index == 0,
-                          autoReveal: true,
-                          focusNode: _sectionFocusNodes[index],
-                          onPressed: () {},
-                          onArrowUp: () => _focusSection(index - 1),
-                          onArrowDown: () => _focusSection(index + 1),
-                          builder: (focused) {
-                            final section = sections[index];
-                            return AnimatedContainer(
-                              duration: _tvDuration(140),
-                              width: double.infinity,
-                              padding: const EdgeInsets.all(_tvSpacing),
-                              decoration: BoxDecoration(
-                                color: _tvTheme.row,
-                                borderRadius: BorderRadius.circular(18),
-                                border: focused
-                                    ? Border.all(
-                                        color: _tvSolidFocusBorder,
-                                        width: 2.5,
-                                      )
-                                    : Border.all(color: _tvTheme.rowBorder),
-                              ),
-                              child: Column(
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(_tvSpacing),
+                          decoration: BoxDecoration(
+                            color: _tvTheme.row,
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(color: _tvTheme.rowBorder),
+                          ),
+                          child: Builder(
+                            builder: (context) {
+                              final section = sections[index];
+                              return Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
@@ -3795,14 +4211,39 @@ class _TvChangelogDialogState extends State<_TvChangelogDialog> {
                                       ),
                                     ),
                                 ],
-                              ),
-                            );
-                          },
+                              );
+                            },
+                          ),
                         ),
                       ),
                   ],
                 ),
               ),
+            ),
+            const SizedBox(height: _tvSpacing),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                if (_scrollable) ...[
+                  _TvTextButton(
+                    icon: Icons.swap_vert_rounded,
+                    label: 'Scroll',
+                    focusNode: _scrollFocusNode,
+                    onArrowRight: _backFocusNode.requestFocus,
+                    onPressed: _scrollNext,
+                  ),
+                  const SizedBox(width: _tvSpacing),
+                ],
+                _TvTextButton(
+                  icon: Icons.arrow_back_rounded,
+                  label: 'Back',
+                  autofocus: true,
+                  focusNode: _backFocusNode,
+                  onArrowLeft:
+                      _scrollable ? _scrollFocusNode.requestFocus : null,
+                  onPressed: () => Navigator.of(context).maybePop(),
+                ),
+              ],
             ),
           ],
         ),
@@ -3814,11 +4255,11 @@ class _TvChangelogDialogState extends State<_TvChangelogDialog> {
 class _TvUpdatesDialog extends StatefulWidget {
   const _TvUpdatesDialog({
     required this.initialSnapshot,
-    required this.onOpenDownload,
+    required this.onOpenReleasePage,
   });
 
   final _TvReleaseUpdatesSnapshot initialSnapshot;
-  final Future<void> Function(Uri uri) onOpenDownload;
+  final Future<void> Function(Uri uri) onOpenReleasePage;
 
   @override
   State<_TvUpdatesDialog> createState() => _TvUpdatesDialogState();
@@ -3828,10 +4269,21 @@ class _TvUpdatesDialogState extends State<_TvUpdatesDialog> {
   final FocusNode _changelogFocusNode = FocusNode(
     debugLabel: 'tv-updates-changelog',
   );
-  final FocusNode _updateFocusNode = FocusNode(debugLabel: 'tv-updates-check');
+  final FocusNode _releasePageFocusNode = FocusNode(
+    debugLabel: 'tv-updates-release-page',
+  );
+  final FocusNode _updateFocusNode = FocusNode(
+    debugLabel: 'tv-updates-primary',
+  );
+  final FocusNode _discardFocusNode = FocusNode(
+    debugLabel: 'tv-updates-discard',
+  );
   late _TvReleaseUpdatesSnapshot _snapshot = widget.initialSnapshot;
+  final TvNativeAppUpdater _updater = TvNativeAppUpdater.instance;
   bool _checking = true;
-  bool _downloadOpening = false;
+  bool _nativeReady = false;
+  bool _releasePageOpening = false;
+  bool _nativeActionPending = false;
 
   @override
   void initState() {
@@ -3839,14 +4291,41 @@ class _TvUpdatesDialogState extends State<_TvUpdatesDialog> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _changelogFocusNode.requestFocus();
     });
+    _updater.addListener(_handleNativeUpdate);
+    unawaited(_initializeNativeUpdater());
     unawaited(_checkForUpdates());
   }
 
   @override
   void dispose() {
     _changelogFocusNode.dispose();
+    _releasePageFocusNode.dispose();
     _updateFocusNode.dispose();
+    _discardFocusNode.dispose();
+    _updater.removeListener(_handleNativeUpdate);
     super.dispose();
+  }
+
+  Future<void> _initializeNativeUpdater() async {
+    try {
+      await _updater.initialize();
+      if (!mounted) return;
+      setState(() => _nativeReady = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusBestAction();
+      });
+    } on MissingPluginException {
+      if (mounted) setState(() => _nativeReady = false);
+    } on PlatformException {
+      if (mounted) setState(() => _nativeReady = false);
+    } on FormatException {
+      if (mounted) setState(() => _nativeReady = false);
+    }
+  }
+
+  void _handleNativeUpdate() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   Future<void> _checkForUpdates() async {
@@ -3864,6 +4343,9 @@ class _TvUpdatesDialogState extends State<_TvUpdatesDialog> {
       );
       _checking = false;
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusBestAction();
+    });
   }
 
   Future<void> _openChangelog() async {
@@ -3874,29 +4356,147 @@ class _TvUpdatesDialogState extends State<_TvUpdatesDialog> {
     if (mounted) _changelogFocusNode.requestFocus();
   }
 
-  Future<void> _downloadUpdate() async {
-    if (!_snapshot.updateAvailable || _downloadOpening) return;
-    setState(() => _downloadOpening = true);
-    await widget.onOpenDownload(_snapshot.downloadUri);
+  Future<void> _openReleasePage() async {
+    if (_releasePageOpening) return;
+    setState(() => _releasePageOpening = true);
+    await widget.onOpenReleasePage(_snapshot.downloadUri);
     if (!mounted) return;
-    setState(() => _downloadOpening = false);
-    _updateFocusNode.requestFocus();
+    setState(() => _releasePageOpening = false);
+    _releasePageFocusNode.requestFocus();
+  }
+
+  Future<void> _runNativeAction(TvNativeUpdateAction action) async {
+    if (!action.enabled || _nativeActionPending) return;
+    setState(() => _nativeActionPending = true);
+    try {
+      switch (action.kind) {
+        case TvNativeUpdateActionKind.start:
+          await _updater.startAssets(_snapshot.latest.apkAssets);
+          break;
+        case TvNativeUpdateActionKind.pause:
+          await _updater.pause();
+          break;
+        case TvNativeUpdateActionKind.resume:
+          await _updater.resume();
+          break;
+        case TvNativeUpdateActionKind.install:
+          await _updater.install();
+          break;
+        case TvNativeUpdateActionKind.openPermissionSettings:
+          await _updater.openInstallPermissionSettings();
+          break;
+        case TvNativeUpdateActionKind.none:
+          break;
+      }
+    } on MissingPluginException {
+      // The release page remains available as the safe fallback.
+    } on PlatformException {
+      // Native failures are represented by fixed updater state when available.
+    } on FormatException {
+      // Fail closed without exposing malformed native state.
+    } finally {
+      if (mounted) {
+        setState(() => _nativeActionPending = false);
+        _focusBestAction();
+      }
+    }
+  }
+
+  Future<void> _discardDownload() async {
+    if (_nativeActionPending) return;
+    setState(() => _nativeActionPending = true);
+    try {
+      if (_updater.snapshot.stage == TvNativeUpdateStage.readyToInstall) {
+        await _updater.deleteDownload();
+      } else {
+        await _updater.cancel();
+      }
+    } on MissingPluginException {
+      // Keep the dialog usable when the native bridge is unavailable.
+    } on PlatformException {
+      // Native failures remain private and fixed-bucketed.
+    } finally {
+      if (mounted) {
+        setState(() => _nativeActionPending = false);
+        _focusBestAction();
+      }
+    }
+  }
+
+  void _focusBestAction() {
+    final action = _primaryAction;
+    if (_nativeReady && action.enabled) {
+      _updateFocusNode.requestFocus();
+    } else {
+      _changelogFocusNode.requestFocus();
+    }
+  }
+
+  bool get _hasVerifiedTvAsset => _snapshot.latest.apkAssets.any(
+        (asset) => asset.lane == TvReleaseAppLane.tv,
+      );
+
+  TvNativeUpdateAction get _primaryAction => tvNativeUpdateActionFor(
+        snapshot: _updater.snapshot,
+        updateAvailable: _snapshot.updateAvailable,
+        hasVerifiedAsset: _hasVerifiedTvAsset,
+      );
+
+  bool get _canDiscard {
+    switch (_updater.snapshot.stage) {
+      case TvNativeUpdateStage.downloading:
+      case TvNativeUpdateStage.paused:
+      case TvNativeUpdateStage.readyToInstall:
+      case TvNativeUpdateStage.failed:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  String get _nativeStatus {
+    final state = _updater.snapshot;
+    switch (state.stage) {
+      case TvNativeUpdateStage.downloading:
+        return 'Downloading ${state.progressPermille ~/ 10}%';
+      case TvNativeUpdateStage.paused:
+        return 'Download paused at ${state.progressPermille ~/ 10}%.';
+      case TvNativeUpdateStage.verifying:
+        return 'Checking the downloaded update.';
+      case TvNativeUpdateStage.readyToInstall:
+        return 'Download verified. Installation starts only when you choose it.';
+      case TvNativeUpdateStage.awaitingPermission:
+        return 'Allow Juicr to request installation, then return here.';
+      case TvNativeUpdateStage.installing:
+        return 'Preparing Android installation.';
+      case TvNativeUpdateStage.awaitingConfirmation:
+        return 'Complete the Android confirmation to install.';
+      case TvNativeUpdateStage.installed:
+        return 'The update was installed.';
+      case TvNativeUpdateStage.failed:
+        return 'The update could not be prepared. You can retry or open the release page.';
+      case TvNativeUpdateStage.idle:
+      case TvNativeUpdateStage.available:
+        return _snapshot.updateAvailable
+            ? 'A verified TV update is available.'
+            : 'This TV is up to date.';
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final updateLabel = _checking
-        ? 'Checking updates...'
-        : _snapshot.updateAvailable
-            ? (_downloadOpening ? 'Opening...' : 'Download update')
-            : 'Up to date';
-    final updateEnabled =
-        !_checking && !_downloadOpening && _snapshot.updateAvailable;
+    final primary = _checking
+        ? const TvNativeUpdateAction(
+            kind: TvNativeUpdateActionKind.none,
+            label: 'Checking updates...',
+            enabled: false,
+          )
+        : _primaryAction;
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 138, vertical: 62),
       child: Container(
-        width: 640,
+        width: 720,
         padding: const EdgeInsets.all(_tvSpacing),
         decoration: BoxDecoration(
           color: _tvTheme.dialog,
@@ -3938,6 +4538,27 @@ class _TvUpdatesDialogState extends State<_TvUpdatesDialog> {
               ),
             ),
             const SizedBox(height: _tvSpacing),
+            Text(
+              _nativeStatus,
+              style: TextStyle(
+                color: _tvTheme.text,
+                fontSize: 15,
+                height: 1.35,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            if (_updater.snapshot.stage == TvNativeUpdateStage.downloading ||
+                _updater.snapshot.stage == TvNativeUpdateStage.paused) ...[
+              const SizedBox(height: 10),
+              LinearProgressIndicator(
+                value: _updater.snapshot.progressPermille / 1000,
+                minHeight: 6,
+                color: _tvAccentColor,
+                backgroundColor: _tvTheme.rowBorder,
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ],
+            const SizedBox(height: _tvSpacing),
             Row(
               children: [
                 Expanded(
@@ -3945,32 +4566,89 @@ class _TvUpdatesDialogState extends State<_TvUpdatesDialog> {
                     icon: Icons.article_outlined,
                     label: 'Read changelog',
                     focusNode: _changelogFocusNode,
-                    onArrowRight: () => _updateFocusNode.requestFocus(),
+                    onArrowRight: () => _releasePageFocusNode.requestFocus(),
                     onPressed: () => unawaited(_openChangelog()),
                   ),
                 ),
                 const SizedBox(width: _tvSpacing),
                 Expanded(
                   child: _TvTextButton(
-                    icon: _checking
-                        ? Icons.hourglass_top_rounded
-                        : _snapshot.updateAvailable
-                            ? Icons.download_rounded
-                            : Icons.check_rounded,
-                    label: updateLabel,
-                    enabled: updateEnabled,
-                    animateIcon: _checking,
-                    focusNode: _updateFocusNode,
+                    icon: Icons.open_in_new_rounded,
+                    label: _releasePageOpening
+                        ? 'Opening...'
+                        : 'Open release page',
+                    enabled: !_releasePageOpening,
+                    focusNode: _releasePageFocusNode,
                     onArrowLeft: () => _changelogFocusNode.requestFocus(),
-                    onPressed: () => unawaited(_downloadUpdate()),
+                    onArrowRight: () => _updateFocusNode.requestFocus(),
+                    onPressed: () => unawaited(_openReleasePage()),
+                  ),
+                ),
+                const SizedBox(width: _tvSpacing),
+                Expanded(
+                  child: _TvTextButton(
+                    icon: _nativeUpdateIcon(primary.kind),
+                    label: primary.label,
+                    enabled: primary.enabled && !_nativeActionPending,
+                    animateIcon: _checking ||
+                        _updater.snapshot.stage ==
+                            TvNativeUpdateStage.verifying ||
+                        _updater.snapshot.stage ==
+                            TvNativeUpdateStage.installing,
+                    focusNode: _updateFocusNode,
+                    onArrowLeft: () => _releasePageFocusNode.requestFocus(),
+                    onArrowRight: _canDiscard
+                        ? () => _discardFocusNode.requestFocus()
+                        : null,
+                    onPressed: () => unawaited(_runNativeAction(primary)),
                   ),
                 ),
               ],
             ),
+            if (_canDiscard) ...[
+              const SizedBox(height: 10),
+              Align(
+                alignment: Alignment.centerRight,
+                child: SizedBox(
+                  width: 230,
+                  child: _TvTextButton(
+                    icon: _updater.snapshot.stage ==
+                            TvNativeUpdateStage.readyToInstall
+                        ? Icons.delete_outline_rounded
+                        : Icons.close_rounded,
+                    label: _updater.snapshot.stage ==
+                            TvNativeUpdateStage.readyToInstall
+                        ? 'Delete download'
+                        : 'Cancel download',
+                    enabled: !_nativeActionPending,
+                    focusNode: _discardFocusNode,
+                    onArrowLeft: () => _updateFocusNode.requestFocus(),
+                    onPressed: () => unawaited(_discardDownload()),
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
     );
+  }
+
+  IconData _nativeUpdateIcon(TvNativeUpdateActionKind kind) {
+    switch (kind) {
+      case TvNativeUpdateActionKind.start:
+        return Icons.download_rounded;
+      case TvNativeUpdateActionKind.pause:
+        return Icons.pause_rounded;
+      case TvNativeUpdateActionKind.resume:
+        return Icons.play_arrow_rounded;
+      case TvNativeUpdateActionKind.install:
+        return Icons.system_update_alt_rounded;
+      case TvNativeUpdateActionKind.openPermissionSettings:
+        return Icons.settings_rounded;
+      case TvNativeUpdateActionKind.none:
+        return Icons.hourglass_top_rounded;
+    }
   }
 }
 
@@ -3987,17 +4665,20 @@ class _TvDiagnosticConsentDialog extends StatefulWidget {
 class _TvDiagnosticConsentDialogState
     extends State<_TvDiagnosticConsentDialog> {
   final FocusNode _sendFocusNode = FocusNode(debugLabel: 'tv-diagnostic-send');
+  final FocusNode _backFocusNode = FocusNode(debugLabel: 'tv-diagnostic-back');
   bool _sending = false;
   String? _error;
 
   @override
   void dispose() {
     _sendFocusNode.dispose();
+    _backFocusNode.dispose();
     super.dispose();
   }
 
   Future<void> _send() async {
     if (_sending) return;
+    _backFocusNode.requestFocus();
     setState(() {
       _sending = true;
       _error = null;
@@ -4060,19 +4741,30 @@ class _TvDiagnosticConsentDialogState
               ),
             ],
             const SizedBox(height: _tvSpacing),
-            Align(
-              alignment: Alignment.centerRight,
-              child: _TvTextButton(
-                icon: _sending
-                    ? Icons.hourglass_top_rounded
-                    : Icons.cloud_upload_outlined,
-                label: _sending ? 'Sending...' : 'Send',
-                enabled: !_sending,
-                animateIcon: _sending,
-                autofocus: true,
-                focusNode: _sendFocusNode,
-                onPressed: () => unawaited(_send()),
-              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                _TvTextButton(
+                  icon: Icons.arrow_back_rounded,
+                  label: 'Back',
+                  focusNode: _backFocusNode,
+                  onArrowRight: _sending ? null : _sendFocusNode.requestFocus,
+                  onPressed: () => Navigator.of(context).maybePop(),
+                ),
+                const SizedBox(width: _tvSpacing),
+                _TvTextButton(
+                  icon: _sending
+                      ? Icons.hourglass_top_rounded
+                      : Icons.cloud_upload_outlined,
+                  label: _sending ? 'Sending...' : 'Send',
+                  enabled: !_sending,
+                  animateIcon: _sending,
+                  autofocus: true,
+                  focusNode: _sendFocusNode,
+                  onArrowLeft: _backFocusNode.requestFocus,
+                  onPressed: () => unawaited(_send()),
+                ),
+              ],
             ),
           ],
         ),
@@ -4353,6 +5045,7 @@ class _TvAccountLibraryDialogState extends State<_TvAccountLibraryDialog> {
     required String confirmLabel,
     IconData icon = Icons.warning_amber_rounded,
   }) async {
+    final focusRestorer = TvDialogFocusRestorer.capture();
     final accepted = await _showTvDialog<bool>(
       context: context,
       builder: (dialogContext) => _TvConfirmDialog(
@@ -4362,7 +5055,7 @@ class _TvAccountLibraryDialogState extends State<_TvAccountLibraryDialog> {
         icon: icon,
       ),
     );
-    _focusAccountEntry();
+    if (mounted && accepted != true) focusRestorer.restore();
     return accepted == true;
   }
 
@@ -4890,6 +5583,7 @@ class _TvLibraryManagementDialogState
     required _TvLibraryManagementResult result,
   }) async {
     if (_busyAction != null) return;
+    final focusRestorer = TvDialogFocusRestorer.capture();
     final accepted = await _showTvDialog<bool>(
       context: context,
       builder: (dialogContext) => _TvConfirmDialog(
@@ -4899,7 +5593,11 @@ class _TvLibraryManagementDialogState
         icon: Icons.delete_outline_rounded,
       ),
     );
-    if (!mounted || accepted != true) return;
+    if (!mounted) return;
+    if (accepted != true) {
+      focusRestorer.restore();
+      return;
+    }
     setState(() => _busyAction = label);
     try {
       await action();
@@ -5508,7 +6206,7 @@ class _TvSubtitleStyleDialogState extends State<_TvSubtitleStyleDialog> {
               ),
               const SizedBox(height: _tvSpacing),
               Text(
-                'Tune TV-readable captions for every playback engine.',
+                'Adjust caption size, color, and background.',
                 style: TextStyle(
                   color: _tvTheme.muted,
                   fontSize: 14,
@@ -7651,6 +8349,9 @@ class _TvEditableDialogFieldState extends State<_TvEditableDialogField> {
       shortcuts: const <ShortcutActivator, Intent>{
         SingleActivator(LogicalKeyboardKey.escape): DismissIntent(),
         SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),
+        SingleActivator(LogicalKeyboardKey.browserBack): DismissIntent(),
+        SingleActivator(LogicalKeyboardKey.navigateOut): DismissIntent(),
+        SingleActivator(LogicalKeyboardKey.gameButtonB): DismissIntent(),
       },
       child: Actions(
         actions: {
@@ -7879,6 +8580,7 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
     _detailsFuture = _loadDetails();
     _recommendationsFuture = _loadRecommendations();
     FocusManager.instance.addListener(_handleDetailsPrimaryFocusChanged);
+    HardwareKeyboard.instance.addHandler(_handleDetailsFallbackKey);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _restoreDetailsFocusIfNeeded();
@@ -7890,6 +8592,7 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleDetailsFallbackKey);
     FocusManager.instance.removeListener(_handleDetailsPrimaryFocusChanged);
     _scrollController.dispose();
     _backFocusNode.dispose();
@@ -7907,6 +8610,16 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
   void _handleDetailsPrimaryFocusChanged() {
     if (!mounted || !_detailsRouteIsCurrent || _detailsFocusIsValid) return;
     _restoreDetailsFocusIfNeeded();
+  }
+
+  bool _handleDetailsFallbackKey(KeyEvent event) {
+    if (!mounted || !_detailsRouteIsCurrent) return false;
+    if ((event is! KeyDownEvent && event is! KeyRepeatEvent) ||
+        event.logicalKey != LogicalKeyboardKey.escape) {
+      return false;
+    }
+    _handleBack();
+    return true;
   }
 
   void _requestDetailsFocusAfterBuild(
@@ -8136,7 +8849,10 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
 
   Future<List<_TvItem>> _loadRecommendations() async {
     final item = await _detailsFuture;
-    final recommendations = await _TvApi().recommendations(item);
+    final recommendations = await _TvApi().recommendations(
+      item,
+      showMatureContent: widget.settings.showMatureContent,
+    );
     if (mounted) _restoreDetailsFocusIfNeeded();
     return recommendations;
   }
@@ -8355,7 +9071,12 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
         episode.season,
         episode.episode,
       );
-      if (progress != null && progress.position > Duration.zero) {
+      if (progress != null &&
+          tvPlaybackProgressCanResume(
+            position: progress.position,
+            duration: progress.duration,
+            enabled: widget.settings.resumePrompt,
+          )) {
         if (best == null ||
             episode.season > best.episode.season ||
             (episode.season == best.episode.season &&
@@ -8374,15 +9095,26 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
     final episodeProgress = _isSeriesLike ? _latestEpisodeProgress(item) : null;
     final primaryProgress =
         episodeProgress?.progress ?? widget.progressForPlayback(item, 1, 1);
-    final hasPrimaryProgress =
-        primaryProgress != null && primaryProgress.position > Duration.zero;
+    final hasPrimaryProgress = primaryProgress != null &&
+        tvPlaybackProgressCanResume(
+          position: primaryProgress.position,
+          duration: primaryProgress.duration,
+          enabled: widget.settings.resumePrompt,
+        );
+    final hasCompletedProgress = primaryProgress != null &&
+        tvPlaybackProgressIsComplete(
+          position: primaryProgress.position,
+          duration: primaryProgress.duration,
+        );
     final primaryLabel = _preparing
         ? 'Preparing'
         : episodeProgress != null
             ? 'Continue | S${episodeProgress.episode.season} E${episodeProgress.episode.episode}'
             : hasPrimaryProgress
                 ? 'Continue'
-                : 'Watch now';
+                : hasCompletedProgress
+                    ? 'Watch again'
+                    : 'Watch now';
     final primaryAction = episodeProgress == null
         ? () => widget.onPlay(item)
         : () => widget.onPlayEpisode(
@@ -8450,6 +9182,9 @@ class _TvDetailsPageState extends State<_TvDetailsPage> {
           shortcuts: const <ShortcutActivator, Intent>{
             SingleActivator(LogicalKeyboardKey.escape): DismissIntent(),
             SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),
+            SingleActivator(LogicalKeyboardKey.browserBack): DismissIntent(),
+            SingleActivator(LogicalKeyboardKey.navigateOut): DismissIntent(),
+            SingleActivator(LogicalKeyboardKey.gameButtonB): DismissIntent(),
           },
           child: Actions(
             actions: {
@@ -8915,71 +9650,91 @@ class _TvListPickerDialog extends StatefulWidget {
 class _TvListPickerDialogState extends State<_TvListPickerDialog> {
   bool _creating = false;
   final TextEditingController _controller = TextEditingController();
+  final FocusNode _nameFocusNode = FocusNode(debugLabel: 'tv-list-name');
+  final FocusNode _createFocusNode = FocusNode(debugLabel: 'tv-list-create');
+  final FocusNode _backFocusNode = FocusNode(debugLabel: 'tv-list-create-back');
 
   @override
   void dispose() {
     _controller.dispose();
+    _nameFocusNode.dispose();
+    _createFocusNode.dispose();
+    _backFocusNode.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     if (_creating) {
-      return Dialog(
-        backgroundColor: Colors.transparent,
-        child: Container(
-          width: 620,
-          padding: const EdgeInsets.all(_tvSpacing),
-          decoration: BoxDecoration(
-            color: _tvTheme.dialog,
-            borderRadius: BorderRadius.circular(28),
-            border: Border.all(color: _tvTheme.rowBorder),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Create list',
-                style: TextStyle(
-                  color: _tvTheme.text,
-                  fontSize: 28,
-                  fontWeight: FontWeight.w900,
-                ),
+      return TvDialogInnerLayer(
+        onBack: () => setState(() => _creating = false),
+        child: TvDialogFormFocusOwner(
+          fieldFocusNode: _nameFocusNode,
+          actionFocusNodes: [_createFocusNode, _backFocusNode],
+          child: Dialog(
+            backgroundColor: Colors.transparent,
+            child: Container(
+              width: 620,
+              padding: const EdgeInsets.all(_tvSpacing),
+              decoration: BoxDecoration(
+                color: _tvTheme.dialog,
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(color: _tvTheme.rowBorder),
               ),
-              const SizedBox(height: _tvSpacing),
-              TextField(
-                controller: _controller,
-                autofocus: true,
-                style: TextStyle(color: _tvTheme.text),
-                decoration: InputDecoration(
-                  hintText: 'List name',
-                  hintStyle: TextStyle(color: _tvTheme.muted),
-                ),
-                onSubmitted: (value) {
-                  if (value.trim().isNotEmpty) Navigator.of(context).pop(value);
-                },
-              ),
-              const SizedBox(height: _tvSpacing),
-              Row(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _TvTextButton(
-                    icon: Icons.check_rounded,
-                    label: 'Create',
-                    onPressed: () {
-                      final value = _controller.text.trim();
-                      if (value.isNotEmpty) Navigator.of(context).pop(value);
+                  Text(
+                    'Create list',
+                    style: TextStyle(
+                      color: _tvTheme.text,
+                      fontSize: 28,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: _tvSpacing),
+                  TextField(
+                    controller: _controller,
+                    focusNode: _nameFocusNode,
+                    autofocus: true,
+                    style: TextStyle(color: _tvTheme.text),
+                    decoration: InputDecoration(
+                      hintText: 'List name',
+                      hintStyle: TextStyle(color: _tvTheme.muted),
+                    ),
+                    onSubmitted: (value) {
+                      if (value.trim().isNotEmpty) {
+                        Navigator.of(context).pop(value);
+                      }
                     },
                   ),
-                  const SizedBox(width: _tvSpacing),
-                  _TvTextButton(
-                    icon: Icons.arrow_back_rounded,
-                    label: 'Back',
-                    onPressed: () => setState(() => _creating = false),
+                  const SizedBox(height: _tvSpacing),
+                  Row(
+                    children: [
+                      _TvTextButton(
+                        icon: Icons.check_rounded,
+                        label: 'Create',
+                        focusNode: _createFocusNode,
+                        onPressed: () {
+                          final value = _controller.text.trim();
+                          if (value.isNotEmpty) {
+                            Navigator.of(context).pop(value);
+                          }
+                        },
+                      ),
+                      const SizedBox(width: _tvSpacing),
+                      _TvTextButton(
+                        icon: Icons.arrow_back_rounded,
+                        label: 'Back',
+                        focusNode: _backFocusNode,
+                        onPressed: () => setState(() => _creating = false),
+                      ),
+                    ],
                   ),
                 ],
               ),
-            ],
+            ),
           ),
         ),
       );
@@ -10449,12 +11204,14 @@ class _TvSearchOverlay extends StatefulWidget {
     super.key,
     required this.api,
     required this.items,
+    required this.settings,
     required this.onClose,
     required this.onOpenItem,
   });
 
   final _TvApi api;
   final List<_TvItem> items;
+  final _TvSettingsState settings;
   final VoidCallback onClose;
   final ValueChanged<_TvItem> onOpenItem;
 
@@ -10464,11 +11221,13 @@ class _TvSearchOverlay extends StatefulWidget {
 
 class _TvSearchOverlayState extends State<_TvSearchOverlay> {
   static const _voiceChannel = MethodChannel('app.juicr.flutter/voice_search');
-  static const _searchGroupSpecs = <_TvSearchGroupSpec>[
-    _TvSearchGroupSpec(label: 'Movies', type: 'movie'),
-    _TvSearchGroupSpec(label: 'Series', type: 'series'),
-    _TvSearchGroupSpec(label: 'Animation', type: 'animation'),
-  ];
+  List<_TvSearchGroupSpec> get _searchGroupSpecs => <_TvSearchGroupSpec>[
+        const _TvSearchGroupSpec(label: 'Movies', type: 'movie'),
+        const _TvSearchGroupSpec(label: 'Series', type: 'series'),
+        const _TvSearchGroupSpec(label: 'Animation', type: 'animation'),
+        if (widget.settings.builtInLiveTv)
+          const _TvSearchGroupSpec(label: 'Live TV', type: 'live_tv'),
+      ];
 
   final TextEditingController _controller = TextEditingController();
   final FocusNode _searchBarFocusNode = FocusNode(debugLabel: 'tv-search-bar');
@@ -10482,8 +11241,10 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
   bool _listening = false;
   bool _editingText = false;
   bool _loadingSearch = false;
+  bool _searchUnavailable = false;
   int _searchRequestToken = 0;
   String? _lastFocusedSearchItemKey;
+  FocusNode? _lastFocusedSearchItemNode;
   String? _pendingSearchItemKey;
   Timer? _searchDebounce;
   List<_TvSearchGroupResult> _searchGroups = const [];
@@ -10554,7 +11315,10 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
           _focusClearOrClose,
         ),
       LogicalKeyboardKey.escape ||
-      LogicalKeyboardKey.goBack =>
+      LogicalKeyboardKey.goBack ||
+      LogicalKeyboardKey.browserBack ||
+      LogicalKeyboardKey.navigateOut ||
+      LogicalKeyboardKey.gameButtonB =>
         _handleSearchTextEscape(_focusSearchBar),
       _ => false,
     };
@@ -10576,7 +11340,10 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
           _focusClearOrClose,
         ),
       LogicalKeyboardKey.escape ||
-      LogicalKeyboardKey.goBack =>
+      LogicalKeyboardKey.goBack ||
+      LogicalKeyboardKey.browserBack ||
+      LogicalKeyboardKey.navigateOut ||
+      LogicalKeyboardKey.gameButtonB =>
         _handleSearchTextFocusEscape(_focusSearchBar),
       _ => KeyEventResult.ignored,
     };
@@ -10606,6 +11373,7 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
     if (trimmed.isEmpty) {
       setState(() {
         _loadingSearch = false;
+        _searchUnavailable = false;
         _searchGroups = const [];
       });
       _syncSearchGroupFocusNodes(0);
@@ -10626,7 +11394,9 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
 
     final seen = <String>{};
     final groups = <_TvSearchGroupResult>[];
+    var failedGroupCount = 0;
     for (final result in results) {
+      if (result.failed) failedGroupCount += 1;
       final items = <_TvItem>[];
       for (final item in result.items) {
         final key = _searchItemKey(item);
@@ -10635,22 +11405,56 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
         if (items.length >= 12) break;
       }
       if (items.isNotEmpty) {
-        groups.add(_TvSearchGroupResult(label: result.label, items: items));
+        groups.add(
+          _TvSearchGroupResult(
+            label: result.label,
+            items: items,
+            failed: false,
+          ),
+        );
       }
     }
 
+    final focusedItemKey = identical(
+      FocusManager.instance.primaryFocus,
+      _lastFocusedSearchItemNode,
+    )
+        ? _lastFocusedSearchItemKey
+        : null;
+    final replacementKeys = <String>{
+      for (final group in groups)
+        for (final item in group.items) _itemKey(item),
+    };
+    final restoreKey =
+        replacementKeys.contains(focusedItemKey) ? focusedItemKey : null;
     _syncSearchGroupFocusNodes(groups.length);
     setState(() {
       _loadingSearch = false;
+      _searchUnavailable = failedGroupCount == results.length;
       _searchGroups = groups;
+      _pendingSearchItemKey = restoreKey;
     });
+    if (focusedItemKey != null && restoreKey == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_activeResults.isNotEmpty && _resultsFocusNode.context != null) {
+          _resultsFocusNode.requestFocus();
+        } else {
+          _searchBarFocusNode.requestFocus();
+        }
+      });
+    }
+  }
+
+  void _retrySearch() {
+    final query = _query.trim();
+    if (query.isEmpty || _loadingSearch) return;
+    final token = ++_searchRequestToken;
+    unawaited(_loadRemoteSearch(query, token));
   }
 
   void _syncSearchGroupFocusNodes(int groupCount) {
     final extraNodeCount = math.max(0, groupCount - 1);
-    while (_searchGroupFocusNodes.length > extraNodeCount) {
-      _searchGroupFocusNodes.removeLast().dispose();
-    }
     while (_searchGroupFocusNodes.length < extraNodeCount) {
       final index = _searchGroupFocusNodes.length + 1;
       _searchGroupFocusNodes.add(
@@ -10696,17 +11500,34 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
             search: query,
             deepSearch: true,
             fallbackType: spec.type,
+            showMatureContent: widget.settings.showMatureContent,
           )
           .timeout(const Duration(seconds: 10));
       final deduped = _dedupeSearchItems(items).take(12).toList();
       final hydrated = await _hydrateSearchArtwork(deduped);
-      return _TvSearchGroupResult(label: spec.label, items: hydrated);
+      final visible = hydrated
+          .where(
+            (item) => tvShouldShowCatalogItem(
+              showMatureContent: widget.settings.showMatureContent,
+              hasMatureContentSignal: item.hasMatureContentSignal,
+            ),
+          )
+          .toList(growable: false);
+      return _TvSearchGroupResult(
+        label: spec.label,
+        items: visible,
+        failed: false,
+      );
     } catch (error) {
       debugPrint(
         'Juicr TV search group unavailable '
         'type=${spec.type} errorType=${error.runtimeType}',
       );
-      return _TvSearchGroupResult(label: spec.label, items: const []);
+      return _TvSearchGroupResult(
+        label: spec.label,
+        items: const [],
+        failed: true,
+      );
     }
   }
 
@@ -10722,9 +11543,15 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
 
   Future<List<_TvItem>> _hydrateSearchArtwork(List<_TvItem> items) async {
     if (items.isEmpty) return const <_TvItem>[];
-    final hydrated = await Future.wait([
-      for (final item in items) _hydrateSearchArtworkItem(item),
-    ]);
+    final hydrated = <_TvItem>[];
+    for (var index = 0; index < items.length; index += 3) {
+      final batch = items.skip(index).take(3);
+      hydrated.addAll(
+        await Future.wait([
+          for (final item in batch) _hydrateSearchArtworkItem(item),
+        ]),
+      );
+    }
     return hydrated;
   }
 
@@ -10827,13 +11654,15 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
     });
   }
 
-  void _endTextEntry() {
+  void _endTextEntry({bool restoreSearchBarFocus = true}) {
     if (!_editingText) return;
     _searchTextFocusNode
       ..canRequestFocus = false
       ..skipTraversal = true;
     setState(() => _editingText = false);
-    _searchBarFocusNode.requestFocus();
+    if (restoreSearchBarFocus) {
+      _searchBarFocusNode.requestFocus();
+    }
     SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
   }
 
@@ -10883,15 +11712,28 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
   }
 
   void _focusSearchResults() {
-    _endTextEntry();
+    _endTextEntry(restoreSearchBarFocus: false);
     if (_activeResults.isEmpty) return;
     _resultsFocusNode.requestFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _activeResults.isEmpty) return;
+      final resultContext = _resultsFocusNode.context;
+      if (resultContext == null) return;
+      _resultsFocusNode.requestFocus();
+      Scrollable.ensureVisible(
+        resultContext,
+        duration: _tvDuration(180),
+        curve: Curves.easeOutCubic,
+        alignment: 0.34,
+      );
+    });
   }
 
   String _itemKey(_TvItem item) => '${item.type}:${item.id}';
 
   void _rememberSearchItemFocus(FocusNode node, _TvItem item) {
     _lastFocusedSearchItemKey = _itemKey(item);
+    _lastFocusedSearchItemNode = node;
   }
 
   void _consumeSearchItemFocus(String itemKey) {
@@ -10935,7 +11777,10 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
     }
     if (_editingText) {
       if (key == LogicalKeyboardKey.escape ||
-          key == LogicalKeyboardKey.goBack) {
+          key == LogicalKeyboardKey.goBack ||
+          key == LogicalKeyboardKey.browserBack ||
+          key == LogicalKeyboardKey.navigateOut ||
+          key == LogicalKeyboardKey.gameButtonB) {
         _endTextEntry();
         return KeyEventResult.handled;
       }
@@ -11062,7 +11907,7 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
                                         border: Border.all(
                                           color: focused || _editingText
                                               ? _juicrGreen
-                                                  : const Color(0x22FFFFFF),
+                                              : const Color(0x22FFFFFF),
                                           width:
                                               focused || _editingText ? 2 : 1,
                                         ),
@@ -11199,6 +12044,15 @@ class _TvSearchOverlayState extends State<_TvSearchOverlay> {
     }
 
     if (_searchGroups.isEmpty) {
+      if (_searchUnavailable && !_loadingSearch) {
+        return _TvCatalogFailureState(
+          height: height,
+          focusNode: _resultsFocusNode,
+          onFocusNavigation: _focusSearchBar,
+          onFocusHeader: _focusSearchBar,
+          onRetry: _retrySearch,
+        );
+      }
       return _TvEmptyCatalogState(
         title: _loadingSearch ? 'Searching...' : 'No TV results yet.',
         subtitle: _loadingSearch
@@ -11255,8 +12109,13 @@ class _TvSearchGroupSpec {
 }
 
 class _TvSearchGroupResult {
-  const _TvSearchGroupResult({required this.label, required this.items});
+  const _TvSearchGroupResult({
+    required this.label,
+    required this.items,
+    required this.failed,
+  });
 
   final String label;
   final List<_TvItem> items;
+  final bool failed;
 }

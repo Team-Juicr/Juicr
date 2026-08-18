@@ -14,11 +14,30 @@ def hasReleaseSigningConfig =
     keystoreProperties["storePassword"] &&
     keystoreProperties["keyAlias"] &&
     keystoreProperties["keyPassword"]
+def enableP2pRuntime =
+    project.findProperty("JUICR_ENABLE_P2P_RUNTIME")
+        ?: System.getenv("JUICR_ENABLE_P2P_RUNTIME")
+        ?: "false"
+def p2pNativeRoot = file("../../native_16kb_overrides/release")
+def requiredP2pNativeInputs = [
+    "arm64-v8a/libjlibtorrent-1.2.0.18.so",
+    "arm64-v8a/libjuicr_jlibtorrent_shim.so",
+    "armeabi-v7a/libc++_shared.so",
+    "armeabi-v7a/libjlibtorrent-1.2.0.18.so",
+    "armeabi-v7a/libjuicr_jlibtorrent_shim.so",
+    "x86_64/libjlibtorrent-1.2.0.18.so",
+    "x86_64/libjuicr_jlibtorrent_shim.so",
+].collect { new File(p2pNativeRoot, it) }
+def p2pBuildCapable = requiredP2pNativeInputs.every { it.exists() }
 
 android {
     namespace = "app.juicr.flutter"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "28.2.13676358"
+
+    buildFeatures {
+        buildConfig = true
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -35,6 +54,19 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        buildConfigField "boolean", "JUICR_ENABLE_P2P_RUNTIME", enableP2pRuntime.toString().toBoolean().toString()
+        buildConfigField "boolean", "JUICR_P2P_BUILD_CAPABLE", p2pBuildCapable.toString()
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs += file("../../native_16kb_overrides/release")
+        }
+    }
+
+    packagingOptions {
+        pickFirst "lib/**/libc++_shared.so"
+        pickFirst "lib/**/libjlibtorrent-1.2.0.18.so"
     }
 
     signingConfigs {
@@ -68,4 +100,15 @@ dependencies {
     implementation "androidx.media3:media3-exoplayer-dash:1.11.0"
     implementation "androidx.media3:media3-exoplayer-hls:1.11.0"
     implementation "androidx.media3:media3-ui:1.11.0"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    implementation "com.frostwire:jlibtorrent:1.2.0.18"
+    implementation "com.frostwire:jlibtorrent-android-arm:1.2.0.18"
+    implementation "com.frostwire:jlibtorrent-android-arm64:1.2.0.18"
+    implementation "com.frostwire:jlibtorrent-android-x86_64:1.2.0.18"
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "com.squareup.okhttp3:mockwebserver:4.12.0"
+}
+
+tasks.register("runP2pContractTest") {
+    dependsOn "compileDebugUnitTestKotlin"
 }

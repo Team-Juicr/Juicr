@@ -1,13 +1,27 @@
 part of 'main.dart';
 
+class _TvCatalogConfig {
+  const _TvCatalogConfig({
+    this.liveTvGenres = const <String>[],
+    this.liveTvCountries = const <String>[],
+  });
+
+  factory _TvCatalogConfig.fromJson(Map<String, dynamic> json) {
+    return _TvCatalogConfig(
+      liveTvGenres: _stringList(json['liveTvGenres']),
+      liveTvCountries: _stringList(json['liveTvCountries']),
+    );
+  }
+
+  final List<String> liveTvGenres;
+  final List<String> liveTvCountries;
+}
+
 class _TvApi {
   final HttpClient _client = HttpClient()
     ..connectionTimeout = const Duration(seconds: 12);
 
-  static const int _catalogCacheLimit = 72;
   static const int _metaCacheLimit = 160;
-  static final Map<String, List<_TvItem>> _catalogCache =
-      <String, List<_TvItem>>{};
   static final Map<String, Future<List<_TvItem>>> _catalogInFlight =
       <String, Future<List<_TvItem>>>{};
   static final Map<String, _TvItem> _metaCache = <String, _TvItem>{};
@@ -15,6 +29,39 @@ class _TvApi {
       <String, Future<_TvItem>>{};
   static List<String>? _nativeProviderCache;
   static DateTime? _nativeProviderCacheStoredAt;
+  static _TvCatalogConfig? _catalogConfigCache;
+  static DateTime? _catalogConfigCacheStoredAt;
+  int _playbackInventoryGeneration = 0;
+
+  static void clearCatalogCache() {
+    _catalogInFlight.clear();
+  }
+
+  Future<_TvCatalogConfig> catalogConfig() async {
+    final cached = _catalogConfigCache;
+    final cachedAt = _catalogConfigCacheStoredAt;
+    if (cached != null &&
+        cachedAt != null &&
+        DateTime.now().difference(cachedAt) < const Duration(minutes: 15)) {
+      return cached;
+    }
+    try {
+      final json = await _getJson(
+        Uri.parse('$_apiBase/config'),
+      ).timeout(const Duration(seconds: 12));
+      final config = _TvCatalogConfig.fromJson(json);
+      _catalogConfigCache = config;
+      _catalogConfigCacheStoredAt = DateTime.now();
+      return config;
+    } catch (error) {
+      debugPrint(
+        'Juicr TV catalog config unavailable '
+        'bucket=${_apiErrorBucket(error)} errorType=${error.runtimeType}',
+      );
+      return cached ?? const _TvCatalogConfig();
+    }
+  }
+
   static const List<String> _defaultNativeProviderOrder = <String>[
     'vidlink',
     'vidsrc',
@@ -61,9 +108,11 @@ class _TvApi {
     required String sort,
     int page = 1,
     String genre = '',
+    String year = '',
     String search = '',
     bool deepSearch = false,
     bool preferDefaultCatalog = false,
+    bool showMatureContent = false,
     String? fallbackType,
   }) async {
     final safePage = page < 1 ? 1 : page;
@@ -72,19 +121,13 @@ class _TvApi {
       sort: sort,
       page: safePage,
       genre: genre,
+      year: year,
       search: search,
       deepSearch: deepSearch,
       preferDefaultCatalog: preferDefaultCatalog,
+      showMatureContent: showMatureContent,
       fallbackType: fallbackType,
     );
-    final cached = _catalogCache[cacheKey];
-    if (cached != null) {
-      debugPrint(
-        'Juicr TV catalog cache hit '
-        'type=$type sort=$sort page=$safePage count=${cached.length}',
-      );
-      return cached;
-    }
     final inFlight = _catalogInFlight[cacheKey];
     if (inFlight != null) {
       debugPrint(
@@ -98,17 +141,20 @@ class _TvApi {
       sort: sort,
       page: safePage,
       genre: genre,
+      year: year,
       search: search,
       deepSearch: deepSearch,
       preferDefaultCatalog: preferDefaultCatalog,
+      showMatureContent: showMatureContent,
       fallbackType: fallbackType,
-      cacheKey: cacheKey,
     );
     _catalogInFlight[cacheKey] = future;
     try {
       return await future;
     } finally {
-      _catalogInFlight.remove(cacheKey);
+      if (identical(_catalogInFlight[cacheKey], future)) {
+        _catalogInFlight.remove(cacheKey);
+      }
     }
   }
 
@@ -117,10 +163,11 @@ class _TvApi {
     required String sort,
     required int page,
     required String genre,
+    required String year,
     required String search,
     required bool deepSearch,
     required bool preferDefaultCatalog,
-    required String cacheKey,
+    required bool showMatureContent,
     String? fallbackType,
   }) async {
     final uri = Uri.parse('$_apiBase/catalog').replace(
@@ -129,11 +176,14 @@ class _TvApi {
         'sort': sort,
         'page': page.toString(),
         if (genre.trim().isNotEmpty &&
-            genre.trim().toLowerCase() != 'all genres')
+            genre.trim().toLowerCase() != 'all genres' &&
+            genre.trim().toLowerCase() != 'all countries')
           'genre': genre.trim(),
+        if (RegExp(r'^\d{4}$').hasMatch(year.trim())) 'year': year.trim(),
         if (search.trim().isNotEmpty) 'search': search.trim(),
         if (deepSearch) 'deepSearch': 'true',
         if (preferDefaultCatalog) 'preferDefaultCatalog': 'true',
+        ...tvMatureCatalogQuery(showMatureContent),
       },
     );
     final json = await _getJson(uri);
@@ -148,15 +198,13 @@ class _TvApi {
           ),
         )
         .where((item) => item.id.isNotEmpty && item.title.isNotEmpty)
+        .where(
+          (item) => tvShouldShowCatalogItem(
+            showMatureContent: showMatureContent,
+            hasMatureContentSignal: item.hasMatureContentSignal,
+          ),
+        )
         .toList();
-    if (items.isNotEmpty) {
-      _catalogCache[cacheKey] = List<_TvItem>.unmodifiable(items);
-      _evictOldestCatalogCacheEntries();
-      debugPrint(
-        'Juicr TV catalog cache store '
-        'type=$type sort=$sort page=$page count=${items.length}',
-      );
-    }
     return items;
   }
 
@@ -165,9 +213,11 @@ class _TvApi {
     required String sort,
     required int page,
     required String genre,
+    required String year,
     required String search,
     required bool deepSearch,
     required bool preferDefaultCatalog,
+    required bool showMatureContent,
     String? fallbackType,
   }) {
     return [
@@ -176,16 +226,12 @@ class _TvApi {
       sort.trim().toLowerCase(),
       page.toString(),
       genre.trim().toLowerCase(),
+      year.trim(),
       search.trim().toLowerCase(),
       deepSearch ? 'deep' : '',
       preferDefaultCatalog ? 'default' : '',
+      showMatureContent ? 'mature' : 'safe',
     ].join('|');
-  }
-
-  void _evictOldestCatalogCacheEntries() {
-    while (_catalogCache.length > _catalogCacheLimit) {
-      _catalogCache.remove(_catalogCache.keys.first);
-    }
   }
 
   Future<_TvHomeEditorialEdition?> homeEditorial() async {
@@ -193,7 +239,7 @@ class _TvApi {
       final uri = Uri.parse(
         '$_apiBase/home/editorial',
       ).replace(queryParameters: const {'locale': 'en'});
-      final json = await _getJson(uri).timeout(const Duration(seconds: 4));
+      final json = await _getJson(uri).timeout(const Duration(seconds: 12));
       if (json['degraded'] == true || json.containsKey('fallbackReason')) {
         return null;
       }
@@ -270,12 +316,16 @@ class _TvApi {
     }
   }
 
-  Future<List<_TvItem>> recommendations(_TvItem item) async {
+  Future<List<_TvItem>> recommendations(
+    _TvItem item, {
+    bool showMatureContent = false,
+  }) async {
     if (item.type == 'live') return const <_TvItem>[];
     final uri = Uri.parse('$_apiBase/recommendations').replace(
       queryParameters: {
         'type': item.type == 'animation' ? 'movie' : item.type,
         'id': item.id,
+        ...tvMatureCatalogQuery(showMatureContent),
       },
     );
     try {
@@ -295,7 +345,7 @@ class _TvApi {
           )
           .take(12)
           .toList(growable: false);
-      return Future.wait(
+      final hydrated = await Future.wait(
         items.map((candidate) async {
           if ((candidate.logo ?? '').trim().isNotEmpty) return candidate;
           try {
@@ -305,6 +355,14 @@ class _TvApi {
           }
         }),
       );
+      return hydrated
+          .where(
+            (candidate) => tvShouldShowCatalogItem(
+              showMatureContent: showMatureContent,
+              hasMatureContentSignal: candidate.hasMatureContentSignal,
+            ),
+          )
+          .toList(growable: false);
     } catch (error) {
       debugPrint(
         'Juicr TV recommendations unavailable '
@@ -487,12 +545,14 @@ class _TvApi {
 
   Future<List<_PlaybackSession>> playbackSessions(
     _TvItem item, {
+    required _TvSettingsState settings,
     int season = 1,
     int episode = 1,
   }) async {
+    final inventoryGeneration = ++_playbackInventoryGeneration;
     final requestKind = tvPlaybackRequestKindForItemType(item.type);
     Future<_PlaybackSession?>? serverFallbackFuture;
-    if (requestKind != TvPlaybackRequestKind.live) {
+    if (settings.builtInPlayback && requestKind != TvPlaybackRequestKind.live) {
       serverFallbackFuture = _serverPlaybackSession(
         item,
         season: season,
@@ -505,30 +565,203 @@ class _TvApi {
         return null;
       });
     }
-    final nativeSessions = await _nativePlaybackSessions(
-      item,
-      season: season,
-      episode: episode,
+    final rawNativeSessions = settings.builtInPlayback
+        ? await _nativePlaybackSessions(
+            item,
+            season: season,
+            episode: episode,
+          )
+        : const <_PlaybackSession>[];
+    final rawAddOnSessions = requestKind == TvPlaybackRequestKind.live
+        ? const <_PlaybackSession>[]
+        : await _addOnPlaybackSessions(
+            settings.userAddOns,
+            item,
+            settings: settings,
+            season: season,
+            episode: episode,
+            allowP2p: settings.p2pPlaybackActive,
+          );
+    final nativeSessions = _tagPlaybackInventory(
+      rawNativeSessions,
+      generation: inventoryGeneration,
+      family: TvPlaybackCandidateFamily.builtIn,
     );
-    final sessions = <_PlaybackSession>[...nativeSessions];
+    final addOnSessions = _tagPlaybackInventory(
+      rawAddOnSessions,
+      generation: inventoryGeneration,
+      family: TvPlaybackCandidateFamily.addOn,
+    );
+    final sessions = <_PlaybackSession>[];
+    for (final candidate in <_PlaybackSession>[
+      ...addOnSessions,
+      ...nativeSessions,
+    ]) {
+      _appendUniquePlaybackSession(sessions, candidate);
+    }
     if (requestKind == TvPlaybackRequestKind.live) {
       if (sessions.isNotEmpty) return sessions;
       throw const _TvApiException('live_tv_playback_unavailable');
     }
-    final fallbackWait = sessions.isEmpty
-        ? serverFallbackFuture!
-        : serverFallbackFuture!.timeout(
-            const Duration(seconds: 2),
-            onTimeout: () => null,
-          );
+    final fallbackWait = serverFallbackFuture == null
+        ? Future<_PlaybackSession?>.value(null)
+        : sessions.isEmpty
+            ? serverFallbackFuture
+            : serverFallbackFuture.timeout(
+                const Duration(seconds: 2),
+                onTimeout: () => null,
+              );
     final session = await fallbackWait;
     if (session != null) {
-      _appendUniquePlaybackSession(sessions, session);
+      final taggedFallback = _tagPlaybackInventory(
+        <_PlaybackSession>[session],
+        generation: inventoryGeneration,
+        family: TvPlaybackCandidateFamily.fallback,
+      );
+      if (taggedFallback.isNotEmpty) {
+        _appendUniquePlaybackSession(sessions, taggedFallback.single);
+      }
     }
     if (sessions.isNotEmpty) {
       return sessions;
     }
     throw const _TvApiException('no_tv_safe_source');
+  }
+
+  List<_PlaybackSession> _tagPlaybackInventory(
+    List<_PlaybackSession> sessions, {
+    required int generation,
+    required TvPlaybackCandidateFamily family,
+  }) {
+    return tvTagPlaybackCandidateInventory(
+      sessions,
+      generation: generation,
+      family: family,
+      tag: (session, identity, poolGeneration, sourceFamily) =>
+          session.copyWith(
+        candidateId: identity,
+        sourceFamily: sourceFamily.wireValue,
+        sourcePoolGeneration: poolGeneration,
+      ),
+    );
+  }
+
+  Future<List<_PlaybackSession>> _addOnPlaybackSessions(
+    List<_TvUserAddOn> addOns,
+    _TvItem item, {
+    required _TvSettingsState settings,
+    required int season,
+    required int episode,
+    required bool allowP2p,
+  }) async {
+    final active = addOns.where((addOn) => addOn.enabled).toList();
+    if (active.isEmpty) return const <_PlaybackSession>[];
+    final episodic = item.type == 'series' || item.type == 'animation';
+    final requestIds = tvAddonPlaybackRequestIds(
+      id: item.id,
+      tmdbId: item.tmdbId,
+      imdbId: item.imdbId ?? _tvImdbIdForHostedLookup(item),
+      season: episodic ? season : null,
+      episode: episodic ? episode : null,
+    );
+    if (requestIds.isEmpty) return const <_PlaybackSession>[];
+    final type = episodic ? 'series' : 'movie';
+    final sessions = <_PlaybackSession>[];
+    for (final addOn in active) {
+      try {
+        final manifest = await _getJson(
+          Uri.parse(addOn.manifest),
+        ).timeout(const Duration(seconds: 8));
+        if (!_tvManifestSupportsResource(manifest, 'stream') &&
+            !_tvManifestSupportsResource(manifest, 'streams')) {
+          continue;
+        }
+        var found = false;
+        for (final id in requestIds) {
+          for (final resource in const <String>['stream', 'streams']) {
+            if (!_tvManifestSupportsResource(manifest, resource)) continue;
+            for (final uri in _tvAddOnResourceUris(
+              addOn.manifest,
+              resource: resource,
+              type: type,
+              id: id,
+            )) {
+              try {
+                final json = await _getJson(
+                  uri,
+                ).timeout(const Duration(seconds: 18));
+                final candidates = parseTvAddonPlaybackCandidates(
+                  json['streams'] ?? json['items'],
+                  sourceId: 'addon-${addOn.id}',
+                  allowP2p: allowP2p,
+                );
+                for (final candidate in candidates) {
+                  _appendUniquePlaybackSession(
+                    sessions,
+                    _PlaybackSession(
+                      mediaUrl: candidate.mediaUrl,
+                      sourceType: candidate.sourceType,
+                      httpHeaders: candidate.headers,
+                      providerId: _safeTvProviderId(candidate.sourceId),
+                      quality: candidate.quality,
+                      compatibilityRisk: candidate.compatibilityRisk,
+                      sourceClass: candidate.sourceClass,
+                      subtitles: _tvSubtitlesFromJson(candidate.subtitles),
+                      p2pDescriptor: candidate.p2pDescriptor,
+                    ),
+                  );
+                }
+                if (candidates.isNotEmpty) {
+                  found = true;
+                  break;
+                }
+              } catch (_) {
+                continue;
+              }
+            }
+            if (found) break;
+          }
+          if (found) break;
+        }
+      } catch (_) {
+        continue;
+      }
+      if (sessions.length >= 8) break;
+    }
+    debugPrint(
+      'Juicr TV add-on playback lookup count=${sessions.length} '
+      'enabled=${active.length} '
+      'p2pEnabled=$allowP2p '
+      'p2pCount=${sessions.where((session) => session.p2pDescriptor != null).length}',
+    );
+    return tvBoundedRankedPlaybackCandidateOrder(
+      sessions,
+      maxCount: 8,
+      includeP2pFallback: allowP2p,
+      isP2p: (session) => session.p2pDescriptor != null,
+      rankOf: (session) => session.p2pDescriptor != null
+          ? tvP2pPlaybackCandidateRank(
+              mode: settings.p2pSourcePrioritiesEnabled
+                  ? settings.p2pPriorityMode
+                  : kTvP2pPrioritySmartStart,
+              quality: session.quality,
+              label: session.p2pDescriptor?.displayName ?? '',
+              trackerCount: session.p2pDescriptor?.trackerCount ?? 0,
+              avoidRiskyFormats: settings.p2pSourcePrioritiesEnabled
+                  ? settings.p2pAvoidRiskyFormats
+                  : true,
+              sizeLimitMb: settings.p2pSourcePrioritiesEnabled
+                  ? settings.p2pSizeLimitMb
+                  : 0,
+            )
+          : tvPlaybackPreferenceCandidateRank(
+              engine: 'Native',
+              preferredQuality: 'Balanced',
+              type: session.sourceType,
+              quality: session.quality,
+              compatibilityRisk: session.compatibilityRisk,
+            ),
+    );
   }
 
   void _appendUniquePlaybackSession(
@@ -635,12 +868,12 @@ class _TvApi {
     if (defaultSessions.isNotEmpty) {
       results.add(defaultSessions);
     }
-    final stream = Stream<List<_PlaybackSession>>.fromFutures(futures);
     try {
-      await for (final providerSessions in stream.timeout(
+      final providerResults = await Future.wait(futures).timeout(
         const Duration(seconds: 28),
-        onTimeout: (sink) => sink.close(),
-      )) {
+        onTimeout: () => const <List<_PlaybackSession>>[],
+      );
+      for (final providerSessions in providerResults) {
         if (providerSessions.isEmpty) continue;
         results.add(providerSessions);
         final count = results.fold<int>(
@@ -808,6 +1041,12 @@ class _TvApi {
       providerId: _safeTvProviderId(source['provider'] ?? fallbackProviderId),
       quality: _displayTvQuality(source['quality']),
       sourceClass: sourceClass,
+      mirrorGroupId:
+          (source['mirrorGroupId'] ?? source['mirror_group_id'])?.toString(),
+      mirrorRank: _intFromJson(source['mirrorRank'] ?? source['mirror_rank']),
+      sourcePoolVersion:
+          (source['sourcePoolVersion'] ?? source['source_pool_version'])
+              ?.toString(),
       subtitles: _tvSubtitlesFromJson(source['subtitles']),
     );
   }
@@ -820,25 +1059,27 @@ class _TvApi {
 
   String _displayTvQuality(dynamic value) {
     final raw = (value ?? '').toString().trim();
-    if (raw.isEmpty) return 'Auto';
+    if (raw.isEmpty) return 'Unknown';
     final lower = raw.toLowerCase();
-    if (lower == 'auto' || lower == 'unknown' || lower == 'adaptive') {
+    if (lower == 'auto' || lower == 'adaptive') {
       return 'Auto';
     }
+    if (lower == 'unknown') return 'Unknown';
     final resolution = RegExp(
       r'\b(2160|1440|1080|720|576|480|360|240)\s*p\b',
       caseSensitive: false,
     ).firstMatch(raw);
     if (resolution != null) return '${resolution.group(1)}P';
-    final named = switch (lower.replaceAll(RegExp(r'[\s_-]+'), '')) {
-      '4k' || 'uhd' => '2160P',
-      '2k' || 'qhd' => '1440P',
+    final compact = lower.replaceAll(RegExp(r'[\s_-]+'), '');
+    final named = switch (compact) {
+      _ when compact.contains('4k') || compact.contains('uhd') => '2160P',
+      _ when compact.contains('2k') || compact.contains('qhd') => '1440P',
       'fhd' || 'fullhd' => '1080P',
       'hd' => '720P',
       'sd' => '480P',
       _ => '',
     };
-    return named.isEmpty ? 'Auto' : named;
+    return named.isEmpty ? 'Unknown' : named;
   }
 
   String _nativeSourceType(Map<String, dynamic> source, String url) {
@@ -860,6 +1101,8 @@ class _TvApi {
         type == 'dash' ||
         type == 'mpd' ||
         type == 'mp4' ||
+        type == 'video/mp4' ||
+        type == 'application/mp4' ||
         type == 'video';
   }
 
@@ -1173,6 +1416,7 @@ class _TvItem {
     this.directorPeople = const [],
     this.castPeople = const [],
     this.episodes = const [],
+    this.hasMatureContentSignal = false,
   });
 
   factory _TvItem.fromJson(
@@ -1234,6 +1478,7 @@ class _TvItem {
       directorPeople: _TvPersonCredit.fromList(json['director']),
       castPeople: _TvPersonCredit.fromList(json['cast']),
       episodes: _TvEpisode.fromList(json['videos'] ?? json['episodes']),
+      hasMatureContentSignal: tvHasMatureContentSignal(json),
     );
   }
 
@@ -1256,6 +1501,7 @@ class _TvItem {
   final List<_TvPersonCredit> directorPeople;
   final List<_TvPersonCredit> castPeople;
   final List<_TvEpisode> episodes;
+  final bool hasMatureContentSignal;
 
   String get subtitle {
     final parts = [
@@ -1290,6 +1536,33 @@ class _TvItem {
           : directorPeople,
       castPeople: other.castPeople.isNotEmpty ? other.castPeople : castPeople,
       episodes: other.episodes.isNotEmpty ? other.episodes : episodes,
+      hasMatureContentSignal:
+          hasMatureContentSignal || other.hasMatureContentSignal,
+    );
+  }
+
+  _TvItem withArtwork({String? poster, String? background, String? logo}) {
+    return _TvItem(
+      id: id,
+      type: type,
+      title: title,
+      color: color,
+      poster: poster ?? this.poster,
+      background: background ?? this.background,
+      logo: logo ?? this.logo,
+      year: year,
+      tmdbId: tmdbId,
+      imdbId: imdbId,
+      genres: genres,
+      description: description,
+      imdbRating: imdbRating,
+      releaseDate: releaseDate,
+      isUpcoming: isUpcoming,
+      runtime: runtime,
+      directorPeople: directorPeople,
+      castPeople: castPeople,
+      episodes: episodes,
+      hasMatureContentSignal: hasMatureContentSignal,
     );
   }
 
@@ -1314,6 +1587,7 @@ class _TvItem {
       directorPeople: directorPeople,
       castPeople: castPeople,
       episodes: episodes,
+      hasMatureContentSignal: hasMatureContentSignal,
     );
   }
 }
@@ -1322,8 +1596,8 @@ String _tvResolveHostedId(_TvItem item) {
   final tmdbId = item.tmdbId;
   if (tmdbId != null) return tmdbId.toString();
   final raw = item.id.trim();
-  final tmdbMatch = RegExp(r'^tmdb:(\d+)$', caseSensitive: false)
-      .firstMatch(raw);
+  final tmdbMatch =
+      RegExp(r'^tmdb:(\d+)$', caseSensitive: false).firstMatch(raw);
   if (tmdbMatch != null) return tmdbMatch.group(1)!;
   return raw;
 }
@@ -1346,9 +1620,8 @@ String? _imdbIdFromJson(Map<String, dynamic> json) {
   if (direct != null && direct.isNotEmpty) return direct;
   final externalIds = json['external_ids'] ?? json['externalIds'];
   if (externalIds is Map) {
-    final nested = (externalIds['imdb_id'] ?? externalIds['imdbId'])
-        ?.toString()
-        .trim();
+    final nested =
+        (externalIds['imdb_id'] ?? externalIds['imdbId'])?.toString().trim();
     if (nested != null && nested.isNotEmpty) return nested;
   }
   return null;
@@ -1519,7 +1792,7 @@ class _TvSubtitle {
       provider: (json['provider'] ?? json['source'] ?? json['sourceKey'] ?? '')
           .toString()
           .trim(),
-      format: _tvSubtitleFormatFromJson(json, label: label, url: url),
+      format: tvSubtitleFormatFromJson(json, label: label, url: url),
       isDefault: json['isDefault'] == true || json['default'] == true,
       isForced: json['isForced'] == true || json['forced'] == true,
     );
@@ -1548,7 +1821,7 @@ class _TvSubtitle {
   }
 }
 
-String _tvSubtitleFormatFromJson(
+String tvSubtitleFormatFromJson(
   Map<String, dynamic> json, {
   required String label,
   required String url,
@@ -1563,9 +1836,9 @@ String _tvSubtitleFormatFromJson(
       .trim()
       .toLowerCase();
   final candidates = <String>[
-    explicit,
     label.toLowerCase(),
     Uri.tryParse(url)?.path.toLowerCase() ?? url.toLowerCase(),
+    explicit,
   ];
   for (final value in candidates) {
     if (value.isEmpty) continue;
@@ -1801,6 +2074,44 @@ class _TvHomeEditorialEdition {
     return usableRail(hero) || rails.any(usableRail);
   }
 
+  bool get hasCompleteHomeContract {
+    const requiredIds = <String>[
+      'todaySignal',
+      'topSignal',
+      'juicrTopSignal',
+      'savedEditorial',
+      'upcomingEditorial',
+    ];
+    if (editionId.trim().isEmpty ||
+        !RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(editionDate.trim()) ||
+        hero.title.trim().isEmpty ||
+        rails.length != requiredIds.length) {
+      return false;
+    }
+    for (var index = 0; index < requiredIds.length; index += 1) {
+      final rail = rails[index];
+      if (rail.id != requiredIds[index] || rail.title.trim().isEmpty) {
+        return false;
+      }
+    }
+    final rankedRails = rails.take(3);
+    final rankedRolesAreExact = rankedRails.every((rail) {
+      if (rail.kind != 'ranked' || rail.items.isEmpty) return false;
+      for (var index = 0; index < rail.items.length; index += 1) {
+        final item = rail.items[index];
+        if (!item.isUsable || item.rank != index + 1) return false;
+      }
+      return true;
+    });
+    return rankedRolesAreExact &&
+        saved.kind == 'library' &&
+        saved.intent == 'saved_library' &&
+        upcoming.kind == 'catalog' &&
+        upcoming.intent == 'upcoming' &&
+        upcoming.sort == 'upcoming' &&
+        RegExp(r'^\d{4}$').hasMatch(upcoming.year);
+  }
+
   _TvHomeEditorialEdition copyWith({List<_TvHomeEditorialRail>? rails}) {
     return _TvHomeEditorialEdition(
       editionId: editionId,
@@ -1860,7 +2171,9 @@ class _TvHomeEditorialRail {
     this.requireGenreMatch = false,
     this.intent = '',
     this.curationKind = '',
+    this.pageOneOnly = false,
     this.releaseWindow = '',
+    this.year = '',
     this.theme = '',
     this.seasonalWindow = '',
     this.query = '',
@@ -1908,7 +2221,9 @@ class _TvHomeEditorialRail {
       intent: (raw['intent'] ?? '').toString().trim(),
       curationKind:
           (raw['curationKind'] ?? raw['curation_kind'] ?? '').toString().trim(),
+      pageOneOnly: raw['pageOneOnly'] == true,
       releaseWindow: (raw['releaseWindow'] ?? '').toString().trim(),
+      year: (raw['year'] ?? route['year'] ?? '').toString().trim(),
       theme: (raw['theme'] ?? '').toString().trim(),
       seasonalWindow: (raw['seasonalWindow'] ?? '').toString().trim(),
       query: (raw['query'] ?? route['query'] ?? '').toString().trim(),
@@ -1929,7 +2244,9 @@ class _TvHomeEditorialRail {
   final bool requireGenreMatch;
   final String intent;
   final String curationKind;
+  final bool pageOneOnly;
   final String releaseWindow;
+  final String year;
   final String theme;
   final String seasonalWindow;
   final String query;
@@ -1948,7 +2265,9 @@ class _TvHomeEditorialRail {
       'requireGenreMatch': requireGenreMatch,
       'intent': intent,
       'curationKind': curationKind,
+      'pageOneOnly': pageOneOnly,
       'releaseWindow': releaseWindow,
+      'year': year,
       'theme': theme,
       'seasonalWindow': seasonalWindow,
       'query': query,
@@ -1963,6 +2282,7 @@ class _TvHomeEditorialTrendItem {
     required this.title,
     this.tmdbId,
     this.year,
+    this.rank,
   });
 
   factory _TvHomeEditorialTrendItem.fromJson(dynamic json) {
@@ -1973,6 +2293,7 @@ class _TvHomeEditorialTrendItem {
       title: (raw['title'] ?? raw['name'] ?? '').toString().trim(),
       tmdbId: int.tryParse((raw['tmdbId'] ?? raw['tmdb_id'] ?? '').toString()),
       year: _year(raw),
+      rank: _intFromJson(raw['rank']),
     );
   }
 
@@ -1982,6 +2303,10 @@ class _TvHomeEditorialTrendItem {
   final String title;
   final int? tmdbId;
   final String? year;
+  final int? rank;
+
+  bool get isUsable =>
+      type.isNotEmpty && title.isNotEmpty && (tmdbId == null || tmdbId! > 0);
 
   Map<String, dynamic> toJson() {
     return {
@@ -1989,6 +2314,7 @@ class _TvHomeEditorialTrendItem {
       'title': title,
       if (tmdbId != null) 'tmdbId': tmdbId,
       if ((year ?? '').isNotEmpty) 'year': year,
+      if (rank != null) 'rank': rank,
     };
   }
 }
@@ -2023,15 +2349,28 @@ List<_TvHomeEditorialTrendItem> _homeEditorialTrendItems(dynamic value) {
       .toList(growable: false);
 }
 
+int _boundedTvCompatibilityRisk(Object? value) {
+  final parsed = value is int ? value : int.tryParse(value?.toString() ?? '');
+  return (parsed ?? 0).clamp(0, 20);
+}
+
 class _PlaybackSession {
   const _PlaybackSession({
     required this.mediaUrl,
     required this.sourceType,
     required this.httpHeaders,
     this.providerId = '',
-    this.quality = 'Auto',
+    this.quality = 'Unknown',
+    this.compatibilityRisk = 0,
     this.sourceClass = '',
+    this.candidateId = '',
+    this.sourceFamily = '',
+    this.sourcePoolGeneration = 0,
+    this.mirrorGroupId,
+    this.mirrorRank,
+    this.sourcePoolVersion,
     this.subtitles = const <_TvSubtitle>[],
+    this.p2pDescriptor,
   });
 
   final String mediaUrl;
@@ -2039,17 +2378,45 @@ class _PlaybackSession {
   final Map<String, String> httpHeaders;
   final String providerId;
   final String quality;
+  final int compatibilityRisk;
   final String sourceClass;
+  final String candidateId;
+  final String sourceFamily;
+  final int sourcePoolGeneration;
+  final String? mirrorGroupId;
+  final int? mirrorRank;
+  final String? sourcePoolVersion;
   final List<_TvSubtitle> subtitles;
+  final TvP2pStreamDescriptor? p2pDescriptor;
 
+  // ignore: unused_element
   factory _PlaybackSession.fromJson(Map<String, dynamic> json) {
     return _PlaybackSession(
       mediaUrl: (json['mediaUrl'] ?? '').toString(),
       sourceType: (json['sourceType'] ?? '').toString(),
       httpHeaders: _stringMap(json['httpHeaders']),
       providerId: (json['providerId'] ?? '').toString(),
-      quality: (json['quality'] ?? 'Auto').toString(),
+      quality: (json['quality'] ?? 'Unknown').toString(),
+      compatibilityRisk: _boundedTvCompatibilityRisk(json['compatibilityRisk']),
       sourceClass: (json['sourceClass'] ?? '').toString(),
+      candidateId: tvPlaybackCandidateIdentityIsSafe(
+        (json['candidateId'] ?? '').toString(),
+      )
+          ? (json['candidateId'] ?? '').toString()
+          : '',
+      sourceFamily:
+          tvPlaybackCandidateFamilyFromWire(json['sourceFamily'])?.wireValue ??
+              '',
+      sourcePoolGeneration:
+          ((_intFromJson(json['sourcePoolGeneration']) ?? 0) > 0)
+              ? (_intFromJson(json['sourcePoolGeneration']) ?? 0)
+              : 0,
+      mirrorGroupId:
+          (json['mirrorGroupId'] ?? json['mirror_group_id'])?.toString(),
+      mirrorRank: _intFromJson(json['mirrorRank'] ?? json['mirror_rank']),
+      sourcePoolVersion:
+          (json['sourcePoolVersion'] ?? json['source_pool_version'])
+              ?.toString(),
       subtitles: _tvSubtitlesFromJson(json['subtitles']),
     );
   }
@@ -2072,8 +2439,16 @@ class _PlaybackSession {
     Map<String, String>? httpHeaders,
     String? providerId,
     String? quality,
+    int? compatibilityRisk,
     String? sourceClass,
+    String? candidateId,
+    String? sourceFamily,
+    int? sourcePoolGeneration,
+    String? mirrorGroupId,
+    int? mirrorRank,
+    String? sourcePoolVersion,
     List<_TvSubtitle>? subtitles,
+    TvP2pStreamDescriptor? p2pDescriptor,
   }) {
     return _PlaybackSession(
       mediaUrl: mediaUrl ?? this.mediaUrl,
@@ -2081,8 +2456,16 @@ class _PlaybackSession {
       httpHeaders: httpHeaders ?? this.httpHeaders,
       providerId: providerId ?? this.providerId,
       quality: quality ?? this.quality,
+      compatibilityRisk: compatibilityRisk ?? this.compatibilityRisk,
       sourceClass: sourceClass ?? this.sourceClass,
+      candidateId: candidateId ?? this.candidateId,
+      sourceFamily: sourceFamily ?? this.sourceFamily,
+      sourcePoolGeneration: sourcePoolGeneration ?? this.sourcePoolGeneration,
+      mirrorGroupId: mirrorGroupId ?? this.mirrorGroupId,
+      mirrorRank: mirrorRank ?? this.mirrorRank,
+      sourcePoolVersion: sourcePoolVersion ?? this.sourcePoolVersion,
       subtitles: subtitles ?? this.subtitles,
+      p2pDescriptor: p2pDescriptor ?? this.p2pDescriptor,
     );
   }
 
@@ -2093,7 +2476,16 @@ class _PlaybackSession {
       'httpHeaders': httpHeaders,
       'providerId': providerId,
       'quality': quality,
+      'compatibilityRisk': compatibilityRisk,
       'sourceClass': sourceClass,
+      if (candidateId.isNotEmpty) 'candidateId': candidateId,
+      if (sourceFamily.isNotEmpty) 'sourceFamily': sourceFamily,
+      if (sourcePoolGeneration > 0)
+        'sourcePoolGeneration': sourcePoolGeneration,
+      if ((mirrorGroupId ?? '').isNotEmpty) 'mirrorGroupId': mirrorGroupId,
+      if (mirrorRank != null) 'mirrorRank': mirrorRank,
+      if ((sourcePoolVersion ?? '').isNotEmpty)
+        'sourcePoolVersion': sourcePoolVersion,
       'subtitles': subtitles.map((subtitle) => subtitle.toJson()).toList(),
     };
   }
@@ -2108,23 +2500,6 @@ class _TvVerifiedPlaybackSession {
     this.successCount = 1,
     this.failureCount = 0,
   });
-
-  factory _TvVerifiedPlaybackSession.fromJson(Map<String, dynamic> json) {
-    final rawSession = json['session'];
-    return _TvVerifiedPlaybackSession(
-      session: _PlaybackSession.fromJson(
-        rawSession is Map
-            ? Map<String, dynamic>.from(rawSession)
-            : const <String, dynamic>{},
-      ),
-      engineId: (json['engineId'] ?? '').toString(),
-      cachedAt: DateTime.tryParse((json['cachedAt'] ?? '').toString()) ??
-          DateTime.fromMillisecondsSinceEpoch(0),
-      confidence: _intFromJson(json['confidence']) ?? 10,
-      successCount: _intFromJson(json['successCount']) ?? 1,
-      failureCount: _intFromJson(json['failureCount']) ?? 0,
-    );
-  }
 
   final _PlaybackSession session;
   final String engineId;
@@ -2210,6 +2585,14 @@ enum _TvDiscoverySort {
 }
 
 extension _TvDiscoverySortInfo on _TvDiscoverySort {
+  TvLiveTvPlaylist get liveTvPlaylist {
+    return switch (this) {
+      _TvDiscoverySort.newest => TvLiveTvPlaylist.beta,
+      _TvDiscoverySort.featured => TvLiveTvPlaylist.gamma,
+      _ => TvLiveTvPlaylist.alpha,
+    };
+  }
+
   String get label {
     return switch (this) {
       _TvDiscoverySort.popular => 'Popular',
@@ -2255,8 +2638,10 @@ extension _TvDiscoverySortInfo on _TvDiscoverySort {
 
   String subtitleFor(_TvDiscoveryKind kind, String genre) {
     final label = labelFor(kind);
-    if (genre == 'All genres') {
-      return '$label in all genres';
+    if (genre == 'All genres' || genre == 'All countries') {
+      return kind == _TvDiscoveryKind.liveTv && genre == 'All countries'
+          ? '$label in all countries'
+          : '$label in all genres';
     }
     return '$label in $genre';
   }
@@ -2295,7 +2680,7 @@ String _tvDiscoveryLaneKey(
 }) {
   final normalizedGenre = genre.trim().toLowerCase();
   final base = '${kind.name}:${sort.name}';
-  if (normalizedGenre.isEmpty || normalizedGenre == 'all genres') return base;
+  if (tvIsLiveTvRootFilter(genre)) return base;
   return '$base:${normalizedGenre.replaceAll(RegExp(r'[^a-z0-9]+'), '-')}';
 }
 
@@ -2308,10 +2693,27 @@ class _TvDiscoverySelection {
 }
 
 class _TvPlaybackProgress {
-  const _TvPlaybackProgress({required this.position, required this.duration});
+  const _TvPlaybackProgress({
+    required this.position,
+    required this.duration,
+    this.credibleWatched = Duration.zero,
+  });
 
   final Duration position;
   final Duration duration;
+  final Duration credibleWatched;
+}
+
+class _TvPlaybackResult {
+  const _TvPlaybackResult({
+    required this.season,
+    required this.episode,
+    required this.progress,
+  });
+
+  final int season;
+  final int episode;
+  final _TvPlaybackProgress progress;
 }
 
 class _TvPlaybackUnavailable {
@@ -2445,6 +2847,7 @@ int _normalizeTvAccentColor(Object? value) {
 }
 
 const int kTvP2pConsentVersion = 1;
+bool get kTvP2pRuntimeAvailable => TvP2pRuntimeCapability.available;
 const String kTvP2pConsentPhrase = 'I UNDERSTAND';
 const String kTvP2pPrioritySmartStart = 'smartStart';
 const String kTvP2pPriorityQualityFirst = 'qualityFirst';
@@ -2479,6 +2882,7 @@ class _TvSettingsState {
     this.customAccentColor = 0xFF9B6DFF,
     this.textSize = 'Default',
     this.motion = true,
+    this.showMatureContent = false,
     this.playbackEngine = 'Auto',
     this.preferredQuality = 'Balanced',
     this.resumePrompt = true,
@@ -2519,6 +2923,7 @@ class _TvSettingsState {
   final int customAccentColor;
   final String textSize;
   final bool motion;
+  final bool showMatureContent;
   final String playbackEngine;
   final String preferredQuality;
   final bool resumePrompt;
@@ -2569,11 +2974,13 @@ class _TvSettingsState {
   bool get hasP2pConsent =>
       p2pPlaybackConsentAccepted &&
       p2pPlaybackConsentVersion >= kTvP2pConsentVersion;
-  bool get canUseAdvancedP2p => hasUserAddOns && hasP2pConsent;
+  bool get canUseAdvancedP2p =>
+      kTvP2pRuntimeAvailable && hasUserAddOns && hasP2pConsent;
+  bool get p2pPlaybackActive => p2pPlaybackEnabled && canUseAdvancedP2p;
   bool get hasCatalogSource =>
       (defaultSourceConsentAccepted && (builtInCatalog || builtInLiveTv)) ||
       (addOnConsentAccepted && hasUserAddOns);
-  bool get hasPlaybackSource => builtInPlayback;
+  bool get hasPlaybackSource => builtInPlayback || hasUserAddOns;
   bool get hasBuiltInSubtitleSource =>
       defaultSourceConsentAccepted || builtInSubtitles || builtInPlayback;
   bool get hasAddOnSubtitleSource => addOnConsentAccepted && hasUserAddOns;
@@ -2588,14 +2995,18 @@ class _TvSettingsState {
         int.tryParse((json['p2pPlaybackConsentVersion'] ?? '').toString()) ?? 0;
     final hasP2pConsent = json['p2pPlaybackConsentAccepted'] == true &&
         p2pConsentVersion >= kTvP2pConsentVersion;
-    final p2pPlaybackEnabled =
-        json['p2pPlaybackEnabled'] == true && hasP2pConsent && hasEnabledAddOns;
+    final p2pPlaybackEnabled = tvP2pSavedPreferenceEnabled(
+      savedEnabled: json['p2pPlaybackEnabled'] == true,
+      hasConsent: hasP2pConsent,
+      hasEnabledAddOns: hasEnabledAddOns,
+    );
     return _TvSettingsState(
       theme: _normalizeTvTheme(json['theme']),
       accent: _normalizeTvAccent(json['accent']),
       customAccentColor: _normalizeTvAccentColor(json['customAccentColor']),
       textSize: _normalizeTvTextSize(json['textSize']),
       motion: json['motion'] != false,
+      showMatureContent: tvShowMatureContentFromJson(json),
       playbackEngine: (json['playbackEngine'] ?? 'Auto').toString(),
       preferredQuality: (json['preferredQuality'] ?? 'Balanced').toString(),
       resumePrompt: json['resumePrompt'] != false,
@@ -2659,6 +3070,7 @@ class _TvSettingsState {
       'customAccentColor': customAccentColor,
       'textSize': textSize,
       'motion': motion,
+      'showMatureContent': showMatureContent,
       'playbackEngine': playbackEngine,
       'preferredQuality': preferredQuality,
       'resumePrompt': resumePrompt,
@@ -2702,6 +3114,7 @@ class _TvSettingsState {
     int? customAccentColor,
     String? textSize,
     bool? motion,
+    bool? showMatureContent,
     String? playbackEngine,
     String? preferredQuality,
     bool? resumePrompt,
@@ -2757,6 +3170,7 @@ class _TvSettingsState {
       customAccentColor: customAccentColor ?? this.customAccentColor,
       textSize: textSize ?? this.textSize,
       motion: motion ?? this.motion,
+      showMatureContent: showMatureContent ?? this.showMatureContent,
       playbackEngine: playbackEngine ?? this.playbackEngine,
       preferredQuality: preferredQuality ?? this.preferredQuality,
       resumePrompt: resumePrompt ?? this.resumePrompt,

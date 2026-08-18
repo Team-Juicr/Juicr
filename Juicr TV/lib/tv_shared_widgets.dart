@@ -24,6 +24,21 @@ const double _tvDetailsHeroHeight = 386;
 const double _tvDetailsHeroBackdropOverscan = 72;
 const double _tvDetailsHeroBottomBlurHeight = 32;
 
+String tvRemoteCatalogItemLabel({
+  required String title,
+  required String? year,
+  required String? imdbRating,
+}) {
+  final parts = <String>[];
+  final rating = imdbRating?.trim();
+  if (rating != null && rating.isNotEmpty) parts.addAll(['IMDb', rating]);
+  final releaseYear = year?.trim();
+  if (releaseYear != null && releaseYear.isNotEmpty) parts.add(releaseYear);
+  final safeTitle = title.trim();
+  if (safeTitle.isNotEmpty) parts.add(safeTitle);
+  return parts.join('\n');
+}
+
 class _PosterCard extends StatelessWidget {
   const _PosterCard({
     required this.item,
@@ -59,84 +74,93 @@ class _PosterCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _TvFocusable(
-      autoReveal: autoReveal,
-      onPressed: onPressed,
-      focusNode: focusNode,
-      onArrowLeft: onArrowLeft,
-      onArrowRight: onArrowRight,
-      onArrowUp: onArrowUp,
-      onArrowDown: onArrowDown,
-      onFocus: onFocus,
-      builder: (focused) {
-        final contentWidth = width - (_tvPosterFocusGutter * 2);
-        final contentHeight = posterHeight - (_tvPosterFocusGutter * 2);
-        final rating = badgeLabel ?? item.imdbRating?.trim();
-        return SizedBox(
-          width: width,
-          height: posterHeight + 18,
-          child: Center(
-            child: AnimatedScale(
-              scale: focused ? _tvPosterFocusedScale : 1,
-              duration: _tvDuration(130),
-              child: Padding(
-                padding: const EdgeInsets.all(_tvPosterFocusGutter),
-                child: SizedBox(
-                  width: contentWidth,
-                  height: contentHeight,
-                  child: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      Positioned(
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        height: contentHeight,
-                        child: _PosterArtwork(
-                          item: item,
-                          width: contentWidth,
+    return Semantics(
+      button: true,
+      label: tvRemoteCatalogItemLabel(
+        title: item.title,
+        year: item.year,
+        imdbRating: item.imdbRating,
+      ),
+      excludeSemantics: true,
+      child: _TvFocusable(
+        autoReveal: autoReveal,
+        onPressed: onPressed,
+        focusNode: focusNode,
+        onArrowLeft: onArrowLeft,
+        onArrowRight: onArrowRight,
+        onArrowUp: onArrowUp,
+        onArrowDown: onArrowDown,
+        onFocus: onFocus,
+        builder: (focused) {
+          final contentWidth = width - (_tvPosterFocusGutter * 2);
+          final contentHeight = posterHeight - (_tvPosterFocusGutter * 2);
+          final rating = badgeLabel ?? item.imdbRating?.trim();
+          return SizedBox(
+            width: width,
+            height: posterHeight + 18,
+            child: Center(
+              child: AnimatedScale(
+                scale: focused ? _tvPosterFocusedScale : 1,
+                duration: _tvDuration(130),
+                child: Padding(
+                  padding: const EdgeInsets.all(_tvPosterFocusGutter),
+                  child: SizedBox(
+                    width: contentWidth,
+                    height: contentHeight,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Positioned(
+                          top: 0,
+                          left: 0,
+                          right: 0,
                           height: contentHeight,
+                          child: _PosterArtwork(
+                            item: item,
+                            width: contentWidth,
+                            height: contentHeight,
+                          ),
                         ),
-                      ),
-                      if (rating != null && rating.isNotEmpty)
+                        if (rating != null && rating.isNotEmpty)
+                          Positioned(
+                            left: 7,
+                            top: 7,
+                            child: badgeLabel == null
+                                ? _ImdbPill(label: rating)
+                                : _Pill(label: rating),
+                          ),
+                        if (showRank)
+                          Positioned(
+                            right: 7,
+                            bottom: 7,
+                            child: _Pill(label: 'Rank $rank'),
+                          ),
                         Positioned(
-                          left: 7,
-                          top: 7,
-                          child: badgeLabel == null
-                              ? _ImdbPill(label: rating)
-                              : _Pill(label: rating),
-                        ),
-                      if (showRank)
-                        Positioned(
-                          right: 7,
-                          bottom: 7,
-                          child: _Pill(label: 'Rank $rank'),
-                        ),
-                      Positioned(
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        height: contentHeight,
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: focused
-                                  ? _tvFocusBorder
-                                  : const Color(0x22FFFFFF),
-                              width: focused ? 2 : 1,
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          height: contentHeight,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: focused
+                                    ? _tvFocusBorder
+                                    : const Color(0x22FFFFFF),
+                                width: focused ? 2 : 1,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }
@@ -192,13 +216,14 @@ class _ImdbPill extends StatelessWidget {
 }
 
 BoxDecoration get _tvPillDecoration => BoxDecoration(
-  color: const Color(0xA611131A),
-  borderRadius: BorderRadius.circular(999),
-  border: Border.all(color: const Color(0x24FFFFFF)),
-  boxShadow: const [
-    BoxShadow(color: Color(0x52000000), blurRadius: 12, offset: Offset(0, 5)),
-  ],
-);
+      color: const Color(0xA611131A),
+      borderRadius: BorderRadius.circular(999),
+      border: Border.all(color: const Color(0x24FFFFFF)),
+      boxShadow: const [
+        BoxShadow(
+            color: Color(0x52000000), blurRadius: 12, offset: Offset(0, 5)),
+      ],
+    );
 
 class _PosterArtwork extends StatelessWidget {
   const _PosterArtwork({
@@ -232,7 +257,10 @@ class _PosterArtwork extends StatelessWidget {
                   if (loadingProgress == null) return child;
                   return const _TvPosterArtworkFallback();
                 },
-                errorBuilder: (_, __, ___) => const _TvPosterArtworkFallback(),
+                errorBuilder: (_, error, __) {
+                  _reportTvArtworkFailure(error, 'poster');
+                  return const _TvPosterArtworkFallback();
+                },
               ),
       ),
     );
@@ -308,8 +336,8 @@ class _FocusableIconButton extends StatelessWidget {
               border: Border.all(
                 color: focused
                     ? selected
-                          ? Colors.white
-                          : _tvFocusBorder
+                        ? Colors.white
+                        : _tvFocusBorder
                     : Colors.transparent,
                 width: 2,
               ),
@@ -407,8 +435,8 @@ class _TvTextButton extends StatelessWidget {
                   color: active
                       ? Colors.black
                       : enabled
-                      ? _tvTheme.text
-                      : _tvTheme.muted,
+                          ? _tvTheme.text
+                          : _tvTheme.muted,
                   fontWeight: FontWeight.w900,
                   fontSize: fontSize,
                 ),
@@ -422,16 +450,16 @@ class _TvTextButton extends StatelessWidget {
                           color: active
                               ? Colors.black
                               : enabled
-                              ? _tvTheme.text
-                              : _tvTheme.muted,
+                                  ? _tvTheme.text
+                                  : _tvTheme.muted,
                         )
                       : Icon(
                           icon,
                           color: active
                               ? Colors.black
                               : enabled
-                              ? _tvTheme.text
-                              : _tvTheme.muted,
+                                  ? _tvTheme.text
+                                  : _tvTheme.muted,
                           size: iconSize,
                         ),
                   SizedBox(width: horizontalPadding * 0.55),
@@ -692,7 +720,7 @@ class _TvShimmerState extends State<_TvShimmer>
     if (!_tvMotionEnabled) return widget.child;
     final base =
         Color.lerp(_tvTheme.background, const Color(0xFF151619), 0.86) ??
-        const Color(0xFF111214);
+            const Color(0xFF111214);
     final glow = Color.lerp(base, _tvAccentColor, 0.045) ?? base;
     final shine = Color.lerp(base, Colors.white, 0.045) ?? base;
     return AnimatedBuilder(
@@ -962,20 +990,31 @@ class _TvHomeHeroDotsSkeleton extends StatelessWidget {
 }
 
 class _TvCatalogSkeletonGrid extends StatelessWidget {
-  const _TvCatalogSkeletonGrid();
+  const _TvCatalogSkeletonGrid({this.catalogType});
+
+  final String? catalogType;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        const columns = 6;
+        final type = catalogType ?? '';
+        final landscape = tvCatalogUsesLandscapeSkeleton(type);
+        final columns = landscape
+            ? ((constraints.maxWidth + _tvPosterGridGap) /
+                    (_TvHomeLandscapeCard._width + _tvPosterGridGap))
+                .floor()
+                .clamp(1, 8)
+                .toInt()
+            : 6;
         final cardWidth =
             (constraints.maxWidth - (_tvPosterGridGap * (columns - 1))) /
-            columns;
+                columns;
         return _TvCatalogSkeletonRow(
           count: 18,
-          landscape: false,
+          landscape: landscape,
           cardWidth: cardWidth,
+          cardHeight: tvCatalogSkeletonHeight(type: type, width: cardWidth),
         );
       },
     );
@@ -987,17 +1026,20 @@ class _TvCatalogSkeletonRow extends StatelessWidget {
     this.count = 5,
     this.landscape = true,
     this.cardWidth = 220,
+    this.cardHeight,
   });
 
   final int count;
   final bool landscape;
   final double cardWidth;
+  final double? cardHeight;
 
   @override
   Widget build(BuildContext context) {
-    final height = landscape
-        ? cardWidth * _TvHomeLandscapeCard.aspectRatio
-        : cardWidth * 1.42;
+    final height = cardHeight ??
+        (landscape
+            ? cardWidth * _TvHomeLandscapeCard.aspectRatio
+            : cardWidth * 1.42);
     return Wrap(
       spacing: _tvPosterGridGap,
       runSpacing: _tvPosterGridGap,

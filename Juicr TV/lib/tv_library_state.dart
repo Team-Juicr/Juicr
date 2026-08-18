@@ -181,18 +181,23 @@ class TvLibraryStateStore {
   Future<void> updateProgress({
     required String key,
     required int positionMillis,
+    int? credibleWatchedMillis,
     int? durationMillis,
   }) async {
     final progress = TvPlaybackProgress.fromValues(
       key: key,
       positionMillis: positionMillis,
+      credibleWatchedMillis: credibleWatchedMillis,
       durationMillis: durationMillis,
       updatedAtMillis: DateTime.now().millisecondsSinceEpoch,
     );
     if (progress == null) return;
 
     final nextProgress = Map<String, TvPlaybackProgress>.from(state.progress)
-      ..[progress.key] = progress;
+      ..[progress.key] = _mergeImportedProgress(
+        state.progress[progress.key],
+        progress,
+      );
     final completed = Set<String>.from(state.completedKeys);
     if (progress.positionMillis <= 0) {
       completed.remove(progress.key);
@@ -259,19 +264,24 @@ class TvLibraryState {
   }
 
   int get activeWatchSeconds {
+    final normalizedState = normalized();
     var total = 0;
-    for (final progress in normalized().progress.values) {
+    for (final progress in normalizedState.progress.values) {
       final durationMillis = progress.durationMillis;
       if (durationMillis == null || durationMillis <= 0) continue;
       final baseKey = _baseItemKeyFromPlaybackKey(
         progress.key,
-        recentItems.map((item) => item.key),
+        normalizedState.recentItems.map((item) => item.key),
       );
       final snapshot = baseKey == null
           ? null
-          : recentItems.where((item) => item.key == baseKey).firstOrNull;
-      if (_normalizeMobileType(snapshot?.itemType) == 'live') continue;
-      total += (progress.positionMillis / 1000)
+          : normalizedState.recentItems
+              .where((item) => item.key == baseKey)
+              .firstOrNull;
+      final itemType = snapshot?.itemType ??
+          (baseKey == null ? null : _itemKeyParts(baseKey).$1);
+      if (_normalizeMobileType(itemType) == 'live') continue;
+      total += ((progress.credibleWatchedMillis ?? progress.positionMillis) / 1000)
           .round()
           .clamp(0, (durationMillis / 1000).round())
           .toInt();
@@ -343,26 +353,73 @@ class TvLibraryState {
   }
 
   TvLibraryState normalized() {
-    final liked = _limitedStrings(likedKeys, _maxLikedKeys).toSet();
+    final aliases = <String, String>{};
+    final recentByKey = <String, TvRecentItemSnapshot>{};
+    for (final item in recentItems) {
+      final canonicalKey = _canonicalSnapshotKey(item);
+      aliases[item.key] = canonicalKey;
+      final itemId = _safeString(item.itemId);
+      if (itemId != null) {
+        aliases['${_normalizeMobileType(item.itemType)}:$itemId'] = canonicalKey;
+      }
+      final canonicalItem = _snapshotWithKey(item, canonicalKey);
+      final existing = recentByKey[canonicalKey];
+      recentByKey[canonicalKey] = existing == null
+          ? canonicalItem
+          : _mergeRecentSnapshots(existing, canonicalItem);
+    }
+
+    String migrateItemKey(String key) => aliases[key] ?? key;
+    String migratePlaybackKey(String key) {
+      for (final entry in aliases.entries) {
+        if (key == entry.key) return entry.value;
+        if (key.startsWith('${entry.key}:')) {
+          return '${entry.value}:${key.substring(entry.key.length + 1)}';
+        }
+      }
+      return key;
+    }
+
+    final liked = _limitedStrings(
+      likedKeys.map((key) => migrateItemKey(key)),
+      _maxLikedKeys,
+    ).toSet();
     final completed = _limitedStrings(
-      completedKeys,
+      completedKeys.map((key) => migratePlaybackKey(key)),
       _maxCompletedMarkers,
     ).toSet();
     final listsById = <String, TvLibraryList>{};
     for (final list in libraryLists) {
-      listsById[list.id] = list.normalized();
+      listsById[list.id] = TvLibraryList(
+        id: list.id,
+        name: list.name,
+        itemKeys: list.itemKeys.map(migrateItemKey).toList(growable: false),
+        createdAtMillis: list.createdAtMillis,
+        updatedAtMillis: list.updatedAtMillis,
+      ).normalized();
     }
     final lists = listsById.values.toList(growable: false)
       ..sort((a, b) => b.updatedAtMillis.compareTo(a.updatedAtMillis));
 
-    final recentByKey = <String, TvRecentItemSnapshot>{};
-    for (final item in recentItems) {
-      recentByKey[item.key] = item;
-    }
     final recent = recentByKey.values.toList(growable: false)
       ..sort((a, b) => b.updatedAtMillis.compareTo(a.updatedAtMillis));
 
-    final progressValues = progress.values.toList(growable: false)
+    final migratedProgress = <String, TvPlaybackProgress>{};
+    for (final entry in progress.values) {
+      final migratedKey = migratePlaybackKey(entry.key);
+      final migrated = TvPlaybackProgress(
+        key: migratedKey,
+        positionMillis: entry.positionMillis,
+        credibleWatchedMillis: entry.credibleWatchedMillis,
+        durationMillis: entry.durationMillis,
+        updatedAtMillis: entry.updatedAtMillis,
+      );
+      migratedProgress[migratedKey] = _mergeImportedProgress(
+        migratedProgress[migratedKey],
+        migrated,
+      );
+    }
+    final progressValues = migratedProgress.values.toList(growable: false)
       ..sort((a, b) => b.updatedAtMillis.compareTo(a.updatedAtMillis));
     final limitedProgress = <String, TvPlaybackProgress>{};
     for (final entry in progressValues.take(_maxProgressEntries)) {
@@ -435,6 +492,10 @@ class TvLibraryState {
             0,
             durationSeconds,
           );
+      final credibleWatchedSeconds =
+          ((progress.credibleWatchedMillis ?? progress.positionMillis) / 1000)
+              .round()
+              .clamp(0, durationSeconds);
       final progressFraction =
           (watchedSeconds / durationSeconds).clamp(0.0, 1.0).toDouble();
       final updatedAt = DateTime.fromMillisecondsSinceEpoch(
@@ -447,7 +508,7 @@ class TvLibraryState {
             (snapshot?.title ?? item['name'] ?? 'Continue watching').toString(),
         'subtitle': _subtitleForSnapshot(snapshot),
         'watchedSeconds': watchedSeconds,
-        'credibleWatchedSeconds': watchedSeconds,
+        'credibleWatchedSeconds': credibleWatchedSeconds,
         'durationSeconds': durationSeconds,
         'progress': progressFraction,
         'updatedAt': updatedAt.toIso8601String(),
@@ -459,7 +520,7 @@ class TvLibraryState {
           'title': entry['title'],
           'subtitle': entry['subtitle'],
           'watchedSeconds': watchedSeconds,
-          'credibleWatchedSeconds': watchedSeconds,
+          'credibleWatchedSeconds': credibleWatchedSeconds,
           'durationSeconds': durationSeconds,
           'completedAt': updatedAt.toIso8601String(),
           'completionCount': 1,
@@ -489,35 +550,49 @@ class TvLibraryState {
     final recentByKey = {for (final item in recentItems) item.key: item};
     final nextProgress = Map<String, TvPlaybackProgress>.from(progress);
     final nextCompleted = Set<String>.from(completedKeys);
+    void mergeSnapshot(TvRecentItemSnapshot snapshot) {
+      final existing = recentByKey[snapshot.key];
+      recentByKey[snapshot.key] = existing == null
+          ? snapshot
+          : _mergeRecentSnapshots(existing, snapshot);
+    }
 
     for (final item in _safeMapList(backup['saved'])) {
       final snapshot = _snapshotFromMobileItem(item);
       if (snapshot == null) continue;
       nextLiked.add(snapshot.key);
-      recentByKey[snapshot.key] = snapshot;
+      mergeSnapshot(snapshot);
     }
 
     for (final rawList in _safeMapList(backup['lists'])) {
       final list = TvLibraryList.fromMobileBackupJson(rawList);
       if (list == null) continue;
-      nextLists[list.id] = list;
-      nextLiked.addAll(list.itemKeys);
+      final existing = nextLists[list.id];
+      final acceptImportedList = existing == null ||
+          list.updatedAtMillis > existing.updatedAtMillis;
+      if (acceptImportedList) {
+        nextLists[list.id] = list;
+        nextLiked.addAll(list.itemKeys);
+      }
     }
 
     for (final entry in _safeMapList(backup['continueWatching'])) {
       final imported = _progressFromMobileEntry(entry, completed: false);
       if (imported == null) continue;
-      nextProgress[imported.progress.key] = imported.progress;
-      nextCompleted.remove(imported.progress.key);
-      recentByKey[imported.snapshot.key] = imported.snapshot;
+      final local = nextProgress[imported.progress.key];
+      final merged = _mergeImportedProgress(local, imported.progress);
+      nextProgress[imported.progress.key] = merged;
+      mergeSnapshot(imported.snapshot);
     }
 
     for (final entry in _safeMapList(backup['completedWatching'])) {
       final imported = _progressFromMobileEntry(entry, completed: true);
       if (imported == null) continue;
-      nextProgress[imported.progress.key] = imported.progress;
+      final local = nextProgress[imported.progress.key];
+      final merged = _mergeImportedProgress(local, imported.progress);
+      nextProgress[imported.progress.key] = merged;
       nextCompleted.add(imported.progress.key);
-      recentByKey[imported.snapshot.key] = imported.snapshot;
+      mergeSnapshot(imported.snapshot);
     }
 
     return copyWith(
@@ -528,6 +603,37 @@ class TvLibraryState {
       completedKeys: nextCompleted,
     ).normalized();
   }
+}
+
+TvPlaybackProgress _mergeImportedProgress(
+  TvPlaybackProgress? local,
+  TvPlaybackProgress imported,
+) {
+  if (local == null) return imported;
+  final preferred = imported.positionMillis > local.positionMillis
+      ? imported
+      : local;
+  return TvPlaybackProgress(
+    key: preferred.key,
+    positionMillis: preferred.positionMillis,
+    credibleWatchedMillis: _maxNullableInt(
+      local.credibleWatchedMillis,
+      imported.credibleWatchedMillis,
+    ),
+    durationMillis: _maxNullableInt(
+      local.durationMillis,
+      imported.durationMillis,
+    ),
+    updatedAtMillis: local.updatedAtMillis >= imported.updatedAtMillis
+        ? local.updatedAtMillis
+        : imported.updatedAtMillis,
+  );
+}
+
+int? _maxNullableInt(int? first, int? second) {
+  if (first == null) return second;
+  if (second == null) return first;
+  return first >= second ? first : second;
 }
 
 class TvLibraryList {
@@ -552,17 +658,23 @@ class TvLibraryList {
     if (id == null || createdAtMillis == null || updatedAtMillis == null) {
       return null;
     }
-    final rawItems = json['itemKeys'] is List
-        ? json['itemKeys'] as List
-        : json['itemIds'] is List
-            ? json['itemIds'] as List
-            : json['items'] is List
-                ? json['items'] as List
-                : const [];
+    final rawItems = json.containsKey('itemKeys')
+        ? json['itemKeys']
+        : json.containsKey('itemIds')
+            ? json['itemIds']
+            : json['items'];
+    if (rawItems is! List) return null;
+    final itemKeys = <String>[];
+    for (final item in rawItems) {
+      if (item is! String) return null;
+      final itemKey = _safeString(item);
+      if (itemKey == null) return null;
+      itemKeys.add(itemKey);
+    }
     return TvLibraryList(
       id: id,
       name: (json['name'] ?? '').toString(),
-      itemKeys: rawItems.map((item) => item.toString()).toList(),
+      itemKeys: itemKeys,
       createdAtMillis: createdAtMillis,
       updatedAtMillis: updatedAtMillis,
     ).normalized();
@@ -571,28 +683,33 @@ class TvLibraryList {
   static TvLibraryList? fromMobileBackupJson(Map<String, Object?> json) {
     final id = _safeString(json['id']);
     if (id == null) return null;
-    final createdAt = DateTime.tryParse((json['createdAt'] ?? '').toString()) ??
+    final createdAt = _strictMobileTimestamp(json['createdAt']) ??
         DateTime.fromMillisecondsSinceEpoch(
           _safeNonNegativeInt(json['createdAtMillis']) ?? 0,
         );
-    final updatedAt = DateTime.tryParse((json['updatedAt'] ?? '').toString()) ??
-        DateTime.fromMillisecondsSinceEpoch(
-          _safeNonNegativeInt(json['updatedAtMillis']) ??
-              createdAt.millisecondsSinceEpoch,
-        );
-    final rawItems = json['itemIds'] is List
-        ? json['itemIds'] as List
-        : json['itemKeys'] is List
-            ? json['itemKeys'] as List
-            : json['items'] is List
-                ? json['items'] as List
-                : const [];
+    final updatedAtMillis =
+        _strictMobileTimestamp(json['updatedAt'])?.millisecondsSinceEpoch ??
+            _safeNonNegativeInt(json['updatedAtMillis']);
+    if (updatedAtMillis == null || updatedAtMillis <= 0) return null;
+    final rawItems = json.containsKey('itemIds')
+        ? json['itemIds']
+        : json.containsKey('itemKeys')
+            ? json['itemKeys']
+            : json['items'];
+    if (rawItems is! List) return null;
+    final itemKeys = <String>[];
+    for (final item in rawItems) {
+      if (item is! String) return null;
+      final itemKey = _safeString(item);
+      if (itemKey == null) return null;
+      itemKeys.add(itemKey);
+    }
     return TvLibraryList(
       id: id,
       name: (json['name'] ?? '').toString(),
-      itemKeys: rawItems.map((item) => item.toString()).toList(),
+      itemKeys: itemKeys,
       createdAtMillis: createdAt.millisecondsSinceEpoch,
-      updatedAtMillis: updatedAt.millisecondsSinceEpoch,
+      updatedAtMillis: updatedAtMillis,
     ).normalized();
   }
 
@@ -749,12 +866,14 @@ class TvPlaybackProgress {
   const TvPlaybackProgress({
     required this.key,
     required this.positionMillis,
+    this.credibleWatchedMillis,
     this.durationMillis,
     required this.updatedAtMillis,
   });
 
   final String key;
   final int positionMillis;
+  final int? credibleWatchedMillis;
   final int? durationMillis;
   final int updatedAtMillis;
 
@@ -767,6 +886,7 @@ class TvPlaybackProgress {
   static TvPlaybackProgress? fromValues({
     required String key,
     required int positionMillis,
+    int? credibleWatchedMillis,
     int? durationMillis,
     int? updatedAtMillis,
   }) {
@@ -776,11 +896,15 @@ class TvPlaybackProgress {
     if (normalizedKey == null || normalizedPosition == null) return null;
 
     final normalizedDuration = _safePositiveInt(durationMillis);
+    final normalizedCredible = _safeNonNegativeInt(credibleWatchedMillis);
     return TvPlaybackProgress(
       key: normalizedKey,
       positionMillis: normalizedDuration == null
           ? normalizedPosition
           : normalizedPosition.clamp(0, normalizedDuration).toInt(),
+      credibleWatchedMillis: normalizedDuration == null
+          ? normalizedCredible
+          : normalizedCredible?.clamp(0, normalizedDuration).toInt(),
       durationMillis: normalizedDuration,
       updatedAtMillis:
           normalizedUpdatedAt ?? DateTime.now().millisecondsSinceEpoch,
@@ -791,6 +915,7 @@ class TvPlaybackProgress {
     return TvPlaybackProgress.fromValues(
       key: (json['key'] ?? '').toString(),
       positionMillis: _safeNonNegativeInt(json['positionMillis']) ?? -1,
+      credibleWatchedMillis: _safeNonNegativeInt(json['credibleWatchedMillis']),
       durationMillis: _safePositiveInt(json['durationMillis']),
       updatedAtMillis: _safeNonNegativeInt(json['updatedAtMillis']),
     );
@@ -800,6 +925,8 @@ class TvPlaybackProgress {
     return <String, Object?>{
       'key': key,
       'positionMillis': positionMillis,
+      if (credibleWatchedMillis != null)
+        'credibleWatchedMillis': credibleWatchedMillis,
       if (durationMillis != null) 'durationMillis': durationMillis,
       'updatedAtMillis': updatedAtMillis,
     };
@@ -906,8 +1033,8 @@ Map<String, Object?>? _mobileItemJsonForKey(
     'logo': snapshot?.logo,
     if (snapshot?.year != null) 'year': snapshot!.year,
     'releaseDate': null,
-    'tmdb_id': null,
-    'imdb_id': null,
+    'tmdb_id': snapshot?.tmdbId,
+    'imdb_id': snapshot?.imdbId,
     'genres': const <Object?>[],
     'description': null,
     'imdbRating': null,
@@ -978,8 +1105,11 @@ TvRecentItemSnapshot? _snapshotFromMobileItem(
   final id = _safeString(item['id']);
   final title = _safeString(item['name'] ?? item['title']);
   if (id == null || title == null) return null;
+  final tmdbId = _safePositiveInt(
+    item['tmdbId'] ?? item['tmdb_id'] ?? item['moviedb_id'],
+  );
   return TvRecentItemSnapshot(
-    key: '$type:$id',
+    key: _canonicalImportedItemKey(type: type, id: id, tmdbId: tmdbId),
     itemId: id,
     itemType: type,
     title: title,
@@ -988,12 +1118,96 @@ TvRecentItemSnapshot? _snapshotFromMobileItem(
     background: _safeString(
         item['background'] ?? item['backdrop'] ?? item['backdropUrl']),
     logo: _safeString(item['logo'] ?? item['logoUrl'] ?? item['titleLogo']),
-    tmdbId: _safePositiveInt(
-      item['tmdbId'] ?? item['tmdb_id'] ?? item['moviedb_id'],
-    ),
+    tmdbId: tmdbId,
     imdbId: _safeString(item['imdbId'] ?? item['imdb_id']),
-    updatedAtMillis: updatedAtMillis ?? DateTime.now().millisecondsSinceEpoch,
+    updatedAtMillis: updatedAtMillis ??
+        _safeNonNegativeInt(item['updatedAtMillis']) ??
+        _strictMobileTimestamp(item['updatedAt'])?.millisecondsSinceEpoch ??
+        0,
   );
+}
+
+String _canonicalSnapshotKey(TvRecentItemSnapshot item) {
+  final type = _normalizeMobileType(item.itemType);
+  final itemId = _safeString(item.itemId);
+  if (type == 'live') return itemId == null ? item.key : 'live:$itemId';
+  final tmdbId = _safePositiveInt(item.tmdbId);
+  return tmdbId == null ? item.key : '$type:tmdb:$tmdbId';
+}
+
+TvRecentItemSnapshot _snapshotWithKey(
+  TvRecentItemSnapshot item,
+  String key,
+) {
+  return TvRecentItemSnapshot(
+    key: key,
+    itemId: item.itemId,
+    itemType: item.itemType,
+    title: item.title,
+    year: item.year,
+    poster: item.poster,
+    background: item.background,
+    logo: item.logo,
+    tmdbId: item.tmdbId,
+    imdbId: item.imdbId,
+    updatedAtMillis: item.updatedAtMillis,
+  );
+}
+
+TvRecentItemSnapshot _mergeRecentSnapshots(
+  TvRecentItemSnapshot first,
+  TvRecentItemSnapshot second,
+) {
+  final newer = second.updatedAtMillis >= first.updatedAtMillis ? second : first;
+  final older = identical(newer, second) ? first : second;
+  return TvRecentItemSnapshot(
+    key: newer.key,
+    itemId: newer.itemId ?? older.itemId,
+    itemType: newer.itemType ?? older.itemType,
+    title: newer.title ?? older.title,
+    year: newer.year ?? older.year,
+    poster: newer.poster ?? older.poster,
+    background: newer.background ?? older.background,
+    logo: newer.logo ?? older.logo,
+    tmdbId: newer.tmdbId ?? older.tmdbId,
+    imdbId: newer.imdbId ?? older.imdbId,
+    updatedAtMillis: newer.updatedAtMillis,
+  );
+}
+
+DateTime? _strictMobileTimestamp(Object? rawValue) {
+  final value = _safeString(rawValue);
+  if (value == null) return null;
+  final match = RegExp(
+    r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})'
+    r'(?:\.(\d{1,6}))?(?:Z|([+-])(\d{2}):(\d{2}))?$',
+  ).firstMatch(value);
+  if (match == null) return null;
+
+  final year = int.parse(match.group(1)!);
+  final month = int.parse(match.group(2)!);
+  final day = int.parse(match.group(3)!);
+  final hour = int.parse(match.group(4)!);
+  final minute = int.parse(match.group(5)!);
+  final second = int.parse(match.group(6)!);
+  final offsetHour = int.tryParse(match.group(9) ?? '0') ?? 0;
+  final offsetMinute = int.tryParse(match.group(10) ?? '0') ?? 0;
+  if (year < 1 ||
+      month < 1 ||
+      month > 12 ||
+      hour > 23 ||
+      minute > 59 ||
+      second > 59 ||
+      offsetHour > 23 ||
+      offsetMinute > 59) {
+    return null;
+  }
+  final nextMonth = month == 12
+      ? DateTime.utc(year + 1, 1, 1)
+      : DateTime.utc(year, month + 1, 1);
+  final maxDay = nextMonth.subtract(const Duration(days: 1)).day;
+  if (day < 1 || day > maxDay) return null;
+  return DateTime.tryParse(value);
 }
 
 ({TvRecentItemSnapshot snapshot, TvPlaybackProgress progress})?
@@ -1004,24 +1218,25 @@ TvRecentItemSnapshot? _snapshotFromMobileItem(
   final key = _safeString(entry['key']);
   final item = entry['item'];
   if (key == null || item is! Map) return null;
-  final updatedAt = DateTime.tryParse(
-        (completed ? entry['completedAt'] : entry['updatedAt'])?.toString() ??
-            '',
+  final updatedAt = _strictMobileTimestamp(
+        completed ? entry['completedAt'] : entry['updatedAt'],
       ) ??
-      DateTime.now();
+      DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
   final snapshot = _snapshotFromMobileItem(
     Map<String, Object?>.from(item),
     updatedAtMillis: updatedAt.millisecondsSinceEpoch,
   );
   if (snapshot == null) return null;
   final playbackKey = _tvPlaybackKeyFromMobileProgressKey(snapshot, key);
-  final watchedSeconds = _safeNonNegativeInt(entry['watchedSeconds']) ??
-      _safeNonNegativeInt(entry['credibleWatchedSeconds']) ??
-      0;
+  final watchedSeconds = _safeNonNegativeInt(entry['watchedSeconds']) ?? 0;
+  final credibleWatchedSeconds =
+      _safeNonNegativeInt(entry['credibleWatchedSeconds']);
   final durationSeconds = _safePositiveInt(entry['durationSeconds']);
   final progress = TvPlaybackProgress.fromValues(
     key: playbackKey,
     positionMillis: watchedSeconds * 1000,
+    credibleWatchedMillis:
+        credibleWatchedSeconds == null ? null : credibleWatchedSeconds * 1000,
     durationMillis: durationSeconds == null ? null : durationSeconds * 1000,
     updatedAtMillis: updatedAt.millisecondsSinceEpoch,
   );
@@ -1035,14 +1250,39 @@ String _tvPlaybackKeyFromMobileProgressKey(
 ) {
   final itemKey = snapshot.key;
   final itemId = snapshot.itemId?.trim() ?? '';
+  final itemType = _normalizeMobileType(snapshot.itemType);
+  final legacyTypedItemKey = itemId.isEmpty ? '' : '$itemType:$itemId';
   final key = mobileKey.trim();
   if (key.isEmpty) return itemKey;
   if (key == itemKey || key.startsWith('$itemKey:')) return key;
+  if (legacyTypedItemKey.isNotEmpty) {
+    if (key == legacyTypedItemKey) return itemKey;
+    if (key.startsWith('$legacyTypedItemKey:')) {
+      return '$itemKey:${key.substring(legacyTypedItemKey.length + 1)}';
+    }
+  }
   if (itemId.isNotEmpty) {
     if (key == itemId) return itemKey;
     if (key.startsWith('$itemId:')) {
       return '$itemKey:${key.substring(itemId.length + 1)}';
     }
   }
-  return key;
+  final parts = key.split(':');
+  if (parts.length >= 3) {
+    final season = int.tryParse(parts[parts.length - 2]);
+    final episode = int.tryParse(parts.last);
+    if (season != null && season > 0 && episode != null && episode > 0) {
+      return '$itemKey:$season:$episode';
+    }
+  }
+  return itemKey;
+}
+
+String _canonicalImportedItemKey({
+  required String type,
+  required String id,
+  required int? tmdbId,
+}) {
+  if (type == 'live' || tmdbId == null) return '$type:$id';
+  return '$type:tmdb:$tmdbId';
 }
