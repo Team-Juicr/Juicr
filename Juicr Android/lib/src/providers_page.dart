@@ -14,6 +14,7 @@ import 'catalog_item.dart';
 import 'diagnostic_log.dart';
 import 'juicr_bottom_sheet.dart';
 import 'motion.dart';
+import 'native_app_updater.dart';
 import 'p2p_indexer_connectors.dart';
 import 'p2p_stream_bridge.dart';
 import 'playback_provider.dart';
@@ -80,6 +81,7 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     AppState.settingsIntent.addListener(_handleSettingsIntent);
     AppState.nativeProviders.addListener(_handleNativeProvidersChanged);
+    unawaited(NativeAppUpdater.instance.initialize());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_loadNativeProvidersFromConfig());
       Future<void>.delayed(const Duration(milliseconds: 900), () {
@@ -3853,8 +3855,50 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Future<void> _openReleaseDownload(_ReleaseUpdatesSnapshot data) {
-    return _openQuickLink('Download', data.downloadUri.toString());
+  Future<void> _openReleaseDownload(_ReleaseUpdatesSnapshot data) async {
+    try {
+      final started = await NativeAppUpdater.instance.startRelease(data.latest);
+      if (!mounted) return;
+      if (started) {
+        _snack('Update download started.');
+        return;
+      }
+    } catch (_) {
+      if (!mounted) return;
+    }
+    if (mounted) {
+      _snack(
+        'Native update is unavailable. You can open the release page instead.',
+      );
+    }
+  }
+
+  Future<void> _openReleasePage(_ReleaseUpdatesSnapshot data) =>
+      _openQuickLink('Release page', data.downloadUri.toString());
+
+  Future<void> _handleNativeUpdateAction(
+    _ReleaseUpdatesSnapshot data,
+    NativeUpdateSnapshot native,
+  ) async {
+    switch (native.stage) {
+      case NativeUpdateStage.downloading:
+        await NativeAppUpdater.instance.pause();
+      case NativeUpdateStage.paused:
+        await NativeAppUpdater.instance.resume();
+      case NativeUpdateStage.readyToInstall:
+        await NativeAppUpdater.instance.install();
+      case NativeUpdateStage.awaitingPermission:
+        await NativeAppUpdater.instance.openInstallPermissionSettings();
+      case NativeUpdateStage.verifying:
+      case NativeUpdateStage.installing:
+      case NativeUpdateStage.awaitingConfirmation:
+        return;
+      case NativeUpdateStage.idle:
+      case NativeUpdateStage.available:
+      case NativeUpdateStage.installed:
+      case NativeUpdateStage.failed:
+        await _openReleaseDownload(data);
+    }
   }
 
   Future<void> _showReleaseChangelog(ReleaseUpdateInfo release) async {
@@ -3983,13 +4027,33 @@ class _SettingsPageState extends State<SettingsPage> {
                           future: _releaseUpdatesFuture,
                           builder: (context, snapshot) {
                             final data = snapshot.data;
-                            return _UpdateCheckButton(
-                              checking: checking,
-                              updateAvailable: data?.updateAvailable ?? false,
-                              onPressed: _refreshReleaseUpdates,
-                              onDownloadUpdate: data == null
-                                  ? _refreshReleaseUpdates
-                                  : () => _openReleaseDownload(data),
+                            return AnimatedBuilder(
+                              animation: NativeAppUpdater.instance,
+                              builder: (context, _) {
+                                final native =
+                                    NativeAppUpdater.instance.snapshot;
+                                return _UpdateCheckButton(
+                                  checking: checking,
+                                  updateAvailable:
+                                      data?.updateAvailable ?? false,
+                                  nativeSnapshot: native,
+                                  onPressed: _refreshReleaseUpdates,
+                                  onDownloadUpdate: data == null
+                                      ? _refreshReleaseUpdates
+                                      : () => _handleNativeUpdateAction(
+                                            data,
+                                            native,
+                                          ),
+                                  onCancelDownload: () =>
+                                      NativeAppUpdater.instance.cancel(),
+                                  onDeleteDownload: () => NativeAppUpdater
+                                      .instance
+                                      .deleteDownload(),
+                                  onOpenReleasePage: data == null
+                                      ? null
+                                      : () => _openReleasePage(data),
+                                );
+                              },
                             );
                           },
                         );
@@ -13392,40 +13456,113 @@ class _UpdateCheckButton extends StatelessWidget {
   const _UpdateCheckButton({
     required this.checking,
     required this.updateAvailable,
+    required this.nativeSnapshot,
     required this.onPressed,
     required this.onDownloadUpdate,
+    required this.onCancelDownload,
+    required this.onDeleteDownload,
+    required this.onOpenReleasePage,
   });
 
   final bool checking;
   final bool updateAvailable;
+  final NativeUpdateSnapshot nativeSnapshot;
   final VoidCallback onPressed;
   final VoidCallback onDownloadUpdate;
+  final VoidCallback onCancelDownload;
+  final VoidCallback onDeleteDownload;
+  final VoidCallback? onOpenReleasePage;
 
   @override
   Widget build(BuildContext context) {
+    final nativeActive = updateAvailable &&
+        nativeSnapshot.stage != NativeUpdateStage.idle &&
+        nativeSnapshot.stage != NativeUpdateStage.available &&
+        nativeSnapshot.stage != NativeUpdateStage.installed;
     final label = checking
         ? 'Checking'
-        : updateAvailable
-            ? 'Download update'
-            : 'Check for updates';
+        : nativeActive
+            ? switch (nativeSnapshot.stage) {
+                NativeUpdateStage.downloading =>
+                  'Pause download (${nativeSnapshot.progressPermille ~/ 10}%)',
+                NativeUpdateStage.paused => 'Resume download',
+                NativeUpdateStage.verifying => 'Verifying update',
+                NativeUpdateStage.readyToInstall => 'Install update',
+                NativeUpdateStage.awaitingPermission => 'Allow installation',
+                NativeUpdateStage.installing => 'Installing update',
+                NativeUpdateStage.awaitingConfirmation =>
+                  'Confirm installation',
+                NativeUpdateStage.failed => 'Retry download',
+                _ => 'Download update',
+              }
+            : updateAvailable
+                ? 'Download update'
+                : 'Check for updates';
+    final nativeBusy = nativeSnapshot.stage == NativeUpdateStage.verifying ||
+        nativeSnapshot.stage == NativeUpdateStage.installing ||
+        nativeSnapshot.stage == NativeUpdateStage.awaitingConfirmation;
+    final canCancel = nativeSnapshot.stage == NativeUpdateStage.downloading ||
+        nativeSnapshot.stage == NativeUpdateStage.paused;
+    final canDelete =
+        nativeSnapshot.stage == NativeUpdateStage.readyToInstall ||
+            nativeSnapshot.stage == NativeUpdateStage.failed;
     return Semantics(
       button: true,
       enabled: !checking,
       label: label,
-      child: SizedBox(
-        width: double.infinity,
-        child: FilledButton(
-          onPressed: checking
-              ? null
-              : updateAvailable
-                  ? onDownloadUpdate
-                  : onPressed,
-          style: FilledButton.styleFrom(
-            minimumSize: const Size(0, 40),
-            fixedSize: const Size.fromHeight(40),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (nativeSnapshot.stage == NativeUpdateStage.downloading) ...[
+            LinearProgressIndicator(
+              value: nativeSnapshot.progressPermille / 1000,
+            ),
+            const SizedBox(height: 8),
+          ],
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: checking || nativeBusy
+                  ? null
+                  : updateAvailable
+                      ? onDownloadUpdate
+                      : onPressed,
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(0, 40),
+                fixedSize: const Size.fromHeight(40),
+              ),
+              child: Text(label),
+            ),
           ),
-          child: Text(label),
-        ),
+          if (canCancel || canDelete || onOpenReleasePage != null) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                if (canCancel)
+                  TextButton.icon(
+                    onPressed: onCancelDownload,
+                    icon: const Icon(Icons.close_rounded),
+                    label: const Text('Cancel download'),
+                  ),
+                if (canDelete)
+                  TextButton.icon(
+                    onPressed: onDeleteDownload,
+                    icon: const Icon(Icons.delete_outline_rounded),
+                    label: const Text('Delete download'),
+                  ),
+                if (onOpenReleasePage case final openReleasePage?)
+                  TextButton.icon(
+                    onPressed: openReleasePage,
+                    icon: const Icon(Icons.open_in_new_rounded),
+                    label: const Text('Open release page'),
+                  ),
+              ],
+            ),
+          ],
+        ],
       ),
     );
   }

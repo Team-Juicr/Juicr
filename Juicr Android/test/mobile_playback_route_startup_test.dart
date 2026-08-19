@@ -265,6 +265,30 @@ void main() {
     switchOwner.dispose();
   });
 
+  test('episode transition owns a fresh budget after route startup expires',
+      () async {
+    final startupOwner = MobilePlaybackRouteStartupOwner(
+      generation: 21,
+      startedAt: DateTime(2026, 8, 3),
+      elapsed: () => const Duration(minutes: 4),
+    );
+    final episodeOwner = MobilePlaybackRouteStartupOwner(
+      generation: 22,
+      startedAt: DateTime(2026, 8, 3, 0, 4),
+      elapsed: () => Duration.zero,
+    );
+
+    expect(startupOwner.remainingWorkBudget, Duration.zero);
+    expect(episodeOwner.remainingWorkBudget, greaterThan(Duration.zero));
+    expect(
+      await episodeOwner.runWork<String>((_) async => 'episode-ready'),
+      'episode-ready',
+    );
+
+    startupOwner.dispose();
+    episodeOwner.dispose();
+  });
+
   test('post-startup transaction owner supersedes the completed route owner',
       () {
     expect(

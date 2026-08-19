@@ -7,6 +7,7 @@ abstract interface class MobileLibVlcDriver {
   Stream<MobileLibVlcDriverSnapshot> get snapshots;
   Future<void> initialize();
   Future<void> play();
+  Future<void> ensureSelectedAudioTrack();
   Future<void> pause();
   Future<void> seekTo(Duration position);
   Future<void> dispose();
@@ -400,6 +401,8 @@ final class MobileLibVlcCoordinator {
         _throwIfStale(generation, _anchor);
       }
       final snapshot = await proof;
+      _throwIfStale(generation, _anchor);
+      await driver.ensureSelectedAudioTrack();
       _throwIfStale(generation, _anchor);
       _publish(MobileLibVlcState.playing, generation);
       _currentCandidate = candidate;

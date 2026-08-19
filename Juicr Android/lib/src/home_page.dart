@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'ad_policy.dart';
 import 'app_state.dart';
@@ -17,17 +15,6 @@ import 'playback_provider.dart';
 import 'stream_api.dart';
 import 'visual_style.dart';
 
-const Duration homeWarmSnapshotMaxAge = Duration(hours: 24);
-
-bool homeWarmSnapshotIsFresh(Object? savedAt, {DateTime? now}) {
-  if (savedAt is! String || savedAt.trim().isEmpty) return false;
-  final parsed = DateTime.tryParse(savedAt.trim())?.toUtc();
-  if (parsed == null) return false;
-  final current = (now ?? DateTime.now()).toUtc();
-  if (parsed.isAfter(current)) return false;
-  return current.difference(parsed) <= homeWarmSnapshotMaxAge;
-}
-
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -37,21 +24,10 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage>
     with AutomaticKeepAliveClientMixin<HomePage> {
-  static const String _homeWarmSnapshotKey = 'home_warm_snapshot_v1';
-  static const String _homeEditorialCacheKey = 'home_editorial_cache_v1';
-
   final StreamApi _api = StreamApi();
   final Stopwatch _homeStartupStopwatch = Stopwatch()..start();
-  List<CatalogItem> _newMovies = const <CatalogItem>[];
-  List<CatalogItem> _newSeries = const <CatalogItem>[];
-  List<CatalogItem> _topMovies = const <CatalogItem>[];
-  List<CatalogItem> _topSeries = const <CatalogItem>[];
-  List<CatalogItem> _animationPicks = const <CatalogItem>[];
-  List<CatalogItem> _upcomingPicks = const <CatalogItem>[];
   List<CatalogItem> _heroEditorialItems = const <CatalogItem>[];
-  List<CatalogItem> _topSignalRemoteItems = const <CatalogItem>[];
-  List<CatalogItem> _todaySignalRemoteItems = const <CatalogItem>[];
-  List<CatalogItem> _juicrTopSignalRemoteItems = const <CatalogItem>[];
+  List<_HydratedHomeRail> _editorialRails = const <_HydratedHomeRail>[];
   final Map<String, bool> _heroTrailerAvailability = <String, bool>{};
   final Set<String> _heroTrailerAvailabilityInFlight = <String>{};
   final Map<String, CatalogItem> _heroTrailerAvailabilityPending =
@@ -97,7 +73,6 @@ class _HomePageState extends State<HomePage>
         );
       }
       if (mounted && AppState.preferencesReady.value && _hasCatalogSource) {
-        _restoreHomeWarmSnapshot();
         unawaited(_warmStartThenLoadHome());
       }
     });
@@ -198,16 +173,8 @@ class _HomePageState extends State<HomePage>
     if (!_hasHomeContent) {
       _loadGeneration += 1;
       setState(() {
-        _newMovies = const <CatalogItem>[];
-        _newSeries = const <CatalogItem>[];
-        _topMovies = const <CatalogItem>[];
-        _topSeries = const <CatalogItem>[];
-        _animationPicks = const <CatalogItem>[];
-        _upcomingPicks = const <CatalogItem>[];
         _heroEditorialItems = const <CatalogItem>[];
-        _topSignalRemoteItems = const <CatalogItem>[];
-        _todaySignalRemoteItems = const <CatalogItem>[];
-        _juicrTopSignalRemoteItems = const <CatalogItem>[];
+        _editorialRails = const <_HydratedHomeRail>[];
         _heroTrailerAvailability.clear();
         _heroTrailerAvailabilityInFlight.clear();
         _heroTrailerAvailabilityPending.clear();
@@ -219,16 +186,8 @@ class _HomePageState extends State<HomePage>
     }
     _loadGeneration += 1;
     setState(() {
-      _newMovies = const <CatalogItem>[];
-      _newSeries = const <CatalogItem>[];
-      _topMovies = const <CatalogItem>[];
-      _topSeries = const <CatalogItem>[];
-      _animationPicks = const <CatalogItem>[];
-      _upcomingPicks = const <CatalogItem>[];
       _heroEditorialItems = const <CatalogItem>[];
-      _topSignalRemoteItems = const <CatalogItem>[];
-      _todaySignalRemoteItems = const <CatalogItem>[];
-      _juicrTopSignalRemoteItems = const <CatalogItem>[];
+      _editorialRails = const <_HydratedHomeRail>[];
       _heroTrailerAvailability.clear();
       _heroTrailerAvailabilityInFlight.clear();
       _heroTrailerAvailabilityPending.clear();
@@ -236,7 +195,6 @@ class _HomePageState extends State<HomePage>
       _remoteEditorial = null;
       _loading = true;
     });
-    _restoreHomeWarmSnapshot();
     unawaited(_warmStartThenLoadHome());
   }
 
@@ -261,877 +219,233 @@ class _HomePageState extends State<HomePage>
       mediaKind: 'mixed',
       itemCount: 0,
     );
-    try {
-      final remoteEditorial = AppState.defaultCatalogEnabled.value
-          ? await _api.homeEditorial()
-          : null;
-      final effectiveEditorial = remoteEditorial ?? _remoteEditorial;
-      if (!mounted || generation != _loadGeneration) return;
-      if (AppState.defaultCatalogEnabled.value && effectiveEditorial == null) {
-        setState(() {
-          _newMovies = const <CatalogItem>[];
-          _newSeries = const <CatalogItem>[];
-          _topMovies = const <CatalogItem>[];
-          _topSeries = const <CatalogItem>[];
-          _animationPicks = const <CatalogItem>[];
-          _upcomingPicks = const <CatalogItem>[];
-          _heroEditorialItems = const <CatalogItem>[];
-          _topSignalRemoteItems = const <CatalogItem>[];
-          _todaySignalRemoteItems = const <CatalogItem>[];
-          _juicrTopSignalRemoteItems = const <CatalogItem>[];
-          _remoteEditorial = null;
-          _loading = false;
-        });
-        DiagnosticLog.add(
-          'home sync failed reason=editorial_unavailable elapsedMs=${loadStopwatch.elapsedMilliseconds}',
-        );
-        DiagnosticLog.viewTiming(
-          surface: 'home',
-          state: 'interaction_ready',
-          elapsed: loadStopwatch.elapsed,
-          mediaKind: 'mixed',
-          cacheStateBucket: 'server_editorial_unavailable',
-          itemCount: 0,
-        );
-        if (!_firstHomeReadyLogged) {
-          _firstHomeReadyLogged = true;
-          DiagnosticLog.add(
-            'startup home sync failed elapsedMs=${loadStopwatch.elapsedMilliseconds}',
-          );
-          DiagnosticLog.viewTiming(
-            surface: 'home_startup',
-            state: 'interaction_ready',
-            elapsed: loadStopwatch.elapsed,
-            cacheStateBucket: 'server_editorial_unavailable',
-            mediaKind: 'mixed',
-            itemCount: 0,
-          );
-        }
-        return;
-      }
-      final results = await Future.wait([
-        _api.catalog(type: MediaType.movie, sort: CatalogSort.year, skip: 0),
-        _api.catalog(type: MediaType.series, sort: CatalogSort.year, skip: 0),
-        _api.catalog(type: MediaType.animation, sort: CatalogSort.top, skip: 0),
-        _api.catalog(type: MediaType.movie, sort: CatalogSort.top, skip: 0),
-        _api.catalog(type: MediaType.series, sort: CatalogSort.top, skip: 0),
-      ]);
-      if (!mounted || generation != _loadGeneration) return;
-      final newMovies = results[0] as StreamCatalogResult;
-      final newSeries = results[1] as StreamCatalogResult;
-      final animationPicks = results[2] as StreamCatalogResult;
-      final topMovies = results[3] as StreamCatalogResult;
-      final topSeries = results[4] as StreamCatalogResult;
-      const moreAnimationPicks = StreamCatalogResult(items: <CatalogItem>[]);
-      const moreNewMovies = StreamCatalogResult(items: <CatalogItem>[]);
-      const moreTopMovies = StreamCatalogResult(items: <CatalogItem>[]);
-      const upcomingMovies = StreamCatalogResult(items: <CatalogItem>[]);
-      final previousEditorialEdition = _remoteEditorial?.editionId ?? '';
-      final nextEditorialEdition = effectiveEditorial?.editionId ?? '';
-      final editorialEditionChanged = nextEditorialEdition.isNotEmpty &&
-          previousEditorialEdition != nextEditorialEdition;
-      final movieNewPool = _availableHomeItems(
-        _dedupeItems([...newMovies.items, ...moreNewMovies.items]),
-      );
-      final movieTopPool = _availableHomeItems(
-        _dedupeItems([...topMovies.items, ...moreTopMovies.items]),
-      );
-      final seriesNewPool = _availableHomeItems(newSeries.items);
-      final seriesTopPool = _availableHomeItems(topSeries.items);
-      final animationPool = _availableHomeItems(
-        _dedupeItems([...animationPicks.items, ...moreAnimationPicks.items]),
-      );
-      final animationHomePool = _dedupeItems([
-        ...animationPool,
-        ..._animationCompatibleHomeItems([...seriesNewPool, ...seriesTopPool]),
-      ]);
-      final upcomingPool = _upcomingThisYearItems(
-        movies: _dedupeItems(upcomingMovies.items),
-      );
-      final heroEditorial = _editorialOrNull(
-        AppState.defaultCatalogEnabled.value ? effectiveEditorial?.hero : null,
-        _dailyHeroEditorial(),
-      );
-      final initialHeroItems = await _loadCuratedHeroItems(heroEditorial);
-      if (!mounted || generation != _loadGeneration) return;
-      final totalVisible = movieNewPool.take(24).length +
-          seriesNewPool.take(24).length +
-          animationHomePool.take(24).length +
-          movieTopPool.take(24).length +
-          seriesTopPool.take(24).length +
-          upcomingPool.length +
-          initialHeroItems.length;
+    final currentEditorial = await _api.homeEditorial();
+    if (!mounted || generation != _loadGeneration) return;
+    if (currentEditorial == null) {
       setState(() {
-        _newMovies = movieNewPool.take(24).toList(growable: false);
-        _newSeries = seriesNewPool.take(24).toList(growable: false);
-        _animationPicks = animationHomePool.take(24).toList(growable: false);
-        _topMovies = movieTopPool.take(24).toList(growable: false);
-        _topSeries = seriesTopPool.take(24).toList(growable: false);
-        _upcomingPicks = upcomingPool;
-        if (editorialEditionChanged) {
-          _topSignalRemoteItems = const <CatalogItem>[];
-          _todaySignalRemoteItems = const <CatalogItem>[];
-          _juicrTopSignalRemoteItems = const <CatalogItem>[];
-          _heroTrailerAvailability.clear();
-          _heroTrailerAvailabilityInFlight.clear();
-          _heroTrailerAvailabilityPending.clear();
-          _heroTrailerAvailabilityAttempts.clear();
-        }
-        _heroEditorialItems = initialHeroItems;
-        _remoteEditorial =
-            AppState.defaultCatalogEnabled.value ? effectiveEditorial : null;
-        _loading = false;
-        DiagnosticLog.viewTiming(
-          surface: 'home',
-          state: 'interaction_ready',
-          elapsed: loadStopwatch.elapsed,
-          mediaKind: 'mixed',
-          cacheStateBucket: 'network_or_unknown',
-          itemCount: totalVisible,
-        );
-      });
-      DiagnosticLog.add(
-        'home rail pools loaded movieNew=${_newMovies.length} movieTop=${_topMovies.length} seriesNew=${_newSeries.length} seriesTop=${_topSeries.length} animation=${_animationPicks.length}',
-      );
-      _saveHomeWarmSnapshot(editorial: effectiveEditorial);
-      if (editorialEditionChanged) {
-        DiagnosticLog.add(
-          'home editorial edition changed previous=${previousEditorialEdition.isEmpty ? "none" : previousEditorialEdition} next=$nextEditorialEdition resetDerived=true',
-        );
-      }
-      _warmHeroTrailerAvailability([
-        ...initialHeroItems.take(8),
-        ..._newMovies.take(3),
-        ..._topMovies.take(3),
-        ..._newSeries.take(3),
-        ..._topSeries.take(3),
-        ..._animationPicks.take(3),
-      ]);
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.hero,
-        items: _heroEditorialItems,
-        generation: generation,
-      );
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.newMovies,
-        items: _newMovies,
-        generation: generation,
-      );
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.topMovies,
-        items: _topMovies,
-        generation: generation,
-      );
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.newSeries,
-        items: _newSeries,
-        generation: generation,
-      );
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.topSeries,
-        items: _topSeries,
-        generation: generation,
-      );
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.animation,
-        items: _animationPicks,
-        generation: generation,
-      );
-      _warmUpcomingReleaseDates(_upcomingPicks.take(40));
-      DiagnosticLog.add(
-        'home client fallback save skipped reason=server_source_only',
-      );
-      if (!_firstHomeReadyLogged) {
-        _firstHomeReadyLogged = true;
-        DiagnosticLog.add(
-          'startup home data ready elapsedMs=${loadStopwatch.elapsedMilliseconds} itemCount=$totalVisible',
-        );
-        DiagnosticLog.viewTiming(
-          surface: 'home_startup',
-          state: 'interaction_ready',
-          elapsed: loadStopwatch.elapsed,
-          cacheStateBucket: 'network_or_unknown',
-          mediaKind: 'mixed',
-          itemCount: totalVisible,
-        );
-      }
-      _maybeShowMatureContentChoice();
-      final topSignalEditorial = _editorialOrNull(
-        AppState.defaultCatalogEnabled.value
-            ? effectiveEditorial?.topSignal
-            : null,
-        _weeklyTopSignalEditorial(),
-      );
-      final todaySignalEditorial = _editorialOrNull(
-        AppState.defaultCatalogEnabled.value
-            ? effectiveEditorial?.todaySignal
-            : null,
-        _dailyTopSignalEditorial(),
-      );
-      final juicrTopSignalEditorial = _editorialOrNull(
-        AppState.defaultCatalogEnabled.value
-            ? effectiveEditorial?.juicrTopSignal
-            : null,
-        _juicrTopSignalEditorial(),
-      );
-      unawaited(
-        _loadRemoteTopSignalItems(topSignalEditorial, limit: 20).then((
-          rankedItems,
-        ) {
-          if (!mounted || generation != _loadGeneration) return;
-          setState(() {
-            _topSignalRemoteItems = _mergeHomeRailRefreshItems(
-              _topSignalRemoteItems,
-              rankedItems,
-            );
-          });
-          _warmHomeTitleWheelArtwork(
-            rail: _HomeTitleWheelRail.topSignal,
-            items: _topSignalRemoteItems,
-            generation: generation,
-          );
-        }),
-      );
-      unawaited(
-        _loadRemoteTopSignalItems(todaySignalEditorial, limit: 20).then((
-          rankedItems,
-        ) {
-          if (!mounted || generation != _loadGeneration) return;
-          setState(() {
-            _todaySignalRemoteItems = _mergeHomeRailRefreshItems(
-              _todaySignalRemoteItems,
-              rankedItems,
-            );
-          });
-          _warmHomeTitleWheelArtwork(
-            rail: _HomeTitleWheelRail.todaySignal,
-            items: _todaySignalRemoteItems,
-            generation: generation,
-          );
-        }),
-      );
-      unawaited(
-        _loadRemoteTopSignalItems(juicrTopSignalEditorial, limit: 10).then((
-          rankedItems,
-        ) {
-          if (!mounted || generation != _loadGeneration) return;
-          setState(() {
-            _juicrTopSignalRemoteItems = _mergeHomeRailRefreshItems(
-              _juicrTopSignalRemoteItems,
-              rankedItems,
-            );
-          });
-          _warmHomeTitleWheelArtwork(
-            rail: _HomeTitleWheelRail.juicrTopSignal,
-            items: _juicrTopSignalRemoteItems,
-            generation: generation,
-          );
-        }),
-      );
-      unawaited(
-        _loadHomeSupplementalRails(
-          generation: generation,
-          newMovies: newMovies,
-          newSeries: newSeries,
-          animationPicks: animationPicks,
-          topMovies: topMovies,
-          topSeries: topSeries,
-          effectiveEditorial:
-              AppState.defaultCatalogEnabled.value ? effectiveEditorial : null,
-        ),
-      );
-    } catch (_) {
-      if (mounted && generation == _loadGeneration) {
-        setState(() => _loading = false);
-        _maybeShowMatureContentChoice();
-      }
-    }
-  }
-
-  Future<void> _loadHomeSupplementalRails({
-    required int generation,
-    required StreamCatalogResult newMovies,
-    required StreamCatalogResult newSeries,
-    required StreamCatalogResult animationPicks,
-    required StreamCatalogResult topMovies,
-    required StreamCatalogResult topSeries,
-    required HomeEditorialEdition? effectiveEditorial,
-  }) async {
-    final loadStopwatch = Stopwatch()..start();
-    try {
-      final results = await Future.wait([
-        _api.catalog(
-          type: MediaType.animation,
-          sort: CatalogSort.top,
-          skip: StreamApi.pageSize,
-        ),
-        _api.catalog(
-          type: MediaType.movie,
-          sort: CatalogSort.year,
-          skip: StreamApi.pageSize,
-        ),
-        _api.catalog(
-          type: MediaType.movie,
-          sort: CatalogSort.top,
-          skip: StreamApi.pageSize,
-        ),
-        _loadUpcomingThisYearMovieCatalog(),
-      ]);
-      if (!mounted || generation != _loadGeneration) return;
-      final moreAnimationPicks = results[0] as StreamCatalogResult;
-      final moreNewMovies = results[1] as StreamCatalogResult;
-      final moreTopMovies = results[2] as StreamCatalogResult;
-      final upcomingMovies = results[3] as StreamCatalogResult;
-      final movieNewPool = _availableHomeItems(
-        _dedupeItems([...newMovies.items, ...moreNewMovies.items]),
-      );
-      final movieTopPool = _availableHomeItems(
-        _dedupeItems([...topMovies.items, ...moreTopMovies.items]),
-      );
-      final seriesNewPool = _availableHomeItems(newSeries.items);
-      final seriesTopPool = _availableHomeItems(topSeries.items);
-      final animationPool = _availableHomeItems(
-        _dedupeItems([...animationPicks.items, ...moreAnimationPicks.items]),
-      );
-      final animationHomePool = _dedupeItems([
-        ...animationPool,
-        ..._animationCompatibleHomeItems([...seriesNewPool, ...seriesTopPool]),
-      ]);
-      final upcomingPool = _upcomingThisYearItems(
-        movies: _dedupeItems(upcomingMovies.items),
-      );
-      setState(() {
-        _newMovies = movieNewPool.take(24).toList(growable: false);
-        _newSeries = seriesNewPool.take(24).toList(growable: false);
-        _animationPicks = animationHomePool.take(24).toList(growable: false);
-        _topMovies = movieTopPool.take(24).toList(growable: false);
-        _topSeries = seriesTopPool.take(24).toList(growable: false);
-        _upcomingPicks = upcomingPool;
-      });
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.newMovies,
-        items: _newMovies,
-        generation: generation,
-      );
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.topMovies,
-        items: _topMovies,
-        generation: generation,
-      );
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.newSeries,
-        items: _newSeries,
-        generation: generation,
-      );
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.topSeries,
-        items: _topSeries,
-        generation: generation,
-      );
-      _warmHomeTitleWheelArtwork(
-        rail: _HomeTitleWheelRail.animation,
-        items: _animationPicks,
-        generation: generation,
-      );
-      DiagnosticLog.add(
-        'home supplemental rails loaded elapsedMs=${loadStopwatch.elapsedMilliseconds} movieNew=${_newMovies.length} movieTop=${_topMovies.length} animation=${_animationPicks.length} upcoming=${_upcomingPicks.length}',
-      );
-      _saveHomeWarmSnapshot(editorial: effectiveEditorial);
-      _warmUpcomingReleaseDates(_upcomingPicks.take(40));
-      DiagnosticLog.add('home local content cache skipped reason=server_only');
-    } catch (error) {
-      DiagnosticLog.add('home supplemental rails skipped error=$error');
-    }
-  }
-
-  Future<StreamCatalogResult> _loadUpcomingThisYearMovieCatalog() async {
-    final currentYear = DateTime.now().year.toString();
-    final items = <CatalogItem>[];
-    var skip = 0;
-    var hasMore = true;
-    for (var page = 0; page < 8 && hasMore; page += 1) {
-      final result = await _api.catalog(
-        type: MediaType.movie,
-        sort: CatalogSort.upcoming,
-        year: currentYear,
-        skip: skip,
-        preferDefaultCatalog: true,
-      );
-      items.addAll(result.items);
-      final stride = result.skipDelta ?? StreamApi.pageSize;
-      hasMore = result.hasMore ?? result.items.isNotEmpty;
-      if (result.items.isEmpty || stride <= 0) break;
-      skip += stride;
-    }
-    return StreamCatalogResult(items: _dedupeItems(items), hasMore: hasMore);
-  }
-
-  void _recordHomeRailCounts({
-    required String movieTitle,
-    required int movieCount,
-    required String seriesTitle,
-    required int seriesCount,
-    required String animationTitle,
-    required int animationCount,
-  }) {
-    final signature =
-        'movie=$movieCount:$movieTitle|series=$seriesCount:$seriesTitle|animation=$animationCount:$animationTitle';
-    if (_lastHomeRailCountLog == signature) return;
-    _lastHomeRailCountLog = signature;
-    DiagnosticLog.add(
-      'home rail counts movie=$movieCount title="$movieTitle" series=$seriesCount title="$seriesTitle" animation=$animationCount title="$animationTitle"',
-    );
-  }
-
-  Future<List<CatalogItem>> _loadCuratedHeroItems(_EditorialRail? rail) async {
-    if (rail == null ||
-        rail.title.isEmpty ||
-        (rail.genres.isEmpty &&
-            rail.query.isEmpty &&
-            !_isInTheatersEditorial(rail))) {
-      DiagnosticLog.add(
-        'home hero editorial skipped reason=missing_rail hasTitle=${rail?.title.isNotEmpty ?? false} genreCount=${rail?.genres.length ?? 0} hasQuery=${rail?.query.isNotEmpty ?? false}',
-      );
-      return const <CatalogItem>[];
-    }
-    if (_isInTheatersEditorial(rail) &&
-        rail.curationKind.trim().toLowerCase() != 'tmdb_daily_genre') {
-      return _loadInTheatersHeroItems(rail);
-    }
-    final types = rail.types.isEmpty
-        ? const [MediaType.movie, MediaType.series, MediaType.animation]
-        : rail.types;
-    final genre =
-        rail.genres.isEmpty ? 'All genres' : _displayGenre(rail.genres.first);
-    final perType = rail.perType.clamp(1, 12);
-    DiagnosticLog.add(
-      'home hero editorial start genre=$genre genreCount=${rail.genres.length} types=${types.map((type) => type.compatTypeValue).join("|")} sort=${rail.sort.id} perType=$perType requireGenre=${rail.requireGenreMatch} intent=${rail.intent} releaseWindow=${rail.releaseWindow} theme=${rail.theme} seasonalWindow=${rail.seasonalWindow} hasQuery=${rail.query.isNotEmpty}',
-    );
-    final buckets = await Future.wait<List<CatalogItem>>([
-      for (final type in types)
-        _loadCuratedHeroBucket(type, rail, genre, perType),
-    ]);
-    final interleaved = _interleaveBuckets(
-      buckets,
-    ).take(12).toList(growable: false);
-    DiagnosticLog.add(
-      'home hero editorial result bucketCounts=${buckets.map((bucket) => bucket.length).join("|")} final=${interleaved.length}',
-    );
-    return interleaved;
-  }
-
-  Future<List<CatalogItem>> _loadInTheatersHeroItems(
-    _EditorialRail rail,
-  ) async {
-    final gathered = <CatalogItem>[];
-    final seen = <String>{};
-    final maxPages = _curatedHeroMaxPages(rail);
-    var skip = 0;
-    for (var page = 0; page < maxPages; page += 1) {
-      try {
-        final result = await _api.catalog(
-          type: MediaType.movie,
-          sort: CatalogSort.nowPlaying,
-          skip: skip,
-          genre: 'All genres',
-          preferDefaultCatalog: true,
-        );
-        final before = gathered.length;
-        for (final item in result.items) {
-          if (!_homeItemMatchesInTheaters(item, rail)) continue;
-          if (seen.add(_homeContentKey(item))) gathered.add(item);
-        }
-        DiagnosticLog.add(
-          'home hero in_theaters page sort=${CatalogSort.nowPlaying.id} skip=$skip page=${page + 1}/$maxPages fetched=${result.items.length} added=${gathered.length - before} gathered=${gathered.length} hasMore=${result.hasMore ?? false}',
-        );
-        if (gathered.length >= _targetHeroItems) {
-          break;
-        }
-        final delta = result.skipDelta ?? result.items.length;
-        if (result.items.isEmpty || delta <= 0 || result.hasMore == false) {
-          break;
-        }
-        skip += delta;
-      } catch (_) {
-        DiagnosticLog.add(
-          'home hero in_theaters error sort=${CatalogSort.nowPlaying.id} skip=$skip gathered=${gathered.length}',
-        );
-        break;
-      }
-    }
-    final items = gathered.take(_targetHeroItems).toList(growable: false);
-    DiagnosticLog.add(
-      'home hero in_theaters result gathered=${gathered.length} final=${items.length}',
-    );
-    return items;
-  }
-
-  Future<List<CatalogItem>> _loadCuratedHeroBucket(
-    MediaType type,
-    _EditorialRail rail,
-    String genre,
-    int perType,
-  ) async {
-    final gathered = <CatalogItem>[];
-    final seen = <String>{};
-    final maxPages = _curatedHeroMaxPages(rail);
-    final allowBoundedPagination = maxPages > 1;
-    for (final sort in _curatedSortFallbacks(rail.sort)) {
-      var skip = 0;
-      for (var page = 0; page < maxPages; page += 1) {
-        try {
-          final result = await _api.catalog(
-            type: type,
-            sort: sort,
-            skip: skip,
-            genre: genre,
-            search: rail.query,
-            deepSearch: rail.query.isNotEmpty,
-            preferDefaultCatalog: true,
-          );
-          final before = gathered.length;
-          for (final item in result.items) {
-            if (!_homeItemMatchesEditorialIntent(item, rail)) continue;
-            if (seen.add(_itemKey(item))) gathered.add(item);
-          }
-          final isDailyGenre =
-              rail.curationKind.trim().toLowerCase() == 'tmdb_daily_genre';
-          final matches = isDailyGenre
-              ? gathered.take(perType).toList(growable: false)
-              : _bestEditorialMatches(
-                  gathered,
-                  rail,
-                  perType,
-                  allowUnknownGenre: true,
-                );
-          DiagnosticLog.add(
-            'home hero bucket page type=${type.compatTypeValue} sort=${sort.id} skip=$skip page=${page + 1}/$maxPages fetched=${result.items.length} added=${gathered.length - before} gathered=${gathered.length} matches=${matches.length} hasMore=${result.hasMore ?? false}',
-          );
-          if (matches.length >= perType) return matches;
-          if (rail.pageOneOnly && !allowBoundedPagination) break;
-          final delta = result.skipDelta ?? result.items.length;
-          if (result.items.isEmpty || delta <= 0 || result.hasMore == false) {
-            DiagnosticLog.add(
-              'home hero bucket stop type=${type.compatTypeValue} sort=${sort.id} reason=${result.items.isEmpty ? "empty" : delta <= 0 ? "no_delta" : "no_more"} gathered=${gathered.length} matches=${matches.length}',
-            );
-            break;
-          }
-          skip += delta;
-        } catch (_) {
-          DiagnosticLog.add(
-            'home hero bucket error type=${type.compatTypeValue} sort=${sort.id} skip=$skip gathered=${gathered.length}',
-          );
-          break;
-        }
-      }
-      if (rail.pageOneOnly && !allowBoundedPagination) break;
-    }
-    final isDailyGenre =
-        rail.curationKind.trim().toLowerCase() == 'tmdb_daily_genre';
-    final matches = isDailyGenre
-        ? gathered.take(perType).toList(growable: false)
-        : _bestEditorialMatches(
-            gathered,
-            rail,
-            perType,
-            allowUnknownGenre: true,
-          );
-    DiagnosticLog.add(
-      'home hero bucket result type=${type.compatTypeValue} gathered=${gathered.length} matches=${matches.length}',
-    );
-    return matches;
-  }
-
-  bool _restoreHomeWarmSnapshot() {
-    if (!mounted || !_hasCatalogSource) return false;
-    final prefs = AppState.prefs;
-    if (prefs == null) return false;
-    final raw = prefs.getString(_homeWarmSnapshotKey);
-    if (raw == null || raw.isEmpty) return false;
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map<String, dynamic>) return false;
-      if (!homeWarmSnapshotIsFresh(decoded['savedAt'])) {
-        unawaited(prefs.remove(_homeWarmSnapshotKey));
-        unawaited(prefs.remove(_homeEditorialCacheKey));
-        DiagnosticLog.add(
-          'home warm snapshot skipped reason=stale_or_invalid',
-        );
-        return false;
-      }
-      final editorialRaw = decoded['editorial'];
-      final editorial = editorialRaw is Map<String, dynamic>
-          ? HomeEditorialEdition.fromJson(editorialRaw)
-          : _restoreHomeEditorialCache(prefs);
-      final newMovies = _catalogSnapshotList(decoded['newMovies']);
-      final newSeries = _catalogSnapshotList(decoded['newSeries']);
-      final animation = _catalogSnapshotList(decoded['animation']);
-      final topMovies = _catalogSnapshotList(decoded['topMovies']);
-      final topSeries = _catalogSnapshotList(decoded['topSeries']);
-      final upcoming = _catalogSnapshotList(decoded['upcoming']);
-      final hero = _catalogSnapshotList(decoded['hero']);
-      final topSignal = _catalogSnapshotList(decoded['topSignal']);
-      final todaySignal = _catalogSnapshotList(decoded['todaySignal']);
-      final juicrTopSignal = _catalogSnapshotList(decoded['juicrTopSignal']);
-      final itemCount = newMovies.length +
-          newSeries.length +
-          animation.length +
-          topMovies.length +
-          topSeries.length +
-          upcoming.length +
-          hero.length;
-      if (itemCount <= 0 && editorial == null) return false;
-      setState(() {
-        _newMovies = newMovies;
-        _newSeries = newSeries;
-        _animationPicks = animation;
-        _topMovies = topMovies;
-        _topSeries = topSeries;
-        _upcomingPicks = upcoming;
-        _heroEditorialItems = hero;
-        _topSignalRemoteItems = topSignal;
-        _todaySignalRemoteItems = todaySignal;
-        _juicrTopSignalRemoteItems = juicrTopSignal;
-        _remoteEditorial = editorial;
+        _heroEditorialItems = const <CatalogItem>[];
+        _editorialRails = const <_HydratedHomeRail>[];
+        _remoteEditorial = null;
         _loading = false;
       });
       DiagnosticLog.add(
-        'home warm snapshot restored source=local_snapshot itemCount=$itemCount hasEditorial=${editorial != null}',
+        'home sync failed reason=editorial_unavailable elapsedMs=${loadStopwatch.elapsedMilliseconds}',
       );
       DiagnosticLog.viewTiming(
         surface: 'home',
         state: 'interaction_ready',
-        cacheStateBucket: 'local_snapshot',
+        elapsed: loadStopwatch.elapsed,
         mediaKind: 'mixed',
-        itemCount: itemCount,
+        cacheStateBucket: 'server_editorial_unavailable',
+        itemCount: 0,
       );
-      return true;
-    } catch (error) {
-      DiagnosticLog.add(
-        'home warm snapshot skipped reason=decode_failed error=${error.runtimeType}',
-      );
-      return false;
+      return;
     }
-  }
 
-  HomeEditorialEdition? _restoreHomeEditorialCache(SharedPreferences prefs) {
-    final editorialRaw = _safeJsonDecodeMap(
-      prefs.getString(_homeEditorialCacheKey),
-    );
-    return editorialRaw == null
-        ? null
-        : HomeEditorialEdition.fromJson(editorialRaw);
-  }
-
-  void _saveHomeWarmSnapshot({required HomeEditorialEdition? editorial}) {
-    final prefs = AppState.prefs;
-    if (prefs == null || !_hasCatalogSource) return;
-    final itemCount = _newMovies.length +
-        _newSeries.length +
-        _animationPicks.length +
-        _topMovies.length +
-        _topSeries.length +
-        _upcomingPicks.length +
-        _heroEditorialItems.length;
-    if (itemCount <= 0 && editorial == null) return;
-    Map<String, dynamic>? editorialJson;
-    if (editorial != null) {
-      editorialJson = editorial.toJson();
-    }
-    final payload = <String, dynamic>{
-      'version': 1,
-      'savedAt': DateTime.now().toIso8601String(),
-      if (editorialJson != null) 'editorial': editorialJson,
-      'newMovies': _safePublicSnapshotItems(_newMovies),
-      'newSeries': _safePublicSnapshotItems(_newSeries),
-      'animation': _safePublicSnapshotItems(_animationPicks),
-      'topMovies': _safePublicSnapshotItems(_topMovies),
-      'topSeries': _safePublicSnapshotItems(_topSeries),
-      'upcoming': _safePublicSnapshotItems(_upcomingPicks),
-      'hero': _safePublicSnapshotItems(_heroEditorialItems),
-      'topSignal': _safePublicSnapshotItems(_topSignalRemoteItems),
-      'todaySignal': _safePublicSnapshotItems(_todaySignalRemoteItems),
-      'juicrTopSignal': _safePublicSnapshotItems(_juicrTopSignalRemoteItems),
-    };
-    unawaited(prefs.setString(_homeWarmSnapshotKey, jsonEncode(payload)));
-    if (editorialJson != null) {
-      unawaited(
-        prefs.setString(_homeEditorialCacheKey, jsonEncode(editorialJson)),
-      );
-    }
-  }
-
-  int _curatedHeroMaxPages(_EditorialRail rail) {
-    final curationKind = rail.curationKind.trim().toLowerCase();
-    if (curationKind == 'tmdb_daily_genre') return 1;
-    if (_isSourceBoundEditorial(rail)) {
-      return 5;
-    }
-    return rail.pageOneOnly ? 1 : 3;
-  }
-
-  Future<List<CatalogItem>> _loadRemoteTopSignalItems(
-    _EditorialRail? editorial, {
-    int limit = 20,
-  }) async {
-    if (editorial == null || editorial.items.isEmpty) {
-      DiagnosticLog.add(
-        'home top signal hydrate requested=0 matched=0 reason=no_remote_items',
-      );
-      return const <CatalogItem>[];
-    }
-    final ranked = <CatalogItem>[];
-    final seen = <String>{};
-    for (final signal in editorial.items.take(limit)) {
-      final types = signal.type == null
-          ? const [MediaType.movie, MediaType.series, MediaType.animation]
-          : [signal.type!];
-      for (final type in types) {
-        try {
-          CatalogItem? match;
-          if (signal.tmdbId != null) {
-            final details = await _api.meta(
-              CatalogItem(
-                type: type,
-                id: 'tmdb:${signal.tmdbId}',
-                name: signal.title,
-                tmdbId: signal.tmdbId,
-                year: signal.year.isEmpty ? null : signal.year,
-              ),
-            );
-            if (_itemMatchesTrendSignal(details.item, signal)) {
-              match = details.item;
-            }
-          }
-          if (match != null && !_hasHomePoster(match)) {
-            final richerMatch = await _findHomeTopSignalCatalogMatch(
-              signal,
-              type,
-            );
-            if (richerMatch != null) {
-              match = match.merge(richerMatch);
-            }
-          }
-          if (match == null) {
-            match = await _findHomeTopSignalCatalogMatch(signal, type);
-          }
-          if (match == null || !_hasHomePoster(match)) continue;
-          final key = _itemKey(match);
-          if (seen.add(key)) ranked.add(match);
-          break;
-        } catch (_) {
-          break;
-        }
-      }
-    }
-    DiagnosticLog.add(
-      'home top signal hydrate requested=${editorial.items.length} matched=${ranked.length}',
-    );
-    return ranked.toList(growable: false);
-  }
-
-  void _warmHomeTitleWheelArtwork({
-    required _HomeTitleWheelRail rail,
-    required List<CatalogItem> items,
-    required int generation,
-  }) {
-    if (items.isEmpty) return;
-    final candidates = homeTitleWheelHydrationCandidates(items);
-    if (candidates.isEmpty) return;
-    unawaited(() async {
-      final hydrated = <CatalogItem>[];
-      var skippedCached = 0;
-      for (final item in candidates) {
-        if (!mounted || generation != _loadGeneration) return;
-        final key = _homeUsedKey(item);
-        final cached = _titleWheelArtworkCache[key];
-        if (cached != null) {
-          hydrated.add(cached);
-          skippedCached += 1;
-          continue;
-        }
-        if (!_titleWheelArtworkInFlight.add(key)) continue;
-        try {
-          final details = await _api.meta(item).timeout(
-                const Duration(seconds: 5),
-              );
-          final merged = item.merge(details.item);
-          if ((merged.logo ?? '').trim().isNotEmpty) {
-            _titleWheelArtworkCache[key] = merged;
-            hydrated.add(merged);
-          }
-        } catch (error) {
-          DiagnosticLog.add(
-            'mobile title wheel artwork hydrate skipped rail=${rail.name} type=${item.type.compatTypeValue} id=${item.id} error=${error.runtimeType}',
-          );
-        } finally {
-          _titleWheelArtworkInFlight.remove(key);
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 80));
-      }
-      if (!mounted || generation != _loadGeneration || hydrated.isEmpty) {
-        return;
-      }
+    late final List<List<CatalogItem>> hydrated;
+    try {
+      hydrated = await Future.wait<List<CatalogItem>>([
+        _hydrateHomeEditorialRail(currentEditorial.hero),
+        for (final rail in currentEditorial.orderedRails)
+          _hydrateHomeEditorialRail(rail),
+      ]);
+    } catch (_) {
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
-        _applyHomeTitleWheelHydration(rail, hydrated);
+        _heroEditorialItems = const <CatalogItem>[];
+        _editorialRails = const <_HydratedHomeRail>[];
+        _remoteEditorial = null;
+        _loading = false;
       });
       DiagnosticLog.add(
-        'mobile title wheel artwork hydrated rail=${rail.name} requested=${candidates.length} hydrated=${hydrated.length} cached=$skippedCached',
+        'home sync failed reason=authoritative_hydration_unavailable elapsedMs=${loadStopwatch.elapsedMilliseconds}',
       );
-    }());
-  }
-
-  void _applyHomeTitleWheelHydration(
-    _HomeTitleWheelRail rail,
-    List<CatalogItem> hydrated,
-  ) {
-    switch (rail) {
-      case _HomeTitleWheelRail.hero:
-        _heroEditorialItems = _mergeHomeTitleWheelHydratedItems(
-          _heroEditorialItems,
-          hydrated,
-        );
-        break;
-      case _HomeTitleWheelRail.newMovies:
-        _newMovies = _mergeHomeTitleWheelHydratedItems(_newMovies, hydrated);
-        break;
-      case _HomeTitleWheelRail.newSeries:
-        _newSeries = _mergeHomeTitleWheelHydratedItems(_newSeries, hydrated);
-        break;
-      case _HomeTitleWheelRail.animation:
-        _animationPicks = _mergeHomeTitleWheelHydratedItems(
-          _animationPicks,
-          hydrated,
-        );
-        break;
-      case _HomeTitleWheelRail.topMovies:
-        _topMovies = _mergeHomeTitleWheelHydratedItems(_topMovies, hydrated);
-        break;
-      case _HomeTitleWheelRail.topSeries:
-        _topSeries = _mergeHomeTitleWheelHydratedItems(_topSeries, hydrated);
-        break;
-      case _HomeTitleWheelRail.topSignal:
-        _topSignalRemoteItems = _mergeHomeTitleWheelHydratedItems(
-          _topSignalRemoteItems,
-          hydrated,
-        );
-        break;
-      case _HomeTitleWheelRail.todaySignal:
-        _todaySignalRemoteItems = _mergeHomeTitleWheelHydratedItems(
-          _todaySignalRemoteItems,
-          hydrated,
-        );
-        break;
-      case _HomeTitleWheelRail.juicrTopSignal:
-        _juicrTopSignalRemoteItems = _mergeHomeTitleWheelHydratedItems(
-          _juicrTopSignalRemoteItems,
-          hydrated,
-        );
-        break;
+      return;
     }
+    if (!mounted || generation != _loadGeneration) return;
+
+    final orderedRailItems = hydrated.skip(1).toList(growable: false);
+    final orderedRails = <_HydratedHomeRail>[
+      for (var index = 0;
+          index < currentEditorial.orderedRails.length;
+          index += 1)
+        _HydratedHomeRail(
+          editorial: currentEditorial.orderedRails[index],
+          entries: _rankedEditorialEntries(
+            currentEditorial.orderedRails[index],
+            orderedRailItems[index],
+          ),
+        ),
+    ];
+    final itemCount = hydrated.fold<int>(
+      0,
+      (count, items) => count + items.length,
+    );
+    setState(() {
+      _heroEditorialItems = hydrated[0];
+      _editorialRails = orderedRails;
+      _remoteEditorial = currentEditorial;
+      _loading = false;
+    });
+    DiagnosticLog.add(
+      'home current edition hydrated edition=${currentEditorial.editionId} rails=${orderedRails.length} items=$itemCount',
+    );
+    DiagnosticLog.viewTiming(
+      surface: 'home',
+      state: 'interaction_ready',
+      elapsed: loadStopwatch.elapsed,
+      mediaKind: 'mixed',
+      cacheStateBucket: 'network_or_unknown',
+      itemCount: itemCount,
+    );
+    _warmHeroTrailerAvailability(_heroEditorialItems.take(8));
+    _warmHomeTitleWheelArtwork(
+      items: _heroEditorialItems,
+      generation: generation,
+    );
+    for (final rail in _editorialRails) {
+      _warmHomeTitleWheelArtwork(
+        items: rail.items,
+        generation: generation,
+        editorialRailId: rail.editorial.id,
+      );
+    }
+    _maybeShowMatureContentChoice();
   }
 
-  Future<CatalogItem?> _findHomeTopSignalCatalogMatch(
+  Future<List<CatalogItem>> _hydrateHomeEditorialRail(
+    HomeEditorialRail editorial,
+  ) async {
+    switch (editorial.id) {
+      case 'savedEditorial':
+        return const <CatalogItem>[];
+      case 'upcomingEditorial':
+        return _loadServerUpcomingEditorialItems(editorial);
+    }
+    if (editorial.items.isEmpty) {
+      return _loadServerScopedHeroEditorialItems(editorial);
+    }
+    final hydrated = <CatalogItem>[];
+    for (final signal in editorial.items) {
+      if (!signal.isUsable) continue;
+      CatalogItem? match;
+      try {
+        final type = signal.type!;
+        if (signal.tmdbId != null) {
+          final details = await _api.meta(
+            CatalogItem(
+              type: type,
+              id: 'tmdb:${signal.tmdbId}',
+              name: signal.title,
+              tmdbId: signal.tmdbId,
+              year: signal.year.isEmpty ? null : signal.year,
+            ),
+          );
+          if (_itemMatchesEditorialSignal(details.item, signal)) {
+            match = details.item;
+          }
+        }
+        match ??= await _findHomeEditorialCatalogMatch(signal, type);
+      } catch (error) {
+        DiagnosticLog.add(
+          'home editorial hydration missed rail=${editorial.id} type=${signal.type?.compatTypeValue ?? "unknown"}',
+        );
+      }
+      if (match == null) {
+        throw StateError('authoritative_home_item_unavailable');
+      }
+      hydrated.add(match);
+    }
+    DiagnosticLog.add(
+      'home editorial rail hydrated id=${editorial.id} requested=${editorial.items.length} matched=${hydrated.length}',
+    );
+    return hydrated.toList(growable: false);
+  }
+
+  Future<List<CatalogItem>> _loadServerScopedHeroEditorialItems(
+    HomeEditorialRail editorial,
+  ) async {
+    final types = editorial.types.isEmpty
+        ? const <MediaType>[
+            MediaType.movie,
+            MediaType.series,
+            MediaType.animation,
+          ]
+        : editorial.types;
+    final perType = editorial.perType.clamp(1, 12);
+    final buckets = await Future.wait<List<CatalogItem>>([
+      for (final type in types)
+        () async {
+          final gathered = <CatalogItem>[];
+          var skip = 0;
+          for (var page = 0; page < 3 && gathered.length < perType; page += 1) {
+            final result = await _api.catalog(
+              type: type,
+              sort: editorial.sort,
+              skip: skip,
+              genre: editorial.genres.isEmpty
+                  ? 'All genres'
+                  : _displayGenre(editorial.genres.first),
+              search: editorial.query,
+              deepSearch: editorial.query.trim().isNotEmpty,
+              preferDefaultCatalog: true,
+            );
+            for (final item in result.items) {
+              if (!_isHomeAllowedByMatureGate(item)) continue;
+              if (!_hasHomeArtwork(item)) continue;
+              if (editorial.requireGenreMatch &&
+                  !_itemMatchesAnyGenre(item, editorial.genres)) {
+                continue;
+              }
+              gathered.add(item);
+              if (gathered.length >= perType) break;
+            }
+            final stride = result.skipDelta ?? result.items.length;
+            if (result.items.isEmpty ||
+                stride <= 0 ||
+                result.hasMore == false) {
+              break;
+            }
+            skip += stride;
+          }
+          return _dedupeItems(gathered).take(perType).toList(growable: false);
+        }(),
+    ]);
+    return _interleaveBuckets(buckets).take(12).toList(growable: false);
+  }
+
+  Future<List<CatalogItem>> _loadServerUpcomingEditorialItems(
+    HomeEditorialRail editorial,
+  ) async {
+    final items = <CatalogItem>[];
+    var skip = 0;
+    var hasMore = true;
+    for (var page = 0; page < 8 && hasMore; page += 1) {
+      late final StreamCatalogResult result;
+      try {
+        result = await _api.catalog(
+          type: MediaType.movie,
+          sort: CatalogSort.upcoming,
+          year: editorial.year,
+          skip: skip,
+          preferDefaultCatalog: true,
+        );
+      } catch (error) {
+        DiagnosticLog.add(
+          'home upcoming editorial hydration missed skip=$skip',
+        );
+        break;
+      }
+      items.addAll(result.items);
+      final stride = result.skipDelta ?? result.items.length;
+      hasMore = result.hasMore ?? result.items.isNotEmpty;
+      if (result.items.isEmpty || stride <= 0) break;
+      skip += stride;
+    }
+    return items.toList(growable: false);
+  }
+
+  Future<CatalogItem?> _findHomeEditorialCatalogMatch(
     HomeEditorialTrendItem signal,
     MediaType type,
   ) async {
@@ -1144,14 +458,74 @@ class _HomePageState extends State<HomePage>
       preferDefaultCatalog: true,
     );
     for (final item in result.items) {
-      if (_itemMatchesTrendSignal(item, signal) && _hasHomePoster(item)) {
-        return item;
-      }
-    }
-    for (final item in result.items) {
-      if (_itemMatchesTrendSignal(item, signal)) return item;
+      if (_itemMatchesEditorialSignal(item, signal)) return item;
     }
     return null;
+  }
+
+  void _warmHomeTitleWheelArtwork({
+    required List<CatalogItem> items,
+    required int generation,
+    String? editorialRailId,
+  }) {
+    if (items.isEmpty) return;
+    final candidates = homeTitleWheelHydrationCandidates(items);
+    if (candidates.isEmpty) return;
+    unawaited(() async {
+      final hydrated = <CatalogItem>[];
+      var skippedCached = 0;
+      for (final item in candidates) {
+        if (!mounted || generation != _loadGeneration) return;
+        final key = _itemKey(item);
+        final cached = _titleWheelArtworkCache[key];
+        if (cached != null) {
+          hydrated.add(homeArtworkOnlyMerge(item, cached));
+          skippedCached += 1;
+          continue;
+        }
+        if (!_titleWheelArtworkInFlight.add(key)) continue;
+        try {
+          final details = await _api.meta(item).timeout(
+                const Duration(seconds: 5),
+              );
+          final artworkOnly = homeArtworkOnlyMerge(item, details.item);
+          if ((artworkOnly.logo ?? '').trim().isNotEmpty) {
+            _titleWheelArtworkCache[key] = artworkOnly;
+            hydrated.add(artworkOnly);
+          }
+        } catch (error) {
+          DiagnosticLog.add(
+            'mobile title wheel artwork hydrate skipped rail=${editorialRailId ?? "hero"} type=${item.type.compatTypeValue} id=${item.id} error=${error.runtimeType}',
+          );
+        } finally {
+          _titleWheelArtworkInFlight.remove(key);
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      }
+      if (!mounted || generation != _loadGeneration || hydrated.isEmpty) {
+        return;
+      }
+      setState(() {
+        if (editorialRailId == null) {
+          _heroEditorialItems = _mergeHomeTitleWheelHydratedItems(
+            _heroEditorialItems,
+            hydrated,
+          );
+          return;
+        }
+        _editorialRails = [
+          for (final rail in _editorialRails)
+            rail.editorial.id == editorialRailId
+                ? rail.withItems(
+                    _mergeHomeTitleWheelHydratedItems(rail.items, hydrated),
+                  )
+                : rail,
+        ];
+      });
+      DiagnosticLog.add(
+        'mobile title wheel artwork hydrated rail=${editorialRailId ?? "hero"} requested=${candidates.length} hydrated=${hydrated.length} cached=$skippedCached',
+      );
+    }());
   }
 
   void _openDetails(CatalogItem item) {
@@ -1184,43 +558,6 @@ class _HomePageState extends State<HomePage>
       queued += 1;
     }
     _startHeroTrailerAvailabilityWorker();
-  }
-
-  void _warmUpcomingReleaseDates(Iterable<CatalogItem> items) {
-    final candidates = items
-        .where((item) => item.isUpcoming && (item.releaseDate ?? '').isEmpty)
-        .take(40)
-        .toList(growable: false);
-    if (candidates.isEmpty) return;
-    unawaited(
-      _hydrateUpcomingReleaseDates(candidates).then((hydratedItems) {
-        if (!mounted || hydratedItems.isEmpty) return;
-        setState(() {
-          _upcomingPicks = _mergeHydratedUpcomingItems(
-            _upcomingPicks,
-            hydratedItems,
-          );
-        });
-      }),
-    );
-  }
-
-  Future<List<CatalogItem>> _hydrateUpcomingReleaseDates(
-    List<CatalogItem> items,
-  ) async {
-    final hydrated = <CatalogItem>[];
-    for (final item in items) {
-      try {
-        final details =
-            await _api.meta(item).timeout(const Duration(seconds: 5));
-        final merged = item.merge(details.item);
-        if ((merged.releaseDate ?? '').isNotEmpty) hydrated.add(merged);
-      } catch (_) {
-        // Metadata hydration is best-effort; the badge can still show TBA.
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 120));
-    }
-    return hydrated;
   }
 
   void _startHeroTrailerAvailabilityWorker() {
@@ -1292,13 +629,11 @@ class _HomePageState extends State<HomePage>
     String? genreOverride,
   }) {
     if (editorial.isRanked) {
-      final isUpcomingShelf =
-          editorial.title.trim().toLowerCase() == 'upcoming this year';
       _openCuratedShelf(
         title: editorial.title,
         subtitle: editorial.sectionSubtitle,
         items: items,
-        showRankPills: !isUpcomingShelf,
+        showRankPills: true,
       );
       return;
     }
@@ -1362,18 +697,17 @@ class _HomePageState extends State<HomePage>
     bool showRankPills = false,
     bool externalTopSignal = false,
     bool insightsEnabled = false,
+    List<int?> ranks = const <int?>[],
   }) {
-    final shelfItems = _dedupeItems(
-      items,
-    ).where((item) => !item.type.isLive).toList(growable: false);
+    final shelfItems = items.toList(growable: false);
     Navigator.of(context).push(
       AppPageRoute<void>(
         builder: (_) => _HomeShelfPage(
           title: title,
           items: shelfItems,
-          showRankPills:
-              showRankPills || _isTopTenShelfTitle(title.trim().toLowerCase()),
+          showRankPills: showRankPills,
           externalTopSignal: externalTopSignal,
+          ranks: ranks,
         ),
       ),
     );
@@ -1405,179 +739,25 @@ class _HomePageState extends State<HomePage>
                       for (final entry in continueItems)
                         if (AppState.isDisplayableContinueEntry(entry)) entry,
                     ];
-                    final continueKeys = {
-                      for (final entry in continueItems) _itemKey(entry.item),
-                    };
-                    final heroEditorial = _editorialOrNull(
-                      AppState.defaultCatalogEnabled.value
-                          ? _remoteEditorial?.hero
-                          : null,
-                      _dailyHeroEditorial(),
-                    );
-                    final catalogPool = _dedupeItems([
-                      ..._topSignalRemoteItems,
-                      ..._todaySignalRemoteItems,
-                      ..._juicrTopSignalRemoteItems,
-                      ..._newMovies,
-                      ..._newSeries,
-                      ..._topMovies,
-                      ..._topSeries,
-                      ..._animationPicks,
-                      if (insightsEnabled) ...library.values,
-                    ]);
-                    final heroItems = _withoutContinueWatching(
-                      _dedupeItems(_heroEditorialItems),
-                      continueKeys,
-                    );
-                    final displayHeroEditorial = heroEditorial ??
-                        const _EditorialRail(title: '', subtitle: '');
-                    final displayHeroItems = _mergeHomeHeroDisplayItems(
-                      heroItems,
-                      catalogPool,
-                    );
-                    if (heroEditorial != null &&
-                        displayHeroItems.length < _minimumServerHeroItems) {
-                      DiagnosticLog.add(
-                        'home hero editorial kept server scoped items=${displayHeroItems.length}',
-                      );
-                    }
-                    final usedHomeKeys = <String>{
-                      for (final item in displayHeroItems.take(8))
-                        _homeUsedKey(item),
-                    };
+                    final heroEditorial = _remoteEditorial?.hero;
+                    final displayHeroEditorial = heroEditorial == null
+                        ? const _EditorialRail(title: '', subtitle: '')
+                        : _editorialFromServer(heroEditorial);
+                    final displayHeroItems = _heroEditorialItems;
                     WidgetsBinding.instance.addPostFrameCallback((_) {
                       if (!mounted) return;
                       _warmHeroTrailerAvailability(displayHeroItems.take(8));
                     });
-                    final topSignalEditorial = _editorialOrNull(
-                      AppState.defaultCatalogEnabled.value
-                          ? _remoteEditorial?.topSignal
-                          : null,
-                      _weeklyTopSignalEditorial(),
-                    );
-                    final rawTopSignalItems = _weeklyTopSignalItems(
-                      catalogPool,
-                      editorial: topSignalEditorial,
-                      limit: 20,
-                      library: library,
-                      progress: progress,
-                      completed: AppState.completedWatching.value,
-                      searchHistory: AppState.searchHistory.value,
-                      insightsEnabled: insightsEnabled,
-                    );
-                    final topSignalUsesRemote = _remoteTopSignalItems(
-                          catalogPool,
-                          topSignalEditorial,
-                        ).length >=
-                        3;
-                    final todaySignalEditorial = _editorialOrNull(
-                      AppState.defaultCatalogEnabled.value
-                          ? _remoteEditorial?.todaySignal
-                          : null,
-                      _dailyTopSignalEditorial(),
-                    );
-                    final rawTodaySignalItems = _weeklyTopSignalItems(
-                      catalogPool,
-                      editorial: todaySignalEditorial,
-                      limit: 20,
-                      library: library,
-                      progress: progress,
-                      completed: AppState.completedWatching.value,
-                      searchHistory: AppState.searchHistory.value,
-                      insightsEnabled: insightsEnabled,
-                    );
-                    final todaySignalUsesRemote = _remoteTopSignalItems(
-                          catalogPool,
-                          todaySignalEditorial,
-                        ).length >=
-                        3;
-                    final juicrTopSignalEditorial = _editorialOrNull(
-                      AppState.defaultCatalogEnabled.value
-                          ? _remoteEditorial?.juicrTopSignal
-                          : null,
-                      _juicrTopSignalEditorial(),
-                    );
-                    final rawJuicrTopSignalItems = _weeklyTopSignalItems(
-                      catalogPool,
-                      editorial: juicrTopSignalEditorial,
-                      limit: 10,
-                      library: library,
-                      progress: progress,
-                      completed: AppState.completedWatching.value,
-                      searchHistory: AppState.searchHistory.value,
-                      insightsEnabled: insightsEnabled,
-                    );
-                    final juicrTopSignalUsesRemote = _remoteTopSignalItems(
-                          catalogPool,
-                          juicrTopSignalEditorial,
-                        ).length >=
-                        3;
-                    const localTopSignalFallback = <CatalogItem>[];
-                    final todaySignalItems = _backfilledSignalRailItems(
-                      rawTodaySignalItems,
-                      fallbackPool: localTopSignalFallback,
-                      usedKeys: usedHomeKeys,
-                      limit: 20,
-                      preservePrimaryRank: todaySignalUsesRemote,
-                    );
-                    usedHomeKeys.addAll(
-                      todaySignalItems.take(20).map(_homeUsedKey),
-                    );
-                    final topSignalItems = _backfilledSignalRailItems(
-                      rawTopSignalItems,
-                      fallbackPool: localTopSignalFallback,
-                      usedKeys: usedHomeKeys,
-                      limit: 20,
-                      preservePrimaryRank: topSignalUsesRemote,
-                    );
-                    usedHomeKeys.addAll(
-                      topSignalItems.take(20).map(_homeUsedKey),
-                    );
-                    final juicrTopSignalItems = _backfilledSignalRailItems(
-                      rawJuicrTopSignalItems,
-                      fallbackPool: localTopSignalFallback,
-                      usedKeys: usedHomeKeys,
-                      limit: 10,
-                      preservePrimaryRank: juicrTopSignalUsesRemote,
-                    );
-                    usedHomeKeys.addAll(
-                      juicrTopSignalItems.take(10).map(_homeUsedKey),
-                    );
-                    const savedEditorial = _EditorialRail(
-                      title: 'Saved For Later',
-                      subtitle: '',
-                    );
-                    const upcomingEditorial = _EditorialRail(
-                      title: 'Upcoming This Year',
-                      subtitle: '',
-                      kind: 'ranked',
-                      sort: CatalogSort.upcoming,
-                      types: [MediaType.movie],
-                      perType: 20,
-                    );
-                    final upcomingItems = _withoutContinueWatching(
-                      _upcomingPicks,
-                      continueKeys,
-                    ).toList(growable: false);
-                    usedHomeKeys.addAll(
-                      upcomingItems.take(20).map(_homeUsedKey),
-                    );
-                    final savedItems = _withoutContinueWatching(
-                      _savedForLaterItems(library.values),
-                      continueKeys,
-                    );
-                    usedHomeKeys.addAll(savedItems.take(8).map(_homeUsedKey));
-                    final showFullLoading = _loading &&
-                        _newMovies.isEmpty &&
-                        _newSeries.isEmpty &&
-                        _animationPicks.isEmpty &&
-                        _topMovies.isEmpty &&
-                        _topSeries.isEmpty;
+                    final displayEditorialRails = [
+                      for (final rail in _editorialRails)
+                        rail.withEntries(_entriesForHomeRail(rail, library)),
+                    ];
+                    final showFullLoading =
+                        _loading && _remoteEditorial == null;
                     if (showFullLoading) {
                       return const _HomePageSkeleton();
                     }
-                    if (AppState.defaultCatalogEnabled.value &&
-                        _remoteEditorial == null) {
+                    if (_remoteEditorial == null) {
                       return CatalogEmptyState(
                         title: 'Home',
                         message: 'Home could not sync. Try again.',
@@ -1591,7 +771,7 @@ class _HomePageState extends State<HomePage>
                         SliverToBoxAdapter(
                           child: _HeroCarousel(
                             title: displayHeroEditorial.title,
-                            subtitle: displayHeroEditorial.displaySubtitle,
+                            subtitle: displayHeroEditorial.subtitle,
                             editorialGenres: displayHeroEditorial.genres,
                             items: displayHeroItems,
                             trailerAvailability: _heroTrailerAvailability,
@@ -1608,90 +788,42 @@ class _HomePageState extends State<HomePage>
                               onTap: _openLibrary,
                             ),
                           ),
-                        if (todaySignalEditorial != null &&
-                            todaySignalItems.length >= 3)
-                          _RankedHomeRail(
-                            title: todaySignalEditorial.title,
-                            subtitle: todaySignalEditorial.sectionSubtitle,
-                            items: todaySignalItems
-                                .take(20)
-                                .toList(growable: false),
-                            onTap: _openDetails,
-                            onOpenDiscovery: () => _openCuratedShelf(
-                              title: todaySignalEditorial.title,
-                              subtitle: todaySignalEditorial.sectionSubtitle,
-                              items: todaySignalItems,
-                              showRankPills: true,
-                              externalTopSignal: todaySignalUsesRemote,
-                              insightsEnabled: insightsEnabled,
-                            ),
-                          ),
-                        if (topSignalEditorial != null &&
-                            topSignalItems.length >= 3)
-                          _RankedHomeRail(
-                            title: topSignalEditorial.title,
-                            subtitle: topSignalEditorial.sectionSubtitle,
-                            items:
-                                topSignalItems.take(20).toList(growable: false),
-                            onTap: _openDetails,
-                            onOpenDiscovery: () => _openCuratedShelf(
-                              title: topSignalEditorial.title,
-                              subtitle: topSignalEditorial.sectionSubtitle,
-                              items: topSignalItems,
-                              showRankPills: true,
-                              externalTopSignal: topSignalUsesRemote,
-                              insightsEnabled: insightsEnabled,
-                            ),
-                          ),
-                        if (juicrTopSignalEditorial != null &&
-                            juicrTopSignalItems.length >= 3)
-                          _RankedHomeRail(
-                            title: juicrTopSignalEditorial.title,
-                            subtitle: juicrTopSignalEditorial.sectionSubtitle,
-                            items: juicrTopSignalItems
-                                .take(10)
-                                .toList(growable: false),
-                            onTap: _openDetails,
-                            onOpenDiscovery: () => _openCuratedShelf(
-                              title: juicrTopSignalEditorial.title,
-                              subtitle: juicrTopSignalEditorial.sectionSubtitle,
-                              items: juicrTopSignalItems,
-                              showRankPills: true,
-                              externalTopSignal: juicrTopSignalUsesRemote,
-                              insightsEnabled: insightsEnabled,
-                            ),
-                          ),
-                        if (savedItems.isNotEmpty)
-                          _HomeRail(
-                            title: savedEditorial.title,
-                            subtitle: savedEditorial.sectionSubtitle,
-                            entries: [
-                              for (final item in savedItems.take(12))
-                                _HomeRailEntry(item: item),
-                            ],
-                            onTap: _openDetails,
-                            onOpenDiscovery: () => _openCuratedShelf(
-                              title: savedEditorial.title,
-                              subtitle: savedEditorial.sectionSubtitle,
-                              items: savedItems,
-                              insightsEnabled: insightsEnabled,
-                            ),
-                          ),
-                        if (upcomingItems.length >= 3)
-                          _RankedHomeRail(
-                            title: upcomingEditorial.title,
-                            subtitle: upcomingEditorial.sectionSubtitle,
-                            items:
-                                upcomingItems.take(20).toList(growable: false),
-                            showRankPills: false,
-                            onTap: _openDetails,
-                            onOpenDiscovery: () => _openCuratedShelf(
-                              title: upcomingEditorial.title,
-                              subtitle: upcomingEditorial.sectionSubtitle,
-                              items: upcomingItems,
-                              insightsEnabled: insightsEnabled,
-                            ),
-                          ),
+                        for (final rail in displayEditorialRails)
+                          if (rail.items.isNotEmpty)
+                            rail.editorial.kind.trim().toLowerCase() == 'ranked'
+                                ? _RankedHomeRail(
+                                    title: rail.editorial.title,
+                                    subtitle: rail.editorial.subtitle,
+                                    entries: rail.entries,
+                                    onTap: _openDetails,
+                                    onOpenDiscovery: () => _openCuratedShelf(
+                                      title: rail.editorial.title,
+                                      subtitle: rail.editorial.subtitle,
+                                      items: rail.items,
+                                      showRankPills: true,
+                                      externalTopSignal: true,
+                                      insightsEnabled: insightsEnabled,
+                                      ranks: [
+                                        for (final entry in rail.entries)
+                                          entry.rank,
+                                      ],
+                                    ),
+                                  )
+                                : _HomeRail(
+                                    title: rail.editorial.title,
+                                    subtitle: rail.editorial.subtitle,
+                                    entries: [
+                                      for (final item in rail.items)
+                                        _HomeRailEntry(item: item),
+                                    ],
+                                    onTap: _openDetails,
+                                    onOpenDiscovery: () => _openCuratedShelf(
+                                      title: rail.editorial.title,
+                                      subtitle: rail.editorial.subtitle,
+                                      items: rail.items,
+                                      insightsEnabled: insightsEnabled,
+                                    ),
+                                  ),
                       ],
                     );
                   },
@@ -1705,16 +837,82 @@ class _HomePageState extends State<HomePage>
   }
 }
 
-enum _HomeTitleWheelRail {
-  hero,
-  newMovies,
-  newSeries,
-  animation,
-  topMovies,
-  topSeries,
-  topSignal,
-  todaySignal,
-  juicrTopSignal,
+class _HydratedHomeRail {
+  const _HydratedHomeRail({required this.editorial, required this.entries});
+
+  final HomeEditorialRail editorial;
+  final List<_HydratedEditorialItem> entries;
+
+  List<CatalogItem> get items =>
+      entries.map((entry) => entry.item).toList(growable: false);
+
+  _HydratedHomeRail withItems(List<CatalogItem> nextItems) {
+    final nextByKey = {for (final item in nextItems) _itemKey(item): item};
+    return _HydratedHomeRail(
+      editorial: editorial,
+      entries: [
+        for (final entry in entries)
+          _HydratedEditorialItem(
+            item: nextByKey[_itemKey(entry.item)] ?? entry.item,
+            rank: entry.rank,
+          ),
+      ],
+    );
+  }
+
+  _HydratedHomeRail withEntries(List<_HydratedEditorialItem> nextEntries) {
+    return _HydratedHomeRail(editorial: editorial, entries: nextEntries);
+  }
+}
+
+class _HydratedEditorialItem {
+  const _HydratedEditorialItem({required this.item, required this.rank});
+
+  final CatalogItem item;
+  final int? rank;
+}
+
+List<_HydratedEditorialItem> _rankedEditorialEntries(
+  HomeEditorialRail editorial,
+  List<CatalogItem> items,
+) {
+  if (editorial.items.isEmpty) {
+    return [
+      for (final item in items) _HydratedEditorialItem(item: item, rank: null),
+    ];
+  }
+  final entries = <_HydratedEditorialItem>[];
+  var itemIndex = 0;
+  for (final signal in editorial.items) {
+    if (itemIndex >= items.length) break;
+    final item = items[itemIndex];
+    if (!_itemMatchesEditorialSignal(item, signal)) continue;
+    entries.add(
+      _HydratedEditorialItem(
+        item: item,
+        rank: signal.rank,
+      ),
+    );
+    itemIndex += 1;
+  }
+  return entries;
+}
+
+List<_HydratedEditorialItem> _entriesForHomeRail(
+  _HydratedHomeRail rail,
+  Map<String, CatalogItem> library,
+) {
+  switch (rail.editorial.id) {
+    case 'savedEditorial':
+      return [
+        for (final item in _savedForLaterItems(library.values))
+          _HydratedEditorialItem(item: item, rank: null),
+      ];
+    case 'upcomingEditorial':
+      return rail.entries;
+    default:
+      return rail.entries;
+  }
 }
 
 List<CatalogItem> _dedupeItems(List<CatalogItem> items) {
@@ -1732,44 +930,6 @@ List<CatalogItem> _dedupeItems(List<CatalogItem> items) {
   return result;
 }
 
-Map<String, dynamic>? _safeJsonDecodeMap(String? raw) {
-  if (raw == null || raw.isEmpty) return null;
-  try {
-    final decoded = jsonDecode(raw);
-    return decoded is Map<String, dynamic> ? decoded : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-List<CatalogItem> _catalogSnapshotList(dynamic value) {
-  if (value is! List) return const <CatalogItem>[];
-  final items = <CatalogItem>[];
-  for (final raw in value) {
-    if (raw is! Map<String, dynamic>) continue;
-    final item = CatalogItem.fromJson(raw);
-    if (item.isLocalCatalogItem ||
-        item.personalServerItemId != null ||
-        item.personalServerSeriesItemId != null) {
-      continue;
-    }
-    items.add(item);
-  }
-  return _dedupeItems(items).take(30).toList(growable: false);
-}
-
-List<Map<String, dynamic>> _safePublicSnapshotItems(
-  Iterable<CatalogItem> items,
-) {
-  return [
-    for (final item in items.take(30))
-      if (!item.isLocalCatalogItem &&
-          item.personalServerItemId == null &&
-          item.personalServerSeriesItemId == null)
-        item.toJson(),
-  ];
-}
-
 List<CatalogItem> _savedForLaterItems(Iterable<CatalogItem> items) {
   final deduped = _dedupeItems(items.toList().reversed.toList());
   final vod = [
@@ -1780,21 +940,6 @@ List<CatalogItem> _savedForLaterItems(Iterable<CatalogItem> items) {
     for (final item in vod)
       if (_isHomeAllowedByMatureGate(item)) item,
   ];
-}
-
-List<CatalogItem> _upcomingThisYearItems({required List<CatalogItem> movies}) {
-  final currentYear = DateTime.now().year;
-  final items = [
-    for (final item in movies)
-      if (item.type == MediaType.movie &&
-          item.isUpcoming &&
-          _itemYear(item) == currentYear &&
-          _hasHomePoster(item) &&
-          _isHomeAllowedByMatureGate(item))
-        item,
-  ];
-  items.sort(_compareUpcomingReleaseDate);
-  return items.toList(growable: false);
 }
 
 bool _hasHomePoster(CatalogItem item) {
@@ -1879,62 +1024,19 @@ String _homeUsedKey(CatalogItem item) {
   return contentKey.isEmpty ? _itemKey(item) : contentKey;
 }
 
-List<CatalogItem> _mergeHomeRailRefreshItems(
-  List<CatalogItem> previous,
-  List<CatalogItem> refreshed,
-) {
-  if (refreshed.isEmpty || previous.isEmpty) return refreshed;
-  final previousByItemKey = {for (final item in previous) _itemKey(item): item};
-  final previousByContentKey = <String, CatalogItem>{
-    for (final item in previous)
-      if (_homeContentKey(item).isNotEmpty) _homeContentKey(item): item,
-  };
-  return [
-    for (final item in refreshed)
-      (previousByItemKey[_itemKey(item)] ??
-                  previousByContentKey[_homeContentKey(item)])
-              ?.merge(item) ??
-          item,
-  ];
-}
-
-List<CatalogItem> _mergeHomeHeroDisplayItems(
-  List<CatalogItem> heroes,
-  List<CatalogItem> catalogPool,
-) {
-  if (heroes.isEmpty || catalogPool.isEmpty) return heroes;
-  final byItemKey = {for (final item in catalogPool) _itemKey(item): item};
-  final byContentKey = <String, CatalogItem>{
-    for (final item in catalogPool)
-      if (_homeContentKey(item).isNotEmpty) _homeContentKey(item): item,
-  };
-  final merged = <CatalogItem>[];
-  for (final hero in heroes) {
-    final richer =
-        byItemKey[_itemKey(hero)] ?? byContentKey[_homeContentKey(hero)];
-    merged.add(richer == null ? hero : hero.merge(richer));
-  }
-  return merged;
-}
-
 List<CatalogItem> _mergeHomeTitleWheelHydratedItems(
   List<CatalogItem> current,
   List<CatalogItem> hydrated,
 ) {
   if (current.isEmpty || hydrated.isEmpty) return current;
   final byItemKey = {for (final item in hydrated) _itemKey(item): item};
-  final byContentKey = <String, CatalogItem>{
-    for (final item in hydrated)
-      if (_homeContentKey(item).isNotEmpty) _homeContentKey(item): item,
-  };
   var changed = false;
   final merged = [
     for (final item in current)
       (() {
-        final richer =
-            byItemKey[_itemKey(item)] ?? byContentKey[_homeContentKey(item)];
+        final richer = byItemKey[_itemKey(item)];
         if (richer == null) return item;
-        final mergedItem = item.merge(richer);
+        final mergedItem = homeArtworkOnlyMerge(item, richer);
         if ((mergedItem.logo ?? '').trim() != (item.logo ?? '').trim()) {
           changed = true;
         }
@@ -1942,6 +1044,39 @@ List<CatalogItem> _mergeHomeTitleWheelHydratedItems(
       })(),
   ];
   return changed ? merged : current;
+}
+
+@visibleForTesting
+CatalogItem homeArtworkOnlyMerge(CatalogItem base, CatalogItem artwork) {
+  return CatalogItem(
+    type: base.type,
+    id: base.id,
+    name: base.name,
+    poster: artwork.poster ?? base.poster,
+    background: artwork.background ?? base.background,
+    logo: artwork.logo ?? base.logo,
+    year: base.year,
+    releaseDate: base.releaseDate,
+    tmdbId: base.tmdbId,
+    imdbId: base.imdbId,
+    genres: base.genres,
+    description: base.description,
+    imdbRating: base.imdbRating,
+    voteCount: base.voteCount,
+    adult: base.adult,
+    isUpcoming: base.isUpcoming,
+    isLocalCatalogItem: base.isLocalCatalogItem,
+    localPlaybackLocked: base.localPlaybackLocked,
+    localCatalogId: base.localCatalogId,
+    localCatalogItemId: base.localCatalogItemId,
+    localCatalogName: base.localCatalogName,
+    localMediaKind: base.localMediaKind,
+    localSourceLabel: base.localSourceLabel,
+    localRelinkNeededCount: base.localRelinkNeededCount,
+    personalServerTypeId: base.personalServerTypeId,
+    personalServerItemId: base.personalServerItemId,
+    personalServerSeriesItemId: base.personalServerSeriesItemId,
+  );
 }
 
 @visibleForTesting
@@ -1955,7 +1090,7 @@ List<CatalogItem> homeTitleWheelHydrationCandidates(
   for (final item in items.take(visibleLimit)) {
     if ((item.logo ?? '').trim().isNotEmpty) continue;
     if (item.tmdbId == null) continue;
-    final key = _homeUsedKey(item);
+    final key = _itemKey(item);
     if (seen.add(key)) candidates.add(item);
   }
   return candidates;
@@ -1972,164 +1107,14 @@ String _safeHomeTrailerErrorLabel(Object error) {
   return 'unavailable';
 }
 
-List<CatalogItem> _mergeHydratedUpcomingItems(
-  List<CatalogItem> current,
-  List<CatalogItem> hydrated,
+bool _itemMatchesEditorialSignal(
+  CatalogItem item,
+  HomeEditorialTrendItem signal,
 ) {
-  if (current.isEmpty || hydrated.isEmpty) return current;
-  final byKey = <String, CatalogItem>{
-    for (final item in hydrated) _itemKey(item): item,
-  };
-  final merged = [for (final item in current) byKey[_itemKey(item)] ?? item];
-  merged.sort(_compareUpcomingReleaseDate);
-  return merged;
-}
-
-int _compareUpcomingReleaseDate(CatalogItem left, CatalogItem right) {
-  final leftDate = _upcomingReleaseSortDate(left);
-  final rightDate = _upcomingReleaseSortDate(right);
-  if (leftDate == null && rightDate == null) {
-    return _imdbScore(right).compareTo(_imdbScore(left));
-  }
-  if (leftDate == null) return 1;
-  if (rightDate == null) return -1;
-  final dateCompare = leftDate.compareTo(rightDate);
-  if (dateCompare != 0) return dateCompare;
-  return _imdbScore(right).compareTo(_imdbScore(left));
-}
-
-DateTime? _upcomingReleaseSortDate(CatalogItem item) {
-  final rawDate = item.releaseDate?.trim();
-  if (rawDate == null || rawDate.isEmpty) return null;
-  final date = DateTime.tryParse(rawDate);
-  if (date == null) return null;
-  final currentYear = DateTime.now().year;
-  if (date.year != currentYear) return null;
-  return DateTime(date.year, date.month, date.day);
-}
-
-List<CatalogItem> _withoutUsedHomeItems(
-  List<CatalogItem> items,
-  Set<String> usedKeys,
-) {
-  return [
-    for (final item in items)
-      if (!usedKeys.contains(_homeUsedKey(item)) &&
-          _isHomeAllowedByMatureGate(item))
-        item,
-  ];
-}
-
-List<CatalogItem> _withoutContinueWatching(
-  List<CatalogItem> items,
-  Set<String> progressKeys,
-) {
-  return [
-    for (final item in items)
-      if (!progressKeys.contains(_itemKey(item)) &&
-          _isHomeAllowedByMatureGate(item))
-        item,
-  ];
-}
-
-List<CatalogItem> _backfilledSignalRailItems(
-  List<CatalogItem> primaryItems, {
-  required List<CatalogItem> fallbackPool,
-  required Set<String> usedKeys,
-  required int limit,
-  bool preservePrimaryRank = false,
-}) {
-  final seen = <String>{};
-  final result = <CatalogItem>[];
-  void addItems(Iterable<CatalogItem> items, {required bool allowUsed}) {
-    for (final item in items) {
-      if (result.length >= limit) break;
-      if (item.type.isLive || !_isHomeAllowedByMatureGate(item)) continue;
-      final key = _homeUsedKey(item);
-      if ((!allowUsed && usedKeys.contains(key)) || !seen.add(key)) continue;
-      result.add(item);
-    }
-  }
-
-  addItems(primaryItems, allowUsed: preservePrimaryRank);
-  if (result.length < limit) addItems(fallbackPool, allowUsed: false);
-  return result.toList(growable: false);
-}
-
-List<CatalogItem> _localTopSignalItems(
-  List<CatalogItem> items, {
-  int limit = 20,
-  required Map<String, CatalogItem> library,
-  required Map<String, ContinueWatchingEntry> progress,
-  required Map<String, CompletedWatchingEntry> completed,
-  required List<String> searchHistory,
-  required bool insightsEnabled,
-}) {
-  final ranked = [
-    for (final item in items)
-      if (!item.type.isLive && _isHomeAllowedByMatureGate(item))
-        _ScoredCatalogItem(
-          item,
-          _weeklySignalScore(
-            item,
-            library: library,
-            progress: progress,
-            completed: completed,
-            searchHistory: searchHistory,
-            insightsEnabled: insightsEnabled,
-          ),
-        ),
-  ]..sort((left, right) {
-      final score = right.score.compareTo(left.score);
-      if (score != 0) return score;
-      return itemTieBreaker(left.item).compareTo(itemTieBreaker(right.item));
-    });
-  return _dedupeItems(
-    ranked.map((entry) => entry.item).toList(growable: false),
-  ).take(limit).toList(growable: false);
-}
-
-List<CatalogItem> _weeklyTopSignalItems(
-  List<CatalogItem> items, {
-  required _EditorialRail? editorial,
-  int limit = 20,
-  required Map<String, CatalogItem> library,
-  required Map<String, ContinueWatchingEntry> progress,
-  required Map<String, CompletedWatchingEntry> completed,
-  required List<String> searchHistory,
-  required bool insightsEnabled,
-}) {
-  if (editorial == null) return const <CatalogItem>[];
-  final remoteRanked = _remoteTopSignalItems(items, editorial);
-  return remoteRanked.take(limit).toList(growable: false);
-}
-
-List<CatalogItem> _remoteTopSignalItems(
-  List<CatalogItem> items,
-  _EditorialRail? editorial,
-) {
-  if (editorial == null) return const <CatalogItem>[];
-  if (editorial.items.isEmpty) return const <CatalogItem>[];
-  final remaining = items
-      .where((item) => !item.type.isLive && _isHomeAllowedByMatureGate(item))
-      .toList();
-  final ranked = <CatalogItem>[];
-  final seen = <String>{};
-  for (final signal in editorial.items) {
-    final matchIndex = remaining.indexWhere(
-      (item) => _itemMatchesTrendSignal(item, signal),
-    );
-    if (matchIndex < 0) continue;
-    final match = remaining.removeAt(matchIndex);
-    final key = _itemKey(match);
-    if (seen.add(key)) ranked.add(match);
-  }
-  return ranked;
-}
-
-bool _itemMatchesTrendSignal(CatalogItem item, HomeEditorialTrendItem signal) {
   if (signal.type != null && item.type != signal.type) return false;
-  if (signal.tmdbId != null && item.tmdbId == signal.tmdbId) return true;
+  if (signal.tmdbId != null) {
+    return item.tmdbId == signal.tmdbId;
+  }
   final itemTitle = _normalizedTrendTitle(item.name);
   final signalTitle = _normalizedTrendTitle(signal.title);
   if (itemTitle.isEmpty || signalTitle.isEmpty || itemTitle != signalTitle) {
@@ -2137,164 +1122,11 @@ bool _itemMatchesTrendSignal(CatalogItem item, HomeEditorialTrendItem signal) {
   }
   if (signal.year.isEmpty) return true;
   final year = item.year?.trim() ?? '';
-  return year.isEmpty || year.startsWith(signal.year);
+  return year.startsWith(signal.year);
 }
 
 String _normalizedTrendTitle(String value) {
   return _normalizeEditorialSearchText(value);
-}
-
-double _weeklySignalScore(
-  CatalogItem item, {
-  required Map<String, CatalogItem> library,
-  required Map<String, ContinueWatchingEntry> progress,
-  required Map<String, CompletedWatchingEntry> completed,
-  required List<String> searchHistory,
-  required bool insightsEnabled,
-}) {
-  final key = _itemKey(item);
-  var score = _imdbScore(item) * 10;
-  final year = _itemYear(item);
-  final nowYear = DateTime.now().year;
-  if (year != null) {
-    final age = (nowYear - year).abs();
-    score += math.max(0, 8 - age).toDouble();
-  }
-  if (insightsEnabled) {
-    if (library.containsKey(key)) score += 12;
-    final progressEntry = progress[key];
-    if (progressEntry != null) {
-      score += 18 + progressEntry.progress.clamp(0.0, 1.0).toDouble() * 8;
-    }
-    if (completed.containsKey(key)) score += 20;
-    final normalizedName = item.name.toLowerCase();
-    for (final query in searchHistory.take(6)) {
-      final normalizedQuery = query.trim().toLowerCase();
-      if (normalizedQuery.isEmpty) continue;
-      if (normalizedName.contains(normalizedQuery) ||
-          normalizedQuery.contains(normalizedName)) {
-        score += 10;
-      }
-    }
-  }
-  return score;
-}
-
-int itemTieBreaker(CatalogItem item) {
-  return item.id.codeUnits.fold<int>(0, (value, unit) => value + unit) +
-      item.name.codeUnits.fold<int>(0, (value, unit) => value + unit);
-}
-
-String _externalTopSignalSubtitle(String fallback) {
-  final cleanFallback = fallback.trim();
-  final sourceLine =
-      'Ranked from the shared trend source, then matched to Juicr catalog cards.';
-  return cleanFallback.isEmpty ? sourceLine : '$cleanFallback $sourceLine';
-}
-
-String _topTenItemReason(
-  CatalogItem item,
-  int rank, {
-  required bool externalTopSignal,
-}) {
-  final clues = <String>[];
-  final year = _itemYear(item);
-  if (year != null && year >= DateTime.now().year - 1) {
-    clues.add('fresh release');
-  }
-  if (item.imdbRating != null && item.imdbRating!.isNotEmpty) {
-    clues.add('IMDb ${item.imdbRating}');
-  }
-  final genre = item.genres
-      .map(_displayGenre)
-      .firstWhere((value) => value != 'All genres', orElse: () => '');
-  if (genre.isNotEmpty) clues.add(genre.toLowerCase());
-  if (AppState.continueWatching.value.containsKey(item.id)) {
-    clues.add('in Continue');
-  } else if (AppState.library.value.containsKey(item.id)) {
-    clues.add('saved');
-  }
-  final reason =
-      clues.isEmpty ? 'strong shelf momentum' : clues.take(3).join(' - ');
-  return externalTopSignal
-      ? 'Rank $rank from the shared trend source, matched here with $reason.'
-      : 'Rank $rank because of $reason.';
-}
-
-bool _isTopTenShelfTitle(String title) {
-  return title == "juicr's top 10" ||
-      title == 'juicr top 10' ||
-      title == 'trending today' ||
-      title == 'trending this week' ||
-      title == 'people keep picking this' ||
-      title == 'the hot row' ||
-      title == 'most wanted right now' ||
-      title == "everyone's hovering here" ||
-      title == 'big week energy' ||
-      title == 'trending on the couch' ||
-      title == 'this week on juicr';
-}
-
-_EditorialRail _weeklyTopSignalEditorial() {
-  final week = DateTime.now().difference(DateTime(2024)).inDays ~/ 7;
-  return _pickEditorial(const [
-    _EditorialRail(
-      title: 'Trending This Week',
-      subtitle: 'Local titles carrying this week\'s pulse.',
-      id: 'topSignal',
-      kind: 'ranked',
-      perType: 20,
-    ),
-    _EditorialRail(
-      title: 'Trending This Week',
-      subtitle: 'The picks that keep winning the room.',
-      id: 'topSignal',
-      kind: 'ranked',
-      perType: 20,
-    ),
-    _EditorialRail(
-      title: 'Trending This Week',
-      subtitle: 'Saved, searched, resumed, hard to ignore.',
-      id: 'topSignal',
-      kind: 'ranked',
-      perType: 20,
-    ),
-    _EditorialRail(
-      title: 'Trending This Week',
-      subtitle: 'The shelf with the loudest pulse.',
-      id: 'topSignal',
-      kind: 'ranked',
-      perType: 20,
-    ),
-  ], offset: week);
-}
-
-_EditorialRail _dailyTopSignalEditorial() {
-  return const _EditorialRail(
-    id: 'todaySignal',
-    kind: 'ranked',
-    title: 'Trending Today',
-    subtitle: 'Local picks moving fastest right now.',
-    types: [MediaType.movie, MediaType.series],
-    perType: 20,
-    intent: 'local_trending_fallback',
-    releaseWindow: 'local_trends',
-    theme: 'trend:local',
-  );
-}
-
-_EditorialRail _juicrTopSignalEditorial() {
-  return const _EditorialRail(
-    id: 'juicrTopSignal',
-    kind: 'ranked',
-    title: "Juicr's Top 10",
-    subtitle: 'Local movies and shows with the strongest score signal.',
-    types: [MediaType.movie, MediaType.series],
-    perType: 10,
-    intent: 'local_score_fallback',
-    releaseWindow: 'local_trends',
-    theme: 'score:local',
-  );
 }
 
 int? _itemYear(CatalogItem item) {
@@ -2704,261 +1536,33 @@ _EditorialRail _pickEditorial(List<_EditorialRail> rails, {int offset = 0}) {
   return rails[_editorialBucket(offset: offset) % rails.length];
 }
 
-_EditorialRail _editorialOrFallback(
-  HomeEditorialRail? remote,
-  _EditorialRail fallback,
-) {
-  if (remote == null || remote.title.isEmpty) return fallback;
+_EditorialRail _editorialFromServer(HomeEditorialRail remote) {
   return _EditorialRail(
-    id: remote.id.isEmpty ? fallback.id : remote.id,
-    kind: remote.kind.isEmpty ? fallback.kind : remote.kind,
-    title: _titleCaseHomeLabel(remote.title),
-    subtitle: remote.subtitle.isEmpty ? fallback.subtitle : remote.subtitle,
-    genres: remote.genres.isEmpty ? fallback.genres : remote.genres,
-    types: remote.types.isEmpty ? fallback.types : remote.types,
+    id: remote.id,
+    kind: remote.kind,
+    title: remote.title,
+    subtitle: remote.subtitle,
+    genres: remote.genres,
+    types: remote.types,
     sort: remote.sort,
     perType: remote.perType,
-    requireGenreMatch: remote.requireGenreMatch || fallback.requireGenreMatch,
-    intent: remote.intent.isEmpty ? fallback.intent : remote.intent,
-    releaseWindow: remote.releaseWindow.isEmpty
-        ? fallback.releaseWindow
-        : remote.releaseWindow,
-    theme: remote.theme.isEmpty ? fallback.theme : remote.theme,
-    seasonalWindow: remote.seasonalWindow.isEmpty
-        ? fallback.seasonalWindow
-        : remote.seasonalWindow,
-    query: remote.query.isEmpty ? fallback.query : remote.query,
-    curationKind: remote.curationKind.isEmpty
-        ? fallback.curationKind
-        : remote.curationKind,
-    notificationHook: remote.notificationHook.isEmpty
-        ? fallback.notificationHook
-        : remote.notificationHook,
-    pageOneOnly: remote.pageOneOnly || fallback.pageOneOnly,
+    requireGenreMatch: remote.requireGenreMatch,
+    intent: remote.intent,
+    releaseWindow: remote.releaseWindow,
+    theme: remote.theme,
+    seasonalWindow: remote.seasonalWindow,
+    query: remote.query,
+    curationKind: remote.curationKind,
+    notificationHook: remote.notificationHook,
+    pageOneOnly: remote.pageOneOnly,
     limit: remote.limit,
     movieLimit: remote.movieLimit,
     seriesLimit: remote.seriesLimit,
-    items: remote.items.isEmpty ? fallback.items : remote.items,
+    items: remote.items,
   );
 }
 
-_EditorialRail? _editorialOrNull(
-  HomeEditorialRail? remote,
-  _EditorialRail fallback,
-) {
-  if (remote == null || remote.title.isEmpty) return null;
-  return _editorialOrFallback(remote, fallback);
-}
-
-_EditorialRail _dailyHeroEditorial() {
-  return _pickEditorial(const [
-    _EditorialRail(
-      title: 'In Theaters',
-      subtitle: 'Big-screen energy, couch-ready.',
-      types: [MediaType.movie],
-      sort: CatalogSort.nowPlaying,
-      intent: 'theatrical_trailers',
-      releaseWindow: 'now_playing',
-    ),
-    _EditorialRail(
-      title: 'New This Week',
-      subtitle: 'Fresh before the rush.',
-      genres: ['thriller', 'mystery', 'action', 'drama'],
-      sort: CatalogSort.year,
-      intent: 'current_releases',
-      releaseWindow: 'current_year',
-      requireGenreMatch: true,
-    ),
-    _EditorialRail(
-      title: 'Horror night',
-      subtitle: 'Every hallway is suspicious.',
-      types: [MediaType.movie, MediaType.series, MediaType.animation],
-      genres: ['horror'],
-      sort: CatalogSort.imdbRating,
-      perType: 3,
-      requireGenreMatch: true,
-    ),
-    _EditorialRail(
-      title: 'Story momentum',
-      subtitle: 'Series and animation with room to pull you in.',
-      types: [MediaType.series, MediaType.animation],
-      genres: ['drama', 'adventure', 'action', 'mystery'],
-      requireGenreMatch: true,
-    ),
-    _EditorialRail(
-      title: 'Weekend Picks',
-      subtitle: 'Snacks, couch, low pressure.',
-      genres: ['comedy', 'drama', 'adventure'],
-      requireGenreMatch: true,
-    ),
-  ], offset: 3);
-}
-
-_EditorialRail _dailyMovieEditorial() {
-  final rail = _pickEditorial(const [
-    _EditorialRail(
-      title: 'Near the remote',
-      subtitle: 'No endless scrolling required.',
-      genres: ['drama', 'thriller', 'action'],
-    ),
-    _EditorialRail(
-      title: 'Big-screen picks',
-      subtitle: 'A fresh movie shelf for tonight.',
-      genres: ['adventure', 'action', 'thriller'],
-    ),
-    _EditorialRail(
-      title: 'Not alone',
-      subtitle: 'Bring backup.',
-      genres: ['horror', 'thriller', 'mystery'],
-    ),
-    _EditorialRail(
-      title: 'Suspicious curtains',
-      subtitle: 'Blankets encouraged.',
-      genres: ['horror', 'mystery', 'thriller'],
-    ),
-    _EditorialRail(
-      title: 'No sitting still',
-      subtitle: 'Fast starts, bad decisions.',
-      genres: ['action', 'crime', 'thriller'],
-    ),
-    _EditorialRail(
-      title: 'Strange little winners',
-      subtitle: 'Odd, sharp, weirdly cozy.',
-      genres: ['comedy', 'drama', 'crime'],
-    ),
-  ]);
-  return rail.withDefaultTypes(const [MediaType.movie]);
-}
-
-_EditorialRail _dailySeriesEditorial() {
-  final rail = _pickEditorial(const [
-    _EditorialRail(
-      title: 'Cancel plans',
-      subtitle: 'There goes the evening.',
-      genres: ['drama', 'action', 'mystery'],
-    ),
-    _EditorialRail(
-      title: 'Rabbit hole',
-      subtitle: 'One peek. Too late.',
-      genres: ['mystery', 'drama', 'thriller'],
-    ),
-    _EditorialRail(
-      title: 'Series worth starting',
-      subtitle: 'A few episodes with room to pull you in.',
-      genres: ['drama', 'mystery', 'thriller'],
-    ),
-    _EditorialRail(
-      title: 'Secrets everywhere',
-      subtitle: 'That is where it gets good.',
-      genres: ['crime', 'thriller', 'mystery'],
-    ),
-    _EditorialRail(
-      title: 'Weird rent',
-      subtitle: 'Visit once. Move in.',
-      genres: ['sci-fi', 'science fiction', 'fantasy', 'adventure'],
-    ),
-    _EditorialRail(
-      title: 'Messy people',
-      subtitle: 'Soft landing, complicated hearts.',
-      genres: ['comedy', 'drama', 'romance'],
-    ),
-  ], offset: 1);
-  return rail.withDefaultTypes(const [MediaType.series]);
-}
-
-_EditorialRail _dailyAnimationEditorial() {
-  final rail = _pickEditorial(const [
-    _EditorialRail(
-      title: 'Neon nerves',
-      subtitle: 'Bright worlds, sharp turns.',
-      genres: ['action', 'fantasy', 'adventure'],
-    ),
-    _EditorialRail(
-      title: 'Powering up',
-      subtitle: 'Courage with volume.',
-      genres: ['action', 'adventure'],
-    ),
-    _EditorialRail(
-      title: 'Sleep can wait',
-      subtitle: 'Just one more. Allegedly.',
-      genres: ['adventure', 'comedy', 'action'],
-    ),
-    _EditorialRail(
-      title: 'Bad map',
-      subtitle: 'Lost in a good way.',
-      genres: ['fantasy', 'mystery', 'sci-fi', 'science fiction'],
-    ),
-  ], offset: 2);
-  return rail.withDefaultTypes(const [MediaType.animation]);
-}
-
-List<CatalogItem> _dailyEditorialItems(
-  _EditorialRail rail,
-  List<CatalogItem> items,
-) {
-  final shuffledItems = _dailyShuffle(items, seed: rail.title.hashCode);
-  final scopedItems = rail.types.isEmpty
-      ? shuffledItems
-      : shuffledItems
-          .where((item) => rail.types.contains(item.type))
-          .toList(growable: false);
-  final candidates = [
-    for (final item in (scopedItems.isEmpty ? items : scopedItems))
-      if (_hasHomePoster(item)) item,
-  ];
-  final intentCandidates = _homeItemsMatchingEditorialIntent(candidates, rail);
-  final hasScopedQuery = rail.query.trim().isNotEmpty;
-  if ((_requiresStrictEditorialIntent(rail) || hasScopedQuery) &&
-      intentCandidates.isEmpty) {
-    return const <CatalogItem>[];
-  }
-  final editorialCandidates =
-      intentCandidates.isEmpty ? candidates : intentCandidates;
-  if (rail.genres.isEmpty) {
-    return editorialCandidates.take(12).toList(growable: false);
-  }
-  final genreMatches = editorialCandidates.where((item) {
-    final itemGenres = item.genres.map((genre) => genre.toLowerCase());
-    return rail.genres.any(
-      (target) => itemGenres.any((genre) => genre.contains(target)),
-    );
-  }).toList(growable: false);
-  if (genreMatches.isEmpty) {
-    return rail.requireGenreMatch
-        ? const <CatalogItem>[]
-        : editorialCandidates.take(12).toList(growable: false);
-  }
-  if (rail.requireGenreMatch) {
-    return genreMatches.take(12).toList(growable: false);
-  }
-  final matchedKeys = {for (final item in genreMatches) _itemKey(item)};
-  final fallback = [
-    for (final item in editorialCandidates)
-      if (!matchedKeys.contains(_itemKey(item))) item,
-  ];
-  return _dedupeItems([
-    ...genreMatches,
-    ...fallback,
-  ]).take(12).toList(growable: false);
-}
-
-const int _minimumHomeRailItems = 10;
-const int _targetHomeRailItems = 10;
-const int _minimumServerHeroItems = 3;
-const int _targetHeroItems = 12;
 const double _homeHeroViewportFraction = 0.76;
-
-List<CatalogItem> _dailyShuffle(List<CatalogItem> items, {required int seed}) {
-  final copy = items.toList(growable: false);
-  final random = math.Random(_editorialBucket(offset: seed.abs() % 997));
-  for (var index = copy.length - 1; index > 0; index -= 1) {
-    final swapIndex = random.nextInt(index + 1);
-    final value = copy[index];
-    copy[index] = copy[swapIndex];
-    copy[swapIndex] = value;
-  }
-  return copy;
-}
 
 class _HeroCarousel extends StatefulWidget {
   const _HeroCarousel({
@@ -3334,22 +1938,11 @@ class _HeroEditorialHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final displayTitle = _titleCaseHomeLabel(title);
+    final displayTitle = title;
     final phoneLandscape = JuicrVisual.phoneLandscape(context);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          _heroHeaderKicker(displayTitle),
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: colorScheme.primary.withValues(alpha: 0.78),
-                fontSize: phoneLandscape ? 8.0 : 9.5,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 1.2,
-              ),
-        ),
-        SizedBox(height: phoneLandscape ? 1 : 3),
         SizedBox(
           height: phoneLandscape ? 16 : 22,
           child: _AutoScrollTitle(
@@ -3380,17 +1973,6 @@ class _HeroEditorialHeader extends StatelessWidget {
       ],
     );
   }
-}
-
-String _heroHeaderKicker(String title) {
-  final normalized = title.toLowerCase();
-  if (normalized.contains('trend') || normalized.contains('hot')) {
-    return 'PULSE CHECK';
-  }
-  if (normalized.contains('theater') || normalized.contains('cinema')) {
-    return 'NOW PLAYING';
-  }
-  return 'TODAY\'S CURATION';
 }
 
 class _AdaptiveHeroIndicator extends StatelessWidget {
@@ -4372,7 +2954,7 @@ class _HomeRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final displayTitle = _titleCaseHomeLabel(title);
+    final displayTitle = title;
     final compactLandscape = JuicrVisual.compactLandscape(context);
     final phoneLandscape = JuicrVisual.phoneLandscape(context);
     return SliverToBoxAdapter(
@@ -4505,7 +3087,7 @@ class _RankedHomeRail extends StatelessWidget {
   const _RankedHomeRail({
     required this.title,
     required this.subtitle,
-    required this.items,
+    required this.entries,
     required this.onTap,
     this.showRankPills = true,
     this.onOpenDiscovery,
@@ -4513,14 +3095,14 @@ class _RankedHomeRail extends StatelessWidget {
 
   final String title;
   final String subtitle;
-  final List<CatalogItem> items;
+  final List<_HydratedEditorialItem> entries;
   final ValueChanged<CatalogItem> onTap;
   final bool showRankPills;
   final VoidCallback? onOpenDiscovery;
 
   @override
   Widget build(BuildContext context) {
-    final displayTitle = _titleCaseHomeLabel(title);
+    final displayTitle = title;
     final compactLandscape = JuicrVisual.compactLandscape(context);
     final phoneLandscape = JuicrVisual.phoneLandscape(context);
     return SliverToBoxAdapter(
@@ -4595,22 +3177,23 @@ class _RankedHomeRail extends StatelessWidget {
                   horizontal: compactLandscape ? 14 : 18,
                 ),
                 scrollDirection: Axis.horizontal,
-                itemCount: items.length,
+                itemCount: entries.length,
                 separatorBuilder: (_, __) =>
                     SizedBox(width: compactLandscape ? 8 : 12),
                 itemBuilder: (context, index) {
-                  final item = items[index];
+                  final entry = entries[index];
+                  final item = entry.item;
                   if (compactLandscape) {
                     return _HomeLandscapeCard(
                       entry: _HomeRailEntry(item: item),
-                      rank: showRankPills ? index + 1 : null,
+                      rank: showRankPills ? entry.rank : null,
                       onTap: () => onTap(item),
                     );
                   }
                   if (showRankPills) {
                     return _RankedPosterCard(
                       item: item,
-                      rank: index + 1,
+                      rank: entry.rank!,
                       onTap: () => onTap(item),
                     );
                   }
@@ -4634,23 +3217,26 @@ class _HomeShelfPage extends StatelessWidget {
     required this.items,
     this.showRankPills = false,
     this.externalTopSignal = false,
+    this.ranks = const <int?>[],
   });
 
   final String title;
   final List<CatalogItem> items;
   final bool showRankPills;
   final bool externalTopSignal;
+  final List<int?> ranks;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final displayTitle = _titleCaseHomeLabel(title);
+    final displayTitle = title;
     final compactLandscape = JuicrVisual.compactLandscape(context);
     if (showRankPills) {
       return _TopTenShelfPage(
         title: displayTitle,
         items: items,
         externalTopSignal: externalTopSignal,
+        ranks: ranks,
       );
     }
     return Scaffold(
@@ -4713,18 +3299,19 @@ class _TopTenShelfPage extends StatelessWidget {
     required this.title,
     required this.items,
     required this.externalTopSignal,
+    required this.ranks,
   });
 
   final String title;
   final List<CatalogItem> items;
   final bool externalTopSignal;
+  final List<int?> ranks;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final displayTitle = _titleCaseHomeLabel(title);
-    final rankedLimit = _rankedShelfLimit(title, externalTopSignal);
-    final rankedItems = items.take(rankedLimit).toList(growable: false);
+    final displayTitle = title;
+    final rankedItems = items;
     return Scaffold(
       body: SafeArea(
         child: CustomScrollView(
@@ -4744,17 +3331,11 @@ class _TopTenShelfPage extends StatelessWidget {
                   itemCount: rankedItems.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 14),
                   itemBuilder: (context, index) {
-                    final rank = index + 1;
+                    final rank = ranks[index]!;
                     final item = rankedItems[index];
                     return _TopTenWideCard(
                       item: item,
                       rank: rank,
-                      reason: _topTenItemReason(
-                        item,
-                        rank,
-                        externalTopSignal: externalTopSignal,
-                      ),
-                      externalTopSignal: externalTopSignal,
                     );
                   },
                 ),
@@ -4766,29 +3347,18 @@ class _TopTenShelfPage extends StatelessWidget {
   }
 }
 
-int _rankedShelfLimit(String title, bool externalTopSignal) {
-  final normalized = title.trim().toLowerCase();
-  if (externalTopSignal && normalized != "juicr's top 10") return 20;
-  return 10;
-}
-
 class _TopTenWideCard extends StatelessWidget {
   const _TopTenWideCard({
     required this.item,
     required this.rank,
-    required this.reason,
-    required this.externalTopSignal,
   });
 
   final CatalogItem item;
   final int rank;
-  final String reason;
-  final bool externalTopSignal;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final sourceLabel = externalTopSignal ? 'shared trend' : 'local';
     final background = item.background ?? item.poster;
     final poster = item.type.isLive ? item.logo ?? item.poster : item.poster;
     final backgroundCacheWidth = _homeImageCacheWidth(context, 360);
@@ -4798,7 +3368,7 @@ class _TopTenWideCard extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: Semantics(
         button: true,
-        label: 'Open $sourceLabel rank $rank, ${item.name}',
+        label: 'Open rank $rank, ${item.name}',
         child: InkWell(
           onTap: () {
             Navigator.of(
@@ -4910,18 +3480,6 @@ class _TopTenWideCard extends StatelessWidget {
                                   ),
                             ),
                             const Spacer(),
-                            Text(
-                              reason,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .labelMedium
-                                  ?.copyWith(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w900,
-                                  ),
-                            ),
                           ],
                         ),
                       ),

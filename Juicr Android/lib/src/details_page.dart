@@ -501,6 +501,7 @@ class _DetailsPageState extends State<DetailsPage>
     Future<NativePlayerNextEpisode?> Function(
       PlaybackRequestCancellation cancellation,
     )? onNextEpisode,
+    List<NativePlayerEpisode> episodes = const <NativePlayerEpisode>[],
     bool limitToFirstQualityPass = false,
     bool liveMode = false,
     bool preferSavedResume = false,
@@ -529,6 +530,7 @@ class _DetailsPageState extends State<DetailsPage>
           skipSegmentEpisode: skipSegmentEpisode,
           nextEpisodeLabel: nextEpisodeLabel,
           onNextEpisode: onNextEpisode,
+          episodes: episodes,
           limitToFirstQualityPass: limitToFirstQualityPass,
           liveMode: liveMode,
           preferSavedResume: preferSavedResume,
@@ -943,6 +945,9 @@ class _DetailsPageState extends State<DetailsPage>
                 episodeList,
                 cancellation: cancellation,
               ),
+      episodes: progressItem == null
+          ? const <NativePlayerEpisode>[]
+          : _nativePlayerEpisodes(progressItem, episodeList),
       liveMode: liveMode,
       rewardedAdReason: rewardedAdReason,
       preferSavedResume: preferSavedResume,
@@ -1116,6 +1121,7 @@ class _DetailsPageState extends State<DetailsPage>
     Future<NativePlayerNextEpisode?> Function(
       PlaybackRequestCancellation cancellation,
     )? onNextEpisode,
+    List<NativePlayerEpisode> episodes = const <NativePlayerEpisode>[],
     bool liveMode = false,
     bool preferSavedResume = false,
     required String rewardedAdReason,
@@ -1217,7 +1223,8 @@ class _DetailsPageState extends State<DetailsPage>
     final result = await _openNativePlayer(
       title,
       requests,
-      resolveNativeProvider: (providerId, cancellation) => resolveNativeProvider(
+      resolveNativeProvider: (providerId, cancellation) =>
+          resolveNativeProvider(
         providerId,
         cancellation,
       ),
@@ -1242,6 +1249,7 @@ class _DetailsPageState extends State<DetailsPage>
       skipSegmentEpisode: skipSegmentEpisode,
       nextEpisodeLabel: nextEpisodeLabel,
       onNextEpisode: onNextEpisode,
+      episodes: episodes,
       limitToFirstQualityPass: defaultProviderSelection.cappedColdScan,
       liveMode: liveMode,
       preferSavedResume: preferSavedResume,
@@ -2063,6 +2071,33 @@ class _DetailsPageState extends State<DetailsPage>
     return sorted.first;
   }
 
+  List<NativePlayerEpisode> _nativePlayerEpisodes(
+    CatalogItem item,
+    List<EpisodeItem> episodes,
+  ) {
+    final sorted = episodes.toList(growable: false)
+      ..sort((left, right) {
+        final season = left.season.compareTo(right.season);
+        return season != 0 ? season : left.episode.compareTo(right.episode);
+      });
+    return [
+      for (final episode in sorted)
+        NativePlayerEpisode(
+          season: episode.season,
+          episode: episode.episode,
+          title: episode.title,
+          description: episode.description,
+          thumbnail: episode.thumbnail,
+          resolve: (cancellation) => _buildNativeNextEpisode(
+            item,
+            episode,
+            episodes,
+            cancellation: cancellation,
+          ),
+        ),
+    ];
+  }
+
   Future<NativePlayerNextEpisode?> _buildNativeNextEpisode(
     CatalogItem item,
     EpisodeItem episode,
@@ -2168,14 +2203,16 @@ class _DetailsPageState extends State<DetailsPage>
     return NativePlayerNextEpisode(
       title: '${item.name} S${episode.season} E${episode.episode}',
       sources: requests,
-      resolveProvider: (providerId, cancellation) => _api.resolveEpisodeNativeSources(
+      resolveProvider: (providerId, cancellation) =>
+          _api.resolveEpisodeNativeSources(
         item,
         season: episode.season,
         episode: episode.episode,
         providerId: providerId,
         cancellation: cancellation,
       ),
-      resolveRecoveryProvider: (providerId, cancellation) => _api.resolveEpisodeNativeSources(
+      resolveRecoveryProvider: (providerId, cancellation) =>
+          _api.resolveEpisodeNativeSources(
         item,
         season: episode.season,
         episode: episode.episode,
@@ -2224,6 +2261,7 @@ class _DetailsPageState extends State<DetailsPage>
                 episodes,
                 cancellation: cancellation,
               ),
+      episodes: _nativePlayerEpisodes(item, episodes),
       limitToFirstQualityPass: defaultProviderSelection.cappedColdScan,
     );
   }

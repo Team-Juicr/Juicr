@@ -20,6 +20,11 @@ import 'libvlc_hls_relay.dart';
 import 'mobile_libvlc_coordinator.dart';
 import 'mobile_libvlc_models.dart';
 import 'mobile_libvlc_relay_transport.dart';
+import 'mobile_playback_episode_selection.dart';
+import 'mobile_playback_candidate_inventory.dart';
+import 'mobile_playback_audio_ownership.dart';
+import 'mobile_playback_quality_selection.dart';
+import 'mobile_playback_replacement_transaction.dart';
 import 'mobile_playback_route_startup.dart';
 import 'motion.dart';
 import 'native_media_bridge.dart';
@@ -60,6 +65,15 @@ typedef NativePlaybackRequestResolver = Future<List<NativePlaybackRequest>>
 /// this unset and follows the normal native-controller path unchanged.
 @visibleForTesting
 class NativePlayerPageLifecycleHarness {
+  NativePlayerPageLifecycleHarness({
+    this.skipInitialOpen = false,
+    this.skipPlaybackInterstitials = false,
+  });
+
+  final bool skipInitialOpen;
+  final bool skipPlaybackInterstitials;
+  int Function()? retainedCandidateCount;
+  Future<void> Function()? openNextEpisode;
   int attached = 0;
   int detached = 0;
   int acceptedCallbacks = 0;
@@ -193,6 +207,20 @@ String _libVlcAudioDiagnostic(VlcPlayerValue value) {
       'selected:$selected,volume:$muted';
 }
 
+const String _mobileLibVlcPigeonChannelPrefix =
+    'dev.flutter.pigeon.flutter_vlc_player_platform_interface.VlcPlayerApi.';
+
+Future<Object?> _mobileCallLibVlcPigeon(
+  String method,
+  List<Object?> arguments,
+) {
+  final channel = BasicMessageChannel<Object?>(
+    '$_mobileLibVlcPigeonChannelPrefix$method',
+    const StandardMessageCodec(),
+  );
+  return channel.send(arguments);
+}
+
 Color _playerAccent(BuildContext context) =>
     Theme.of(context).colorScheme.primary;
 
@@ -236,6 +264,8 @@ class NativePlayerPage extends StatefulWidget {
     this.skipSegmentEpisode,
     this.nextEpisodeLabel,
     this.onNextEpisode,
+    this.episodes = const <NativePlayerEpisode>[],
+    this.onStartupProven,
     this.enableProviderWarmup = true,
     this.limitToFirstQualityPass = false,
     this.liveMode = false,
@@ -260,6 +290,8 @@ class NativePlayerPage extends StatefulWidget {
   final Future<NativePlayerNextEpisode?> Function(
     PlaybackRequestCancellation cancellation,
   )? onNextEpisode;
+  final List<NativePlayerEpisode> episodes;
+  final Future<void> Function()? onStartupProven;
   final bool enableProviderWarmup;
   final bool limitToFirstQualityPass;
   final bool liveMode;
@@ -287,10 +319,12 @@ class NativePlaybackRequest {
   const NativePlaybackRequest({
     required this.providerId,
     this.sources = const <PlaybackSource>[],
+    this.candidateFamily,
   });
 
   final String providerId;
   final List<PlaybackSource> sources;
+  final MobilePlaybackCandidateFamily? candidateFamily;
 }
 
 List<NativePlaybackRequest> mobilePrioritizeExplicitLibVlcRequestsByTransport(
@@ -404,6 +438,7 @@ class NativePlayerNextEpisode {
     this.skipSegmentEpisode,
     this.nextEpisodeLabel,
     this.onNextEpisode,
+    this.episodes = const <NativePlayerEpisode>[],
     this.limitToFirstQualityPass = false,
   });
 
@@ -423,7 +458,28 @@ class NativePlayerNextEpisode {
   final Future<NativePlayerNextEpisode?> Function(
     PlaybackRequestCancellation cancellation,
   )? onNextEpisode;
+  final List<NativePlayerEpisode> episodes;
   final bool limitToFirstQualityPass;
+}
+
+class NativePlayerEpisode {
+  const NativePlayerEpisode({
+    required this.season,
+    required this.episode,
+    required this.title,
+    required this.resolve,
+    this.description,
+    this.thumbnail,
+  });
+
+  final int season;
+  final int episode;
+  final String title;
+  final String? description;
+  final String? thumbnail;
+  final Future<NativePlayerNextEpisode?> Function(
+    PlaybackRequestCancellation cancellation,
+  ) resolve;
 }
 
 enum VideoFitMode {
@@ -735,7 +791,10 @@ class _NativePlaybackController {
           libVlcProfile: libVlcProfile ?? _mobileLibVlcDriverProfile,
           vlc: VlcPlayerController.network(
             source.url,
-            hwAcc: (libVlcProfile ?? _mobileLibVlcDriverProfile).hwAcc,
+            hwAcc: _mobileLibVlcHardwareAcceleration(
+              source,
+              libVlcProfile ?? _mobileLibVlcDriverProfile,
+            ),
             autoPlay: false,
             autoInitialize: false,
             options: _vlcPlayerOptions(
@@ -755,7 +814,9 @@ class _NativePlaybackController {
   final _Media3NativePlayerController? media3;
   final VideoViewType? videoViewType;
   final _LibVlcProfile? libVlcProfile;
+  final GlobalKey platformSurfaceIdentity = GlobalKey();
   bool _platformSurfaceBuildLogged = false;
+  int? _confirmedLibVlcAudioTrackId;
 
   bool get isInitialized =>
       video?.value.isInitialized ??
@@ -804,6 +865,25 @@ class _NativePlaybackController {
   Size get size =>
       video?.value.size ?? vlc?.value.size ?? media3?.size ?? Size.zero;
   bool get hasRenderedVideoFrame => media3?.firstFrameRendered ?? true;
+  bool get hasSelectedAudioTrack {
+    final media3Controller = media3;
+    if (media3Controller != null) {
+      final summary = media3Controller.audioTrackSummary.trim().toLowerCase();
+      return summary.contains('selected:') &&
+          !summary.contains('selected:none') &&
+          !summary.contains('selected:0');
+    }
+    final vlcController = vlc;
+    if (vlcController != null) {
+      return mobileLibVlcHasSelectedAudioTrack(
+            trackCount: vlcController.value.audioTracksCount,
+            trackId: vlcController.value.activeAudioTrack,
+          ) ||
+          (_confirmedLibVlcAudioTrackId ?? -1) >= 0;
+    }
+    return video?.value.isInitialized ?? false;
+  }
+
   double get aspectRatio =>
       video?.value.aspectRatio ??
       vlc?.value.aspectRatio ??
@@ -984,6 +1064,71 @@ class _NativePlaybackController {
     await video?.setVolume(clamped);
     await vlc?.setVolume((clamped * 100).round());
     await media3?.setVolume(clamped);
+  }
+
+  Future<void> ensureSelectedAudioTrack({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final vlcController = vlc;
+    if (vlcController == null) return;
+    final dynamic rawController = vlcController;
+    final Object? rawViewId = rawController.viewId;
+    if (rawViewId is! int) {
+      throw StateError('libvlc_audio_view_unavailable');
+    }
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final trackCount = mobileDecodeLibVlcPigeonIntReply(
+        await _mobileCallLibVlcPigeon(
+          'getAudioTracksCount',
+          <Object?>[rawViewId],
+        ),
+      );
+      final tracks = mobileDecodeLibVlcPigeonTracksReply(
+        await _mobileCallLibVlcPigeon(
+          'getAudioTracks',
+          <Object?>[rawViewId],
+        ),
+      );
+      var activeTrack = mobileDecodeLibVlcPigeonIntReply(
+        await _mobileCallLibVlcPigeon(
+          'getAudioTrack',
+          <Object?>[rawViewId],
+        ),
+      );
+      final preferred = mobilePreferredLibVlcAudioTrack(
+        tracks: tracks,
+        activeTrack: activeTrack,
+      );
+      if (preferred != null) {
+        if (preferred != activeTrack) {
+          await _mobileCallLibVlcPigeon(
+            'setAudioTrack',
+            <Object?>[rawViewId, preferred],
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          activeTrack = mobileDecodeLibVlcPigeonIntReply(
+            await _mobileCallLibVlcPigeon(
+              'getAudioTrack',
+              <Object?>[rawViewId],
+            ),
+          );
+        }
+        vlcController.value = vlcController.value.copyWith(
+          audioTracksCount: trackCount,
+          activeAudioTrack: activeTrack,
+        );
+        if (mobileLibVlcHasSelectedAudioTrack(
+          trackCount: vlcController.value.audioTracksCount,
+          trackId: vlcController.value.activeAudioTrack,
+        )) {
+          _confirmedLibVlcAudioTrackId = activeTrack;
+          return;
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+    }
+    throw StateError('libvlc_audio_track_unavailable');
   }
 
   Future<void> dispose() {
@@ -1183,6 +1328,10 @@ class _MobileLibVlcDriverAdapter implements MobileLibVlcDriver {
   Future<void> play() => _disposed ? Future<void>.value() : _controller.play();
 
   @override
+  Future<void> ensureSelectedAudioTrack() =>
+      _disposed ? Future<void>.value() : _controller.ensureSelectedAudioTrack();
+
+  @override
   Future<void> pause() =>
       _disposed ? Future<void>.value() : _controller.pause();
 
@@ -1300,6 +1449,18 @@ const _LibVlcProfile _mobileLibVlcDriverProfile = _LibVlcProfile(
   vodNetworkCachingMs: 1800,
 );
 
+HwAcc _mobileLibVlcHardwareAcceleration(
+  PlaybackSource source,
+  _LibVlcProfile profile,
+) {
+  final normalizedType = (source.type ?? '').trim().toLowerCase();
+  final normalizedPath = Uri.tryParse(source.url)?.path.toLowerCase() ?? '';
+  final directMp4 = normalizedType == 'mp4' ||
+      normalizedType == 'file' ||
+      normalizedPath.endsWith('.mp4');
+  return directMp4 ? HwAcc.decoding : profile.hwAcc;
+}
+
 int _libVlcNetworkCachingMs(
   _LibVlcProfile profile, {
   required bool liveMode,
@@ -1401,6 +1562,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   Future<NativePlayerNextEpisode?> Function(
     PlaybackRequestCancellation cancellation,
   )? _nextEpisodeResolver;
+  List<NativePlayerEpisode> _episodes = const <NativePlayerEpisode>[];
+  bool _startupProofPublished = false;
   final StreamApi _feedbackApi = StreamApi();
   final PlaybackSkipSegmentClient _skipSegmentClient =
       PlaybackSkipSegmentClient();
@@ -1410,6 +1573,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   final Set<String> _autoSkippedSegmentKeys = <String>{};
 
   _NativePlaybackController? _controller;
+  final MobilePlaybackReplacementTransaction<_NativePlaybackController>
+      _playbackReplacementTransaction =
+      MobilePlaybackReplacementTransaction<_NativePlaybackController>();
+  PlaybackSource? _retainedPlaybackReplacementSource;
+  MobileLibVlcCoordinator? _retainedPlaybackReplacementLibVlcCoordinator;
+  int? _playbackReplacementGeneration;
   MobileLibVlcCoordinator? _mobileLibVlcCoordinator;
   Map<MobileLibVlcSourceCandidate, PlaybackSource>?
       _mobileLibVlcCandidateSources;
@@ -1579,6 +1748,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   final Map<String, PlaybackSource> _p2pLocalStreamSourcesByKey =
       <String, PlaybackSource>{};
   final Map<String, int> _p2pLocalStreamTotalBytesByUrl = <String, int>{};
+  final P2pPlaybackOwner _p2pPlaybackOwner = P2pPlaybackOwner(
+    bridge: const MethodChannelP2pLocalStreamBridge(
+      readinessTimeout: Duration(seconds: 24),
+    ),
+  );
+  final Map<String, int> _p2pPreparedGenerationByRouteKey = <String, int>{};
+  final Map<String, int> _p2pActiveGenerationByRouteKey = <String, int>{};
+  int _p2pPlaybackGeneration = 0;
   final Set<String> _coldP2pSourceKeysForRoute = <String>{};
   bool _subtitlesLoadStarted = false;
   bool _skipUnsupportedHighEfficiencyForSession = false;
@@ -1605,6 +1782,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   late MobilePlaybackRouteStartupOwner _routeStartupOwner;
   MobilePlaybackRouteStartupOwner? _libVlcSourceSwitchOwner;
   MobilePlaybackRouteStartupOwner? _libVlcSeekOwner;
+  final MobileEpisodeTransitionResolver _episodeTransitionResolver =
+      MobileEpisodeTransitionResolver();
   final MobilePlaybackTerminalCallbackGate _terminalCallbackGate =
       MobilePlaybackTerminalCallbackGate();
   int _controllerCallbackGeneration = 0;
@@ -1651,6 +1830,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   final Set<String> _routeProviderResolveTimeoutIds = <String>{};
   List<PlaybackSource> _activeSources = const <PlaybackSource>[];
   PlaybackSource? _activeSource;
+  final Map<String, String> _candidateIdentityByPrivateKey = <String, String>{};
+  final Map<MobilePlaybackCandidateFamily, int> _candidateOrdinalByFamily =
+      <MobilePlaybackCandidateFamily, int>{};
+  List<MobilePlaybackCandidate<PlaybackSource>> _retainedPlaybackCandidates =
+      const <MobilePlaybackCandidate<PlaybackSource>>[];
+  final Set<String> _rejectedPlaybackCandidateIdentities = <String>{};
   final Map<String, Future<List<PlaybackSource>>> _providerResolveFutures =
       <String, Future<List<PlaybackSource>>>{};
   Future<bool>? _freshProviderResolveInFlight;
@@ -1726,11 +1911,18 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         explicitLibVlc: _manualLibVlcConfigured,
       ),
     );
+    for (final request in _requests) {
+      _retainPlaybackCandidates(request, request.sources);
+    }
+    widget.lifecycleHarness?.retainedCandidateCount =
+        () => _retainedPlaybackCandidates.length;
     _progressSubtitle = widget.progressSubtitle;
     _skipSegmentSeason = widget.skipSegmentSeason;
     _skipSegmentEpisode = widget.skipSegmentEpisode;
     _nextEpisodeLabel = widget.nextEpisodeLabel;
     _nextEpisodeResolver = widget.onNextEpisode;
+    _episodes = widget.episodes;
+    widget.lifecycleHarness?.openNextEpisode = _openNextEpisodeInPlace;
     final progressItem = _progressItem;
     if (progressItem != null) {
       final lookup = AppState.progressLookupDiagnostics(
@@ -1763,6 +1955,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     unawaited(_loadSkipSegments());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _playerClosing) return;
+      if (widget.lifecycleHarness?.skipInitialOpen == true) return;
       unawaited(_openNextAvailableSource());
     });
   }
@@ -1780,10 +1973,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   @override
   void dispose() {
     _playerClosing = true;
+    widget.lifecycleHarness?.openNextEpisode = null;
+    widget.lifecycleHarness?.retainedCandidateCount = null;
     _libVlcSourceSwitchOwner?.dispose();
     _libVlcSourceSwitchOwner = null;
     _libVlcSeekOwner?.dispose();
     _libVlcSeekOwner = null;
+    _episodeTransitionResolver.dispose();
     _routeStartupOwner.dispose();
     _emitHudMountSignal(_hudMountSignalGate.dispose());
     _libVlcLaunchRejectionCircuit.dispose();
@@ -1796,11 +1992,18 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _pipChannel.setMethodCallHandler(null);
     _media3PlayerChannel.setMethodCallHandler(null);
     final controller = _controller;
+    final retainedReplacementCoordinator =
+        _retainedPlaybackReplacementLibVlcCoordinator;
+    final replacementOwnedControllers = _playbackReplacementTransaction.clear();
+    _playbackReplacementGeneration = null;
+    _retainedPlaybackReplacementSource = null;
+    _retainedPlaybackReplacementLibVlcCoordinator = null;
     if (controller != null) {
       _trackLastKnownPlaybackPosition();
       _saveNativeProgress(force: true);
     }
-    final coordinatorSessionActive = _mobileLibVlcCoordinator != null;
+    final currentCoordinator = _mobileLibVlcCoordinator;
+    final coordinatorSessionActive = currentCoordinator != null;
     final coordinatorOwnsController = coordinatorSessionActive &&
         (controller == null ||
             controller.engine == _NativePlaybackEngine.libvlc);
@@ -1810,6 +2013,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     unawaited(_stopLibVlcHlsRelay('dispose'));
     if (coordinatorSessionActive) {
       unawaited(_closeMobileLibVlcCoordinatorSession('dispose'));
+    }
+    if (retainedReplacementCoordinator != null &&
+        !identical(retainedReplacementCoordinator, currentCoordinator)) {
+      unawaited(
+        _closeRetiredMobileLibVlcCoordinator(
+          retainedReplacementCoordinator,
+          'dispose_replacement',
+        ),
+      );
     }
     if (!coordinatorOwnsController && controller?.isInitialized == true) {
       final activeController = controller!;
@@ -1831,13 +2043,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (!coordinatorOwnsController) {
       unawaited(controller?.dispose() ?? Future<void>.value());
     }
+    for (final ownedController in replacementOwnedControllers) {
+      if (identical(ownedController, controller)) continue;
+      _detachControllerUpdateListener(ownedController);
+      unawaited(ownedController.dispose().catchError((_) {}));
+    }
     unawaited(_stopP2pBridgeForPolicy('dispose'));
     unawaited(_setKeepScreenOn(false));
     unawaited(_setAndroidAutoPipOnUserLeave(false));
     final feedbackApi = _feedbackApi;
-    unawaited(
-      Future<void>.delayed(const Duration(seconds: 5), feedbackApi.close),
-    );
+    if (widget.lifecycleHarness != null) {
+      unawaited(feedbackApi.close());
+    } else {
+      unawaited(
+        Future<void>.delayed(const Duration(seconds: 5), feedbackApi.close),
+      );
+    }
     unawaited(_exitPlayerMode());
     super.dispose();
   }
@@ -1892,6 +2113,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       final request = NativePlaybackRequest(
         providerId: cached.source.providerId,
         sources: <PlaybackSource>[cached.source],
+        candidateFamily: MobilePlaybackCandidateFamily.fallback,
       );
       final stale = _verifiedSourceIsExpired(cached);
       final status = AppState.nativeProviderHealthFor(cached.source.providerId);
@@ -2744,6 +2966,116 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _lastRuntimeSourceFailurePosition = Duration.zero;
   }
 
+  MobilePlaybackCandidateFamily _candidateFamilyFor(
+    NativePlaybackRequest request,
+    PlaybackSource source,
+  ) {
+    final explicitFamily = request.candidateFamily;
+    if (explicitFamily != null) return explicitFamily;
+    final providerId = source.providerId.trim().toLowerCase();
+    if (providerId.startsWith('addon-') ||
+        providerId.startsWith('personal-') ||
+        source.sourceClass == PlaybackSourceClass.p2p ||
+        source.sourceClass == PlaybackSourceClass.debrid) {
+      return MobilePlaybackCandidateFamily.addOn;
+    }
+    return MobilePlaybackCandidateFamily.builtIn;
+  }
+
+  void _retainPlaybackCandidates(
+    NativePlaybackRequest request,
+    List<PlaybackSource> sources,
+  ) {
+    if (sources.isEmpty) return;
+    final requestIndex = _requests.indexWhere(
+      (candidate) => identical(candidate, request),
+    );
+    final providerRank = requestIndex < 0 ? _providerIndex : requestIndex;
+    final fresh = <MobilePlaybackCandidate<PlaybackSource>>[];
+    for (var sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
+      final source = sources[sourceIndex];
+      if (!_nativePlaybackSupportsSourceClass(source)) continue;
+      final family = _candidateFamilyFor(request, source);
+      final privateKey = '${family.wireValue}|${_sourceAttemptKey(source)}';
+      var identity = _candidateIdentityByPrivateKey[privateKey];
+      if (identity == null) {
+        final ordinal = _candidateOrdinalByFamily[family] ?? 0;
+        identity = mobileOpaquePlaybackCandidateId(
+          generation: _routeStartupOwner.generation,
+          family: family,
+          sourceOrdinal: ordinal,
+        );
+        _candidateIdentityByPrivateKey[privateKey] = identity;
+        _candidateOrdinalByFamily[family] = ordinal + 1;
+      }
+      fresh.add(
+        MobilePlaybackCandidate<PlaybackSource>(
+          value: source,
+          identity: identity,
+          generation: _routeStartupOwner.generation,
+          family: family,
+          rank: (providerRank * 1000) + sourceIndex,
+        ),
+      );
+    }
+    final merged = mergeMobilePlaybackCandidateInventory<PlaybackSource>(
+      generation: _routeStartupOwner.generation,
+      fresh: fresh,
+      retained: _retainedPlaybackCandidates,
+      rejectedIdentities: _rejectedPlaybackCandidateIdentities,
+    );
+    _retainedPlaybackCandidates = merged.entries;
+  }
+
+  void _rejectRetainedPlaybackCandidate(PlaybackSource source) {
+    final privateAttemptKey = _sourceAttemptKey(source);
+    for (final entry in _candidateIdentityByPrivateKey.entries) {
+      if (!entry.key.endsWith('|$privateAttemptKey')) continue;
+      _rejectedPlaybackCandidateIdentities.add(entry.value);
+    }
+    _retainedPlaybackCandidates = _retainedPlaybackCandidates
+        .where(
+          (candidate) => !_rejectedPlaybackCandidateIdentities
+              .contains(candidate.identity),
+        )
+        .toList(growable: false);
+  }
+
+  void _publishRetainedPlaybackCandidates(PlaybackSource activeSource) {
+    final activeAttemptKey = _sourceAttemptKey(activeSource);
+    String? activeIdentity;
+    for (final entry in _candidateIdentityByPrivateKey.entries) {
+      if (entry.key.endsWith('|$activeAttemptKey')) {
+        activeIdentity = entry.value;
+        break;
+      }
+    }
+    final merged = mergeMobilePlaybackCandidateInventory<PlaybackSource>(
+      generation: _routeStartupOwner.generation,
+      fresh: const <MobilePlaybackCandidate<PlaybackSource>>[],
+      retained: _retainedPlaybackCandidates,
+      activeIdentity: activeIdentity,
+      rejectedIdentities: _rejectedPlaybackCandidateIdentities,
+    );
+    final published = merged.entries.map((candidate) => candidate.value).toList(
+          growable: false,
+        );
+    final activeIndex = published.indexWhere(
+      (candidate) => _sourceAttemptKey(candidate) == activeAttemptKey,
+    );
+    if (activeIndex < 0) return;
+    _retainedPlaybackCandidates = merged.entries;
+    _activeSources = published;
+    _activeSource = activeSource;
+    _sourceIndex = activeIndex;
+    DiagnosticLog.add(
+      'native retained candidate inventory published count=${published.length} '
+      'addon=${merged.entries.where((candidate) => candidate.family == MobilePlaybackCandidateFamily.addOn).length} '
+      'builtin=${merged.entries.where((candidate) => candidate.family == MobilePlaybackCandidateFamily.builtIn).length} '
+      'fallback=${merged.entries.where((candidate) => candidate.family == MobilePlaybackCandidateFamily.fallback).length}',
+    );
+  }
+
   String _sourceAttemptKey(PlaybackSource source) {
     final mirrorGroupId = (source.mirrorGroupId ?? '').trim();
     final sourceId = (source.sourceId ?? '').trim();
@@ -3526,6 +3858,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               ? _activeSources[_sourceIndex]
               : null;
           final providerSourcesBeforeQualityPass = providerSources;
+          _retainPlaybackCandidates(request, providerSourcesBeforeQualityPass);
           final bypassQualityPassForVerifiedCache =
               _isVerifiedCacheFallbackRequest(request);
           providerSources = _prepareProviderSourcesForPlaybackPass(
@@ -3693,6 +4026,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                 'native source unreadable provider=${source.providerId} providerIndex=$_providerIndex sourceIndex=$_sourceIndex',
               );
               _forgetVerifiedSource(source, 'unreadable');
+              _rejectRetainedPlaybackCandidate(source);
               _recordNativeProviderFailureForSource(
                 source,
                 sourceCount: visiblePlaybackSourceCount(providerSources),
@@ -3722,6 +4056,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             }
             if (!mounted || runId != _providerRunId) return;
             if (opened) {
+              _publishRetainedPlaybackCandidates(source);
+              await _publishStartupProof();
+              if (!mounted || runId != _providerRunId) return;
               _routeStartupOwner.completeSuccessfully();
               return;
             }
@@ -3988,7 +4325,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       'native p2p indexer candidates ready count=${sources.length} sourceClass=p2p',
     );
     _requests = <NativePlaybackRequest>[
-      NativePlaybackRequest(providerId: 'p2p-indexer', sources: sources),
+      NativePlaybackRequest(
+        providerId: 'p2p-indexer',
+        sources: sources,
+        candidateFamily: MobilePlaybackCandidateFamily.addOn,
+      ),
     ];
     _providerResolveFutures.remove('p2p-indexer');
     _enginePassIndex = 0;
@@ -4243,10 +4584,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _activeSources = const <PlaybackSource>[];
     _lastOpenFailureMessage = null;
     final previousRequests = _requests;
+    MobilePlaybackCandidateFamily? previousCandidateFamily;
+    for (final request in previousRequests) {
+      if (request.providerId != source.providerId) continue;
+      previousCandidateFamily = request.candidateFamily;
+      break;
+    }
     _requests = <NativePlaybackRequest>[
       NativePlaybackRequest(
         providerId: source.providerId,
         sources: providerSourcesBeforeQualityPass,
+        candidateFamily: previousCandidateFamily,
       ),
       ...previousRequests.where(
         (request) => request.providerId != source.providerId,
@@ -4497,8 +4845,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (!_hasP2pRouteActivity) return;
     _p2pLocalStreamSourcesByKey.clear();
     _p2pLocalStreamTotalBytesByUrl.clear();
+    _p2pPreparedGenerationByRouteKey.clear();
+    _p2pActiveGenerationByRouteKey.clear();
     try {
-      await P2pLocalStreamBridge.instance.stopAll();
+      if (_p2pPlaybackGeneration > 0) {
+        await _p2pPlaybackOwner.closeThrough(_p2pPlaybackGeneration);
+      } else {
+        await P2pLocalStreamBridge.instance.stopAll();
+      }
       DiagnosticLog.add('native p2p bridge stopped reason=$reason');
     } catch (error) {
       DiagnosticLog.add(
@@ -5886,6 +6240,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   ) async {
     if (!mounted ||
         _playerClosing ||
+        _playbackReplacementTransaction.quarantinesRetainedOwnerCallback(
+          callbackOwner: coordinator,
+          retainedOwner: _retainedPlaybackReplacementLibVlcCoordinator,
+        ) ||
         !identical(_mobileLibVlcCoordinator, coordinator) ||
         result.generation != coordinator.generation ||
         coordinator.currentCandidate?.attemptIdentity !=
@@ -5973,6 +6331,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   ) async {
     if (!mounted ||
         _playerClosing ||
+        _playbackReplacementTransaction.quarantinesRetainedOwnerCallback(
+          callbackOwner: coordinator,
+          retainedOwner: _retainedPlaybackReplacementLibVlcCoordinator,
+        ) ||
         !identical(_mobileLibVlcCoordinator, coordinator)) {
       return;
     }
@@ -6009,12 +6371,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     String? statusMessage,
     bool quietRecovery = false,
     bool saveProgressBeforeOpen = true,
+    _NativePlaybackController? retainedController,
+    PlaybackSource? retainedSource,
   }) async {
     if (_playerClosing) return false;
+    final retainActivePlayback =
+        retainedController != null && retainedSource != null;
+    final retainedLibVlcCoordinator = retainActivePlayback &&
+            retainedController.engine == _NativePlaybackEngine.libvlc
+        ? _mobileLibVlcCoordinator
+        : null;
     final openingToken = ++_openingSourceToken;
     final openingRouteStartupOwner = _routeStartupOwner;
     final openingBudgetOwner = _libVlcSeekOwner ?? openingRouteStartupOwner;
     final openingRouteStartupGeneration = openingRouteStartupOwner.generation;
+    _NativePlaybackController? openingStagedReplacementController;
+    int? openingStagedReplacementGeneration;
     _openingSource = true;
     final openStopwatch = Stopwatch()..start();
     _stopStallWatchdog();
@@ -6023,10 +6395,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _trackLastKnownPlaybackPosition();
       _saveNativeProgress(force: true);
     }
-    await _disposeCurrentController(
-      awaitLibVlcRelease: true,
-      saveProgress: saveProgressBeforeOpen,
-    );
+    if (!retainActivePlayback) {
+      await _disposeCurrentController(
+        awaitLibVlcRelease: true,
+        saveProgress: saveProgressBeforeOpen,
+      );
+    }
     if (_playerClosing || openingToken != _openingSourceToken || !mounted) {
       _openingSource = false;
       return false;
@@ -6039,9 +6413,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _lastCadenceSampleAt = null;
     _playbackCadenceSamples = 0;
     _resetPlaybackCadenceCorrection();
-    _activeSourceHasZeroClockMetadata = false;
-    _activeSourceVerifiedForSession = false;
-    _activeSource = null;
+    if (!retainActivePlayback) {
+      _activeSourceHasZeroClockMetadata = false;
+      _activeSourceVerifiedForSession = false;
+      _activeSource = null;
+    }
     _clearControllerErrorGrace();
     _resetLibVlcContinuousTsProof();
 
@@ -6364,7 +6740,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
               : originalSource;
         }
         _recordLibVlcStartupStage('native_driver_handoff');
-        final publishControllerImmediately = coordinator.currentDriver == null;
+        final publishControllerImmediately =
+            coordinator.currentDriver == null && !retainActivePlayback;
         final driverGeneration = coordinator.generation;
         _NativePlaybackController? publishedController;
         final driver = _MobileLibVlcDriverAdapter(
@@ -6381,6 +6758,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             }
             if (!publishControllerImmediately) {
               _stagedMobileLibVlcControllers[driverGeneration] = controller;
+              if (retainActivePlayback &&
+                  !_playbackReplacementTransaction.isStaging) {
+                final replacementGeneration =
+                    _playbackReplacementTransaction.stage(
+                  active: retainedController,
+                  target: controller,
+                );
+                openingStagedReplacementGeneration = replacementGeneration;
+                openingStagedReplacementController = controller;
+                _playbackReplacementGeneration = replacementGeneration;
+                _retainedPlaybackReplacementSource = retainedSource;
+                _retainedPlaybackReplacementLibVlcCoordinator =
+                    retainedLibVlcCoordinator;
+              }
               if (mounted) setState(() {});
               return;
             }
@@ -6558,6 +6949,44 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       ),
     );
     _mobileLibVlcCoordinator = coordinator;
+    Future<void> settleStaleReplacement() async {
+      if (retainActivePlayback &&
+          openingStagedReplacementController != null &&
+          openingStagedReplacementGeneration != null &&
+          _playbackReplacementTransaction.owns(
+            openingStagedReplacementGeneration!,
+            openingStagedReplacementController!,
+          )) {
+        if (identical(_mobileLibVlcCoordinator, coordinator)) {
+          _mobileLibVlcCoordinator = retainedLibVlcCoordinator;
+        }
+        await coordinator.close();
+        final rolledBack = await _rollbackStagedPlaybackReplacement(
+          generation: openingStagedReplacementGeneration!,
+          target: openingStagedReplacementController!,
+          reason: 'libvlc_open_stale',
+          disposeRejected: false,
+        );
+        if (rolledBack) {
+          try {
+            await retainedController!.play().timeout(
+                  const Duration(milliseconds: 700),
+                );
+          } catch (_) {}
+        }
+        return;
+      }
+      if (openingStagedReplacementController != null &&
+          _playbackReplacementTransaction.retainsActive(
+            openingStagedReplacementController!,
+          )) {
+        return;
+      }
+      if (identical(_mobileLibVlcCoordinator, coordinator)) {
+        _mobileLibVlcCoordinator = null;
+      }
+      await coordinator.close();
+    }
 
     final protectedResumeAnchor =
         deferP2pResumeUntilProof ? deferredP2pResumeAnchor : coordinatorAnchor;
@@ -6570,6 +6999,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _resumeProgressAnchorLogSecond = -1;
     }
 
+    var p2pGenerationCommitted = source.sourceClass != PlaybackSourceClass.p2p;
     try {
       _recordLibVlcStartupStage('coordinator_open_start');
       final result = await coordinator.open(
@@ -6584,14 +7014,44 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             openingBudgetOwner.remainingWorkBudget,
       );
       if (openingIsStale()) {
-        await coordinator.close();
-        return false;
+        throw cancelledFailure();
       }
       final provedSource = candidateSources[result.candidate];
-      final controller = _controller;
-      if (provedSource == null || controller == null) {
+      if (provedSource == null) {
         throw StateError('The proved libVLC source is unavailable.');
       }
+      var controller = _controller;
+      if (retainActivePlayback) {
+        final stagedController =
+            _stagedMobileLibVlcControllers[result.generation];
+        final replacementGeneration = _playbackReplacementGeneration;
+        if (stagedController == null || replacementGeneration == null) {
+          throw StateError('The staged libVLC replacement is unavailable.');
+        }
+        final promoted = await _promoteStagedPlaybackReplacement(
+          generation: replacementGeneration,
+          target: stagedController,
+          targetSource: provedSource,
+          makeTargetCurrent: true,
+          retiredLibVlcCoordinator: retainedLibVlcCoordinator,
+        );
+        if (!promoted) {
+          throw StateError('The staged libVLC replacement was superseded.');
+        }
+        _activeMobileLibVlcSessionTimeline =
+            sessionTimelines[result.candidate.attemptIdentity];
+        await stagedController.setVolume(_volumePreview);
+        _removeStagedMobileLibVlcController(
+          result.generation,
+          stagedController,
+        );
+        controller = stagedController;
+      }
+      if (controller == null) {
+        throw StateError('The proved libVLC source is unavailable.');
+      }
+      await _commitPreparedP2pGeneration(provedSource);
+      p2pGenerationCommitted = true;
       _activeSource = provedSource;
       final provedSourceIndex = _activeSources.indexWhere(
         (candidate) =>
@@ -6613,8 +7073,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         if (hasSavedResume) {
           await controller.pause();
           if (openingIsStale()) {
-            await coordinator.close();
-            return false;
+            throw cancelledFailure();
           }
           if (startBehavior == 'ask' && !_resumePromptHandled) {
             setState(() {
@@ -6626,10 +7085,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           }
         }
         final selectedStartPosition =
-            await _resumePositionFor(controller.duration);
+            await _waitForResumePromptReadiness(controller)
+                ? await _resumePositionFor(controller.duration)
+                : _automaticResumePositionFor(
+                    controller.duration,
+                    promptUnavailable: true,
+                  );
         if (openingIsStale()) {
-          await coordinator.close();
-          return false;
+          throw cancelledFailure();
         }
         if (selectedStartPosition > Duration.zero) {
           _resumeProgressAnchorPosition = preserveMobileLibVlcAnchor(
@@ -6652,22 +7115,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           await controller.play();
         }
         if (openingIsStale()) {
-          await coordinator.close();
-          return false;
+          throw cancelledFailure();
         }
       }
-      final shouldPromptForResume = resumePosition == null &&
+      final resumePromptRequested = resumePosition == null &&
           !deferP2pResumeUntilProof &&
           coordinatorAnchor > Duration.zero &&
           !_preferSavedResumeOnInitialOpen &&
           startBehavior == 'ask' &&
-          !_resumePromptHandled &&
-          _resumePromptCanOpenForController(controller);
+          !_resumePromptHandled;
+      final resumePromptReady = resumePromptRequested &&
+          await _waitForResumePromptReadiness(controller);
+      final shouldPromptForResume = resumePromptRequested && resumePromptReady;
       if (shouldPromptForResume) {
         await controller.pause();
         if (openingIsStale()) {
-          await coordinator.close();
-          return false;
+          throw cancelledFailure();
         }
         setState(() {
           _loading = false;
@@ -6678,16 +7141,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         final selectedStartPosition =
             await _resumePositionFor(controller.duration);
         if (openingIsStale()) {
-          if (identical(_mobileLibVlcCoordinator, coordinator)) {
-            await _disposeCurrentController(
-              updateUi: false,
-              awaitLibVlcRelease: true,
-              saveProgress: false,
-            );
-          } else {
-            await coordinator.close();
-          }
-          return false;
+          throw cancelledFailure();
         }
         if (selectedStartPosition <= Duration.zero) {
           _clearUnprovedResumePlaybackState(
@@ -6703,8 +7157,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         }
         await controller.play();
         if (openingIsStale()) {
-          await coordinator.close();
-          return false;
+          throw cancelledFailure();
         }
       }
       _preferSavedResumeOnInitialOpen = false;
@@ -6729,8 +7182,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         reason: 'coordinator_startup_proved',
       );
       if (openingIsStale()) {
-        await coordinator.close();
-        return false;
+        throw cancelledFailure();
       }
       _recordNativeOpenSuccess(
         provedSource,
@@ -6784,13 +7236,33 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       if (stillOwnsOpen) {
         _openingSource = false;
       }
-      if (!stillOwnsOpen) return false;
-      await _disposeCurrentController(
-        updateUi: false,
-        awaitLibVlcRelease: true,
-        saveProgress: false,
-      );
-      _activeSource = null;
+      if (!stillOwnsOpen) {
+        await settleStaleReplacement();
+        return false;
+      }
+      final stagedController = _playbackReplacementTransaction.staged;
+      final replacementGeneration = _playbackReplacementGeneration;
+      if (retainActivePlayback &&
+          stagedController != null &&
+          replacementGeneration != null) {
+        if (identical(_mobileLibVlcCoordinator, coordinator)) {
+          _mobileLibVlcCoordinator = retainedLibVlcCoordinator;
+        }
+        await coordinator.close();
+        await _rollbackStagedPlaybackReplacement(
+          generation: replacementGeneration,
+          target: stagedController,
+          reason: 'libvlc_open_failed',
+          disposeRejected: false,
+        );
+      } else {
+        await _disposeCurrentController(
+          updateUi: false,
+          awaitLibVlcRelease: true,
+          saveProgress: false,
+        );
+        _activeSource = null;
+      }
       if (error is MobileLibVlcTerminalFailure) {
         _resumeProgressAnchorPosition = preserveMobileLibVlcAnchor(
           current: _resumeProgressAnchorPosition,
@@ -6827,6 +7299,16 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         _incrementFailedSourceAttempt(source);
       }
       return false;
+    } finally {
+      if (!p2pGenerationCommitted) {
+        await _rollbackPreparedP2pGeneration(
+          source,
+          reason: 'libvlc_open_not_committed',
+        );
+        await _rollbackAllPreparedP2pGenerations(
+          reason: 'libvlc_open_not_committed',
+        );
+      }
     }
   }
 
@@ -6846,6 +7328,20 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _terminalOpeningCallbackQuarantined = false;
     _controllerCallbackGeneration = _terminalCallbackGate.beginOpening();
     final attemptedEngine = engineOverride ?? _engineForSource(source);
+    final stagePlaybackReplacement = _canStagePlaybackReplacement(
+      requireStartupPlaybackProof: requireStartupPlaybackProof,
+    );
+    final retainedPlaybackController =
+        stagePlaybackReplacement ? _controller : null;
+    final retainedPlaybackSource =
+        stagePlaybackReplacement ? _activeSource : null;
+    final retainedLibVlcCoordinator = stagePlaybackReplacement &&
+            retainedPlaybackController?.engine == _NativePlaybackEngine.libvlc
+        ? _mobileLibVlcCoordinator
+        : null;
+    if (stagePlaybackReplacement && retainedPlaybackController != null) {
+      _attachControllerUpdateListener(retainedPlaybackController);
+    }
     if (!_nativePlaybackSupportsSourceClass(source)) {
       _recordNativeSourceClassSkip(source);
       DiagnosticLog.add(
@@ -6860,22 +7356,28 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         statusMessage: statusMessage,
         quietRecovery: quietRecovery,
         saveProgressBeforeOpen: saveProgressBeforeOpen,
+        retainedController: retainedPlaybackController,
+        retainedSource: retainedPlaybackSource,
       );
     }
     final openingToken = ++_openingSourceToken;
     _openingSource = true;
     final openStopwatch = Stopwatch()..start();
     var p2pLocalStreamReady = false;
+    var p2pGenerationCommitted = source.sourceClass != PlaybackSourceClass.p2p;
+    int? replacementPreparationGeneration;
     _stopStallWatchdog();
     _openingGuardTimer?.cancel();
     if (saveProgressBeforeOpen) {
       _trackLastKnownPlaybackPosition();
       _saveNativeProgress(force: true);
     }
-    await _disposeCurrentController(
-      awaitLibVlcRelease: true,
-      saveProgress: saveProgressBeforeOpen,
-    );
+    if (!stagePlaybackReplacement) {
+      await _disposeCurrentController(
+        awaitLibVlcRelease: true,
+        saveProgress: saveProgressBeforeOpen,
+      );
+    }
     if (_playerClosing || !mounted || openingToken != _openingSourceToken) {
       _openingSource = false;
       return false;
@@ -6961,6 +7463,15 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     _media3DirectHlsStartupProofPending =
         requiresSustainedMedia3DirectHlsOpenProof;
+    if (stagePlaybackReplacement && retainedPlaybackController != null) {
+      replacementPreparationGeneration =
+          _playbackReplacementTransaction.reserve(
+        active: retainedPlaybackController,
+      );
+      _playbackReplacementGeneration = replacementPreparationGeneration;
+      _retainedPlaybackReplacementSource = retainedPlaybackSource;
+      _retainedPlaybackReplacementLibVlcCoordinator = retainedLibVlcCoordinator;
+    }
     try {
       DiagnosticLog.add(
         'native open provider=${source.providerId} sourceClass=${source.sourceClass.wireName} type=${source.type ?? 'unknown'} engine=${attemptedEngine.id} profile=${_sourceDiagnosticProfile(source)} url=[hidden]',
@@ -6970,7 +7481,9 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         quietRecovery ? 'Recovering playback' : openingStatus,
         reason: quietRecovery ? 'open_source_quiet_recovery' : 'open_source',
       );
-      _activeSource = source;
+      if (!stagePlaybackReplacement) {
+        _activeSource = source;
+      }
       setState(() {
         if (!quietRecovery) {
           _loading = true;
@@ -7005,6 +7518,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       if (_playerClosing || !mounted || openingToken != _openingSourceToken) {
         _openingSource = false;
+        if (stagePlaybackReplacement && mounted && !_playerClosing) {
+          setState(() {
+            _loading = false;
+            _statusMessage = null;
+          });
+        }
         return false;
       }
       final libVlcContinuousTsMode =
@@ -7050,6 +7569,19 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             ? Duration.zero
             : startPosition ?? relayResumePosition,
       );
+      if (stagePlaybackReplacement && retainedPlaybackController != null) {
+        final replacementGeneration = replacementPreparationGeneration;
+        if (replacementGeneration == null ||
+            !_playbackReplacementTransaction.stagePrepared(
+              replacementGeneration,
+              controller,
+            )) {
+          await controller.dispose();
+          return false;
+        }
+        _detachControllerUpdateListener(retainedPlaybackController);
+        _activeSource = source;
+      }
       _controller = controller;
       _attachControllerUpdateListener(controller);
       if (controller.requiresPlatformViewWarmup && mounted) {
@@ -7079,8 +7611,21 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           openingToken != _openingSourceToken ||
           _controller != controller) {
         _openingSource = false;
-        _detachControllerUpdateListener(controller);
-        await controller.dispose();
+        final replacementGeneration = _playbackReplacementGeneration;
+        if (replacementGeneration != null &&
+            _playbackReplacementTransaction.owns(
+              replacementGeneration,
+              controller,
+            )) {
+          await _rollbackStagedPlaybackReplacement(
+            generation: replacementGeneration,
+            target: controller,
+            reason: 'initialize_superseded',
+          );
+        } else {
+          _detachControllerUpdateListener(controller);
+          await controller.dispose();
+        }
         return false;
       }
       _openingSource = false;
@@ -7108,7 +7653,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         mediaKind: widget.liveMode ? 'live_tv' : 'vod',
         itemCount: widget.sources.length,
       );
-      final resumePromptCanOpen = _resumePromptCanOpenForController(controller);
+      final resumePromptRequested = startPosition == null &&
+          _shouldRevealPlayerBeforeResumePrompt(controller.duration);
+      final resumePromptCanOpen = resumePromptRequested
+          ? await _waitForResumePromptReadiness(controller)
+          : _resumePromptCanOpenForController(controller);
       final libVlcRelayResumePromptDeferred = relayResumeAwaitingPrompt &&
           !resumePromptCanOpen &&
           attemptedEngine == _NativePlaybackEngine.libvlc &&
@@ -7325,7 +7874,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         );
       }
       await controller.setLooping(false);
-      await controller.setVolume(_volumePreview);
+      await controller.setVolume(
+        mobileReplacementTargetVolume(
+          requestedVolume: _volumePreview,
+          staged: stagePlaybackReplacement,
+        ),
+      );
       await controller.setVideoSizeMode(_nativeVideoSizeModeFor(_fitMode));
       await controller.play();
       if (resolvedStartPosition > Duration.zero &&
@@ -7402,6 +7956,12 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           source.providerId,
           resolvedStartPosition,
         );
+        if (_controller != controller) {
+          DiagnosticLog.add(
+            'native recovery resume barrier ignored reason=stale_replacement',
+          );
+          return false;
+        }
         final resumeSeekProved =
             resumeSeekProof == _ResumeSeekProofResult.proved;
         DiagnosticLog.add(
@@ -7636,6 +8196,22 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           }
         }
       }
+      final replacementGeneration = _playbackReplacementGeneration;
+      if (replacementGeneration != null &&
+          _playbackReplacementTransaction.owns(
+            replacementGeneration,
+            controller,
+          )) {
+        final promoted = await _promoteStagedPlaybackReplacement(
+          generation: replacementGeneration,
+          target: controller,
+          targetSource: source,
+          retiredLibVlcCoordinator: retainedLibVlcCoordinator,
+        );
+        if (!promoted) return false;
+      }
+      await _commitPreparedP2pGeneration(source);
+      p2pGenerationCommitted = true;
       _nativeWallClockStartedAt = DateTime.now();
       _lastSavedSecond = -1;
       _resetPlaybackIntegritySample();
@@ -7776,11 +8352,26 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           startupMs: openStopwatch.elapsedMilliseconds,
         );
       }
+      final stagedReplacementFailed = _playbackReplacementTransaction.isStaging;
+      if (stagePlaybackReplacement && !stagedReplacementFailed) {
+        _activeSource = retainedPlaybackSource;
+        if (mounted) {
+          setState(() {
+            _loading = false;
+            _statusMessage = null;
+            _playbackWaitMessage = null;
+            _playbackWaitMessagePausedPlayback = false;
+          });
+        }
+        return false;
+      }
       await _disposeCurrentController(
         awaitLibVlcRelease: true,
         saveProgress: false,
       );
-      _activeSource = null;
+      if (!stagedReplacementFailed) {
+        _activeSource = null;
+      }
       final p2pBridgeReadinessFailure =
           source.sourceClass == PlaybackSourceClass.p2p &&
               !p2pLocalStreamReady &&
@@ -7830,7 +8421,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             'native p2p source blocked provider=${source.providerId} action=battery_data_policy',
           );
         } else if (p2pBridgeReadinessFailure) {
-          await _stopP2pBridgeForPolicy('p2p_readiness_failed');
+          await _rollbackPreparedP2pGeneration(
+            source,
+            reason: 'p2p_readiness_failed',
+          );
           if (attemptedEngine == _NativePlaybackEngine.exoplayer) {
             _lastOpenFailureMessage =
                 'P2P stream is still buffering. Trying another playback path.';
@@ -7870,6 +8464,24 @@ class _NativePlayerPageState extends State<NativePlayerPage>
             : '${_engineLabel(attemptedEngine)} could not open the available source.';
       }
       return false;
+    } finally {
+      final preparationGeneration = replacementPreparationGeneration;
+      if (preparationGeneration != null &&
+          _playbackReplacementTransaction.cancelPreparation(
+            preparationGeneration,
+          )) {
+        if (_playbackReplacementGeneration == preparationGeneration) {
+          _playbackReplacementGeneration = null;
+          _retainedPlaybackReplacementSource = null;
+          _retainedPlaybackReplacementLibVlcCoordinator = null;
+        }
+      }
+      if (!p2pGenerationCommitted) {
+        await _rollbackPreparedP2pGeneration(
+          source,
+          reason: 'media3_open_not_committed',
+        );
+      }
     }
   }
 
@@ -8166,7 +8778,10 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     final cacheKey = _p2pLocalStreamCacheKey(source, descriptor);
     final cachedSource = _p2pLocalStreamSourcesByKey[cacheKey];
-    if (cachedSource != null) {
+    final cachedGeneration = _p2pActiveGenerationByRouteKey[cacheKey];
+    if (cachedSource != null &&
+        cachedGeneration != null &&
+        cachedGeneration == _p2pPlaybackOwner.activeGeneration) {
       DiagnosticLog.add(
         'native p2p bridge local url reused provider=${source.providerId} ${descriptor.redactedDiagnostic} url=[localhost-hidden]',
       );
@@ -8201,12 +8816,34 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       _showP2pLocalStreamReadyStatus(source);
       return cachedSource;
     }
+    if (cachedSource != null) {
+      _p2pLocalStreamSourcesByKey.remove(cacheKey);
+      _p2pLocalStreamTotalBytesByUrl.remove(cachedSource.url);
+      _p2pActiveGenerationByRouteKey.remove(cacheKey);
+    }
+    final previousPreparedGeneration =
+        _p2pPreparedGenerationByRouteKey.remove(cacheKey);
+    if (previousPreparedGeneration != null) {
+      await _p2pPlaybackOwner.rollback(previousPreparedGeneration);
+    }
+    final generation = ++_p2pPlaybackGeneration;
     DiagnosticLog.add(
       'native p2p bridge open requested provider=${source.providerId} ${descriptor.redactedDiagnostic}',
     );
     final Uri localUri;
     try {
-      localUri = await P2pLocalStreamBridge.instance.open(descriptor);
+      localUri = await _p2pPlaybackOwner.prepare(
+        descriptor,
+        generation: generation,
+      );
+      _p2pPreparedGenerationByRouteKey[cacheKey] = generation;
+    } on TimeoutException catch (error) {
+      await _p2pPlaybackOwner.rollback(generation);
+      DiagnosticLog.add(
+        'native p2p bridge candidate expired family=p2p '
+        'reason=candidate_readiness_timeout detail=${_safeP2pBridgeDetail(error.toString())}',
+      );
+      throw const _P2pLocalStreamNotReadyException(deadSwarm: false);
     } on PlatformException catch (error) {
       final detail = _safeP2pBridgeDetail(
         '${error.code} ${error.message ?? 'no-message'}',
@@ -8247,7 +8884,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     DiagnosticLog.add(
       'native p2p bridge local url ready provider=${source.providerId} url=[localhost-hidden]',
     );
-    final ready = await _waitForP2pLocalStreamReady(localUri, source, engine);
+    final _P2pLocalStreamReady ready;
+    try {
+      ready = await _waitForP2pLocalStreamReady(localUri, source, engine);
+    } catch (_) {
+      _p2pPreparedGenerationByRouteKey.remove(cacheKey);
+      await _p2pPlaybackOwner.rollback(generation);
+      rethrow;
+    }
     _showP2pLocalStreamReadyStatus(source);
     final preparedSource = source.copyWith(
       url: localUri.toString(),
@@ -8260,6 +8904,72 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     _p2pLocalStreamSourcesByKey[cacheKey] = preparedSource;
     return preparedSource;
+  }
+
+  String? _p2pGenerationRouteKey(PlaybackSource source) {
+    if (source.sourceClass != PlaybackSourceClass.p2p) return null;
+    final descriptor = P2pStreamDescriptor.fromSyntheticUrl(source.url);
+    if (descriptor == null) return null;
+    return _p2pLocalStreamCacheKey(source, descriptor);
+  }
+
+  Future<void> _commitPreparedP2pGeneration(PlaybackSource source) async {
+    final routeKey = _p2pGenerationRouteKey(source);
+    if (routeKey == null) {
+      if (_p2pPlaybackOwner.hasActiveTransport) {
+        await _p2pPlaybackOwner.closeActive();
+        _p2pActiveGenerationByRouteKey.clear();
+        _p2pLocalStreamSourcesByKey.clear();
+        _p2pLocalStreamTotalBytesByUrl.clear();
+        DiagnosticLog.add(
+          'native p2p playback generation retired reason=direct_replacement_promoted',
+        );
+      }
+      return;
+    }
+    final generation = _p2pPreparedGenerationByRouteKey.remove(routeKey);
+    if (generation == null) return;
+    await _p2pPlaybackOwner.commit(generation);
+    _p2pActiveGenerationByRouteKey
+      ..clear()
+      ..[routeKey] = generation;
+    DiagnosticLog.add('native p2p playback generation committed');
+  }
+
+  Future<void> _rollbackPreparedP2pGeneration(
+    PlaybackSource source, {
+    required String reason,
+  }) async {
+    final routeKey = _p2pGenerationRouteKey(source);
+    if (routeKey == null) return;
+    final generation = _p2pPreparedGenerationByRouteKey.remove(routeKey);
+    if (generation == null) return;
+    await _p2pPlaybackOwner.rollback(generation);
+    final cachedSource = _p2pLocalStreamSourcesByKey.remove(routeKey);
+    if (cachedSource != null) {
+      _p2pLocalStreamTotalBytesByUrl.remove(cachedSource.url);
+    }
+    DiagnosticLog.add(
+        'native p2p playback generation rolled back reason=$reason');
+  }
+
+  Future<void> _rollbackAllPreparedP2pGenerations({
+    required String reason,
+  }) async {
+    final pending = _p2pPreparedGenerationByRouteKey.entries.toList();
+    _p2pPreparedGenerationByRouteKey.clear();
+    for (final entry in pending) {
+      await _p2pPlaybackOwner.rollback(entry.value);
+      final cachedSource = _p2pLocalStreamSourcesByKey.remove(entry.key);
+      if (cachedSource != null) {
+        _p2pLocalStreamTotalBytesByUrl.remove(cachedSource.url);
+      }
+    }
+    if (pending.isNotEmpty) {
+      DiagnosticLog.add(
+        'native p2p pending generations rolled back reason=$reason count=${pending.length}',
+      );
+    }
   }
 
   Future<void> _guardP2pBatteryDataPolicy() async {
@@ -9015,6 +9725,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         NativePlaybackRequest(
           providerId: request.providerId,
           sources: eligible,
+          candidateFamily: request.candidateFamily,
         ),
       );
     }
@@ -10371,6 +11082,31 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       );
       return;
     }
+    final replacementGeneration = _playbackReplacementGeneration;
+    if (!_playerClosing &&
+        replacementGeneration != null &&
+        _playbackReplacementTransaction.owns(
+          replacementGeneration,
+          controller,
+        )) {
+      await _rollbackStagedPlaybackReplacement(
+        generation: replacementGeneration,
+        target: controller,
+        reason: 'dispose_rejected_target',
+      );
+      return;
+    }
+    final additionallyOwnedControllers = _playerClosing
+        ? _playbackReplacementTransaction
+            .clear()
+            .where((owned) => !identical(owned, controller))
+            .toList(growable: false)
+        : const <_NativePlaybackController>[];
+    if (_playerClosing) {
+      _playbackReplacementGeneration = null;
+      _retainedPlaybackReplacementSource = null;
+      _retainedPlaybackReplacementLibVlcCoordinator = null;
+    }
     if (saveProgress) {
       _trackLastKnownPlaybackPosition();
       _saveNativeProgress(force: true);
@@ -10494,6 +11230,17 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       unawaited(stopRelay);
     } else {
       await stopRelay;
+    }
+    for (final additionallyOwned in additionallyOwnedControllers) {
+      _detachControllerUpdateListener(additionallyOwned);
+      try {
+        await additionallyOwned.dispose().timeout(const Duration(seconds: 2));
+      } catch (error) {
+        DiagnosticLog.add(
+          'native retained replacement dispose skipped '
+          'error=${_safeDiagnosticError(error)}',
+        );
+      }
     }
   }
 
@@ -10880,6 +11627,200 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       return;
     }
     controller.removeListener(_handleControllerUpdate);
+  }
+
+  bool _canStagePlaybackReplacement({
+    required bool requireStartupPlaybackProof,
+  }) {
+    final active = _controller;
+    return requireStartupPlaybackProof &&
+        active != null &&
+        active.isInitialized &&
+        !active.hasError &&
+        _activeSource != null;
+  }
+
+  bool _hasActiveMedia3AudioProof(_NativePlaybackController controller) {
+    final summary = controller.media3?.audioTrackSummary.trim().toLowerCase();
+    if (summary == null || summary.isEmpty || summary == 'unknown')
+      return false;
+    return summary.contains('selected:') &&
+        !summary.contains('selected:none') &&
+        !summary.contains('selected:0');
+  }
+
+  Future<bool> _rollbackStagedPlaybackReplacement({
+    required int generation,
+    required _NativePlaybackController target,
+    required String reason,
+    bool disposeRejected = true,
+  }) async {
+    if (!_playbackReplacementTransaction.owns(generation, target)) return false;
+    final rejected = _playbackReplacementTransaction.rollback(generation);
+    final retained = _playbackReplacementTransaction.active;
+    if (rejected == null || retained == null) return false;
+
+    _detachControllerUpdateListener(rejected);
+    _controller = retained;
+    _activeSource = _retainedPlaybackReplacementSource;
+    _attachControllerUpdateListener(retained);
+    _playbackReplacementGeneration = null;
+    _retainedPlaybackReplacementSource = null;
+    _retainedPlaybackReplacementLibVlcCoordinator = null;
+    if (disposeRejected) {
+      try {
+        await rejected.dispose().timeout(
+              const Duration(milliseconds: 700),
+            );
+      } catch (error) {
+        DiagnosticLog.add(
+          'native staged replacement dispose skipped '
+          'reason=$reason error=${_safeDiagnosticError(error)}',
+        );
+      }
+    }
+    if (mounted && !_playerClosing) {
+      setState(() {
+        _loading = false;
+        _statusMessage = null;
+        _playbackWaitMessage = null;
+        _playbackWaitMessagePausedPlayback = false;
+      });
+    }
+    DiagnosticLog.add(
+      'native staged replacement rolled back reason=$reason',
+    );
+    return true;
+  }
+
+  Future<bool> _promoteStagedPlaybackReplacement({
+    required int generation,
+    required _NativePlaybackController target,
+    required PlaybackSource? targetSource,
+    bool makeTargetCurrent = false,
+    MobileLibVlcCoordinator? retiredLibVlcCoordinator,
+  }) async {
+    if (!_playbackReplacementTransaction.owns(generation, target)) return false;
+    final retired = _playbackReplacementTransaction.active;
+    if (retired == null) return false;
+    final audioTransferred = await mobileTransferReplacementAudioOwnership(
+      silenceActive: () async {
+        await retired.pause().timeout(const Duration(milliseconds: 700));
+      },
+      activateTarget: () => target.setVolume(_volumePreview),
+      promoteTarget: () async {
+        final promoted = _playbackReplacementTransaction.promote(generation);
+        if (!identical(promoted, retired)) return false;
+        if (retired.engine == _NativePlaybackEngine.libvlc &&
+            identical(
+              _mobileLibVlcCoordinator,
+              retiredLibVlcCoordinator,
+            )) {
+          _mobileLibVlcCoordinator = null;
+        }
+        if (makeTargetCurrent) {
+          _detachControllerUpdateListener(retired);
+          _controller = target;
+          _activeSource = targetSource;
+          _attachControllerUpdateListener(target);
+        }
+        _playbackReplacementGeneration = null;
+        _retainedPlaybackReplacementSource = null;
+        _retainedPlaybackReplacementLibVlcCoordinator = null;
+        return true;
+      },
+      silenceTarget: () => target.setVolume(0),
+      cleanupActive: () async {
+        if (retired.engine == _NativePlaybackEngine.libvlc) {
+          await _closeRetiredMobileLibVlcCoordinator(
+            retiredLibVlcCoordinator,
+            'replacement_promoted',
+          );
+          return;
+        }
+        try {
+          await retired.dispose();
+        } catch (error) {
+          DiagnosticLog.add(
+            'native retained controller dispose skipped '
+            'error=${_safeDiagnosticError(error)}',
+          );
+        }
+      },
+    );
+    if (!audioTransferred) {
+      final rolledBack = await _rollbackStagedPlaybackReplacement(
+        generation: generation,
+        target: target,
+        reason: 'audio_transfer_rejected',
+      );
+      if (!rolledBack) return false;
+      try {
+        await retired.play().timeout(const Duration(milliseconds: 700));
+      } catch (error) {
+        DiagnosticLog.add(
+          'native retained controller resume skipped '
+          'error=${_safeDiagnosticError(error)}',
+        );
+      }
+      DiagnosticLog.add(
+        'native staged replacement audio transfer rejected reason=active_audio_not_silent',
+      );
+      return false;
+    }
+    if (mounted) setState(() {});
+    DiagnosticLog.add('native staged replacement promoted');
+    return true;
+  }
+
+  Future<void> _closeRetiredMobileLibVlcCoordinator(
+    MobileLibVlcCoordinator? coordinator,
+    String reason,
+  ) async {
+    if (coordinator == null) return;
+    try {
+      await coordinator.close().timeout(const Duration(seconds: 4));
+      DiagnosticLog.add(
+        'native retired libvlc coordinator closed reason=$reason',
+      );
+    } catch (error) {
+      DiagnosticLog.add(
+        'native retired libvlc coordinator close deferred '
+        'reason=$reason error=${_safeDiagnosticError(error)}',
+      );
+    }
+  }
+
+  Future<void> _closePlaybackReplacementForRouteClose() async {
+    if (!_playbackReplacementTransaction.isRetaining) return;
+    final ownedControllers = _playbackReplacementTransaction.clear();
+    final retainedCoordinator = _retainedPlaybackReplacementLibVlcCoordinator;
+    final currentCoordinator = _mobileLibVlcCoordinator;
+    _playbackReplacementGeneration = null;
+    _retainedPlaybackReplacementSource = null;
+    _retainedPlaybackReplacementLibVlcCoordinator = null;
+    for (final ownedController in ownedControllers) {
+      _detachControllerUpdateListener(ownedController);
+    }
+    _controller = null;
+    await _closeMobileLibVlcCoordinatorSession('replacement_route_close');
+    if (retainedCoordinator != null &&
+        !identical(retainedCoordinator, currentCoordinator)) {
+      await _closeRetiredMobileLibVlcCoordinator(
+        retainedCoordinator,
+        'replacement_route_close',
+      );
+    }
+    for (final ownedController in ownedControllers) {
+      try {
+        await ownedController.dispose().timeout(const Duration(seconds: 2));
+      } catch (error) {
+        DiagnosticLog.add(
+          'native replacement route-close disposal deferred '
+          'error=${_safeDiagnosticError(error)}',
+        );
+      }
+    }
   }
 
   void _handleControllerUpdate() {
@@ -18764,154 +19705,123 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     final position = _qualitySwitchResumePosition();
 
-    if (selected is _QualityAutoSelection) {
-      final previousSource = _activeSource;
-      final previousSourceIndex = _sourceIndex;
-      final previousPreferredQuality = _preferredQuality;
-      final previousQualityPreferenceMode = _qualityPreferenceMode;
-      final source = _bestAutoQualitySource(
-        _nativePlayableSources(_activeSources),
-      );
-      if (source == null) {
-        await _resumeAfterOptionSheet(wasPlaying);
-        return;
-      }
-      final nextIndex = _activeSources.indexWhere(
-        (candidate) => candidate.url == source.url,
-      );
-      if (source.url == _activeSource?.url) {
+    if (selected is! _QualitySelection) {
+      await _resumeAfterOptionSheet(wasPlaying);
+      return;
+    }
+    final selectedQuality = selected.label;
+    final qualityCandidateIndexes = mobilePlaybackQualityCandidateIndexes(
+      qualities: [
+        for (final source in _activeSources) _qualityDescriptor(source),
+      ],
+      selected: selectedQuality,
+    );
+    final candidates = <PlaybackSource>[
+      for (final index in qualityCandidateIndexes)
+        if (index >= 0 &&
+            index < _activeSources.length &&
+            _nativeSourceClassIsPlayable(_activeSources[index]))
+          _activeSources[index],
+    ];
+    if (candidates.isEmpty) {
+      if (mounted) {
         setState(() {
-          _preferredQuality = null;
-          _qualityPreferenceMode = 'recommended';
+          _controlsVisible = true;
+          _statusMessage = '$selectedQuality is unavailable right now.';
         });
-        await _resumeAfterOptionSheet(wasPlaying);
-        return;
       }
+      await _resumeAfterOptionSheet(wasPlaying);
+      return;
+    }
+    final previousSource = _activeSource;
+    final previousSourceIndex = _sourceIndex;
+    final previousPreferredQuality = _preferredQuality;
+    final previousQualityPreferenceMode = _qualityPreferenceMode;
+    final preferenceMode =
+        selectedQuality == 'Auto' ? 'recommended' : 'advanced';
+    final activeMatches = candidates.any(
+      (candidate) => candidate.url == _activeSource?.url,
+    );
+    if (activeMatches) {
+      setState(() {
+        _qualityPreferenceMode = preferenceMode;
+        _preferredQuality = selectedQuality == 'Auto' ? null : selectedQuality;
+      });
+      await _resumeAfterOptionSheet(wasPlaying);
+      return;
+    }
+
+    for (final candidate in candidates) {
+      final nextIndex = _activeSources.indexWhere(
+        (source) => source.url == candidate.url,
+      );
       final libVlcHandled = await _switchMobileLibVlcSelection(
-        selected: source,
+        selected: candidate,
         position: position,
         wasPlaying: wasPlaying,
         nextIndex: nextIndex,
-        selectedQuality: 'Auto',
-        preferenceMode: 'recommended',
-        reason: 'quality_auto',
+        selectedQuality: selectedQuality,
+        preferenceMode: preferenceMode,
+        reason: selectedQuality == 'Auto' ? 'quality_auto' : 'quality_explicit',
       );
-      if (libVlcHandled != null) return;
+      if (libVlcHandled == true) return;
+      if (libVlcHandled == false) continue;
 
-      setState(() {
-        _preferredQuality = null;
-        _qualityPreferenceMode = 'recommended';
-      });
-      _saveNativeProgress(force: true);
-      DiagnosticLog.add('native quality selected auto');
-      if (nextIndex >= 0) {
-        _sourceIndex = nextIndex;
-      }
-      _resetRouteHlsTimeoutsForQualitySwitch(source);
+      if (nextIndex >= 0) _sourceIndex = nextIndex;
+      _qualityPreferenceMode = preferenceMode;
+      _preferredQuality = selectedQuality == 'Auto' ? null : selectedQuality;
+      _resetRouteHlsTimeoutsForQualitySwitch(candidate);
       _clearOptionSheetOverlay();
       _armSourceSelectionRollback(
         previousSource: previousSource,
-        selectedSource: source,
+        selectedSource: candidate,
         wasPlaying: wasPlaying,
         previousSourceIndex: previousSourceIndex,
         previousPreferredQuality: previousPreferredQuality,
         previousQualityPreferenceMode: previousQualityPreferenceMode,
       );
       final opened = await _openSource(
-        source,
+        candidate,
         resumePosition: position,
         requireStartupPlaybackProof: true,
       );
       if (!mounted) return;
-      if (opened && !wasPlaying) {
-        await _controller?.pause();
+      if (opened) {
+        if (!wasPlaying) await _controller?.pause();
+        return;
       }
-      if (!opened && mounted) {
-        final restored = await _restorePendingSourceSelectionRollback(
-          failedSource: source,
-          recoveryPosition: position,
-          reason: 'quality_auto_selection_failed',
-        );
-        if (restored) return;
-      }
-      await _resumeAfterOptionSheet(wasPlaying);
-      return;
-    }
-
-    if (selected is! PlaybackSource) {
-      await _resumeAfterOptionSheet(wasPlaying);
-      return;
-    }
-
-    if (selected.url == _activeSource?.url) {
-      await _resumeAfterOptionSheet(wasPlaying);
-      return;
-    }
-
-    final previousSource = _activeSource;
-    final previousSourceIndex = _sourceIndex;
-    final previousPreferredQuality = _preferredQuality;
-    final previousQualityPreferenceMode = _qualityPreferenceMode;
-    final nextIndex = _activeSources.indexWhere(
-      (source) => source.url == selected.url,
-    );
-    final libVlcHandled = await _switchMobileLibVlcSelection(
-      selected: selected,
-      position: position,
-      wasPlaying: wasPlaying,
-      nextIndex: nextIndex,
-      selectedQuality: _qualityLabel(selected),
-      preferenceMode: 'advanced',
-      reason: 'quality_explicit',
-    );
-    if (libVlcHandled != null) return;
-
-    if (nextIndex >= 0) {
-      _sourceIndex = nextIndex;
-    }
-    _qualityPreferenceMode = 'advanced';
-    _preferredQuality = _qualityLabel(selected);
-    DiagnosticLog.add(
-      'native quality selected provider=${selected.providerId} quality=${_qualityLabel(selected)} qualityBucket=${_sourceQualityBucketForDiagnostics(selected)}',
-    );
-    _resetRouteHlsTimeoutsForQualitySwitch(selected);
-    _clearOptionSheetOverlay();
-    _armSourceSelectionRollback(
-      previousSource: previousSource,
-      selectedSource: selected,
-      wasPlaying: wasPlaying,
-      previousSourceIndex: previousSourceIndex,
-      previousPreferredQuality: previousPreferredQuality,
-      previousQualityPreferenceMode: previousQualityPreferenceMode,
-    );
-    final opened = await _openSource(
-      selected,
-      resumePosition: position,
-      requireStartupPlaybackProof: true,
-    );
-    if (!mounted) return;
-    if (opened && !wasPlaying) {
-      await _controller?.pause();
-    }
-    if (!opened && mounted) {
       final restored = await _restorePendingSourceSelectionRollback(
-        failedSource: selected,
+        failedSource: candidate,
         recoveryPosition: position,
         reason: 'quality_selection_failed',
       );
-      if (restored) return;
-      _sourceIndex += 1;
-      final status = _nextSourceStatusFor();
-      _logPlaybackStatus(status, reason: 'quality_selection_failed');
+      if (!restored) break;
+    }
+    if (mounted) {
       setState(() {
-        _loading = true;
+        _loading = false;
         _controlsVisible = true;
-        _statusMessage = status;
+        _statusMessage =
+            "Couldn't open $selectedQuality. Previous source kept.";
       });
-      await _openNextAvailableSource(resumePositionOverride: position);
-      return;
     }
     await _resumeAfterOptionSheet(wasPlaying);
+  }
+
+  Future<void> _publishStartupProof() async {
+    if (_startupProofPublished) return;
+    _startupProofPublished = true;
+    final callback = widget.onStartupProven;
+    if (callback == null) return;
+    try {
+      await callback();
+    } catch (error) {
+      _startupProofPublished = false;
+      DiagnosticLog.add(
+        'native exact episode adoption failed reason=${error.runtimeType}',
+      );
+      rethrow;
+    }
   }
 
   Future<void> _showSourceSheet() async {
@@ -19068,6 +19978,29 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     required String reason,
   }) async {
     if (!mounted || previousSource == null || _playerClosing) return false;
+    await _settleStagedReplacementBeforePreviousSourceRecovery(
+      reason: reason,
+    );
+    if (_retainedSourceAlreadyActiveAfterReplacementFailure(previousSource)) {
+      _sourceIndex = previousSourceIndex;
+      setState(() {
+        _loading = false;
+        _controlsVisible = true;
+        _statusMessage = null;
+        _preferredQuality = previousPreferredQuality;
+        _qualityPreferenceMode = previousQualityPreferenceMode;
+      });
+      if (wasPlaying) {
+        await _controller?.play();
+      } else {
+        await _controller?.pause();
+      }
+      await _resumeAfterOptionSheet(wasPlaying);
+      DiagnosticLog.add(
+        'native source selection fallback retained active source reason=$reason',
+      );
+      return true;
+    }
     final status = "That mirror didn't work. Returning to previous source...";
     DiagnosticLog.add(
       'native source selection fallback restoring previous source reason=$reason provider=${previousSource.providerId}',
@@ -19104,6 +20037,35 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     return true;
   }
 
+  Future<void> _settleStagedReplacementBeforePreviousSourceRecovery({
+    required String reason,
+  }) async {
+    final generation = _playbackReplacementGeneration;
+    final staged = _playbackReplacementTransaction.staged;
+    if (generation == null ||
+        staged == null ||
+        !_playbackReplacementTransaction.owns(generation, staged)) {
+      return;
+    }
+    await _rollbackStagedPlaybackReplacement(
+      generation: generation,
+      target: staged,
+      reason: 'selection_failure_before_$reason',
+    );
+  }
+
+  bool _retainedSourceAlreadyActiveAfterReplacementFailure(
+    PlaybackSource previousSource,
+  ) {
+    final controller = _controller;
+    final activeSource = _activeSource;
+    return controller != null &&
+        controller.isInitialized &&
+        !controller.hasError &&
+        activeSource != null &&
+        activeSource.url == previousSource.url;
+  }
+
   Future<void> _showFitSheet() async {
     if (_locked) return;
     final wasPlaying = _openOptionSheetWithoutPause();
@@ -19125,6 +20087,30 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   Future<void> _openNextEpisodeInPlace() async {
     final resolver = _nextEpisodeResolver;
     if (resolver == null) return;
+    await _openEpisodeRoute(
+      resolver,
+      unavailableMessage: 'Next episode unavailable.',
+    );
+  }
+
+  Future<void> _openSelectedEpisode(NativePlayerEpisode episode) async {
+    if (episode.season == _skipSegmentSeason &&
+        episode.episode == _skipSegmentEpisode) {
+      _scheduleControlsHide();
+      return;
+    }
+    await _openEpisodeRoute(
+      episode.resolve,
+      unavailableMessage: 'Episode unavailable.',
+    );
+  }
+
+  Future<void> _openEpisodeRoute(
+    Future<NativePlayerNextEpisode?> Function(
+      PlaybackRequestCancellation cancellation,
+    ) resolver, {
+    required String unavailableMessage,
+  }) async {
     final now = DateTime.now();
     final lastTapAt = _lastNextEpisodeTapAt;
     if (_nextEpisodeOpening ||
@@ -19153,37 +20139,25 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     _hideControlsTimer?.cancel();
     _saveNativeProgress(force: true);
     final currentController = _controller;
-    if (currentController?.isPlaying == true) {
-      try {
-        await currentController!.pause().timeout(
-              const Duration(milliseconds: 700),
-            );
-        DiagnosticLog.add('native next episode paused current playback');
-      } catch (error) {
-        DiagnosticLog.add(
-          'native next episode pause skipped reason=${error.runtimeType}',
-        );
-      }
+    if (widget.lifecycleHarness?.skipPlaybackInterstitials != true) {
+      await JuicrAdPolicy.showRewardedBeforePlayback(
+        context,
+        reason: 'episode_playback',
+        restorePlayerLandscapeWhenDone: true,
+      );
     }
-    await JuicrAdPolicy.showRewardedBeforePlayback(
-      context,
-      reason: 'episode_playback',
-      restorePlayerLandscapeWhenDone: true,
-    );
     if (!mounted) return;
     setState(() {
       _loading = true;
       _controlsVisible = true;
       _settingsExpanded = false;
-      _statusMessage = 'Opening next episode...';
+      _statusMessage = 'Preparing episode...';
     });
 
-    _beginLibVlcLaunchGeneration(reason: 'exact_media_launch');
     NativePlayerNextEpisode? next;
     try {
-      next = await _runCancelableProviderWork<NativePlayerNextEpisode?>(
-        timeout: _routeStartupOwner.remainingWorkBudget,
-        operation: resolver,
+      next = await _episodeTransitionResolver.resolve<NativePlayerNextEpisode?>(
+        resolver,
       );
     } catch (error) {
       if (_isTemporaryResolverBlock(error)) {
@@ -19192,29 +20166,13 @@ class _NativePlayerPageState extends State<NativePlayerPage>
           'native next episode resolver backoff reason=temporary_block seconds=${_nextEpisodeResolverBackoff.inSeconds}',
         );
       }
-      _routeStartupOwner.completeSuccessfully();
-      await restoreRetainedPlaybackAfterRouteFailure(
-        publishRestoredUi: () {
-          if (!mounted) return;
-          setState(() {
-            _loading = false;
-            _statusMessage = null;
-          });
-        },
-        resumePlayback:
-            currentController != null && currentController.isPlaying == false
-                ? currentController.play
-                : null,
-        onResumeError: (resumeError) {
-          DiagnosticLog.add(
-            'native next episode retained playback resume skipped '
-            'reason=${resumeError.runtimeType}',
-          );
-        },
-      );
       if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _statusMessage = null;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Next episode unavailable.')),
+        SnackBar(content: Text(unavailableMessage)),
       );
       return;
     } finally {
@@ -19222,131 +20180,139 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     }
     if (!mounted) return;
     if (next == null) {
-      _routeStartupOwner.completeSuccessfully();
-      await restoreRetainedPlaybackAfterRouteFailure(
-        publishRestoredUi: () {
-          if (!mounted) return;
-          setState(() {
-            _loading = false;
-            _statusMessage = null;
-          });
-        },
-        resumePlayback:
-            currentController != null && currentController.isPlaying == false
-                ? currentController.play
-                : null,
-        onResumeError: (resumeError) {
-          DiagnosticLog.add(
-            'native next episode unavailable retained resume skipped '
-            'reason=${resumeError.runtimeType}',
-          );
-        },
-      );
-      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _statusMessage = null;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Next episode unavailable.')),
+        SnackBar(content: Text(unavailableMessage)),
       );
       return;
     }
 
     final resolvedNext = next;
-    final detachLibVlcRelease = _detachLibVlcControllerForAsyncRelease(
-      'next_episode',
-    );
-    if (!detachLibVlcRelease) {
-      await _disposeCurrentController(awaitLibVlcRelease: true);
-    } else if (mounted) {
-      setState(() {});
+    final navigator = Navigator.of(context);
+    final retainedRoute = ModalRoute.of(context);
+    var adopted = false;
+    Future<void> adoptTarget() async {
+      if (adopted) return;
+      adopted = true;
+      _saveNativeProgress(force: true);
+      if (currentController?.isPlaying == true) {
+        try {
+          await currentController!.pause().timeout(
+                const Duration(milliseconds: 700),
+              );
+        } catch (_) {}
+      }
+      if (retainedRoute != null && retainedRoute.isActive) {
+        navigator.removeRoute(retainedRoute);
+      }
     }
-    if (!mounted) return;
-    setState(() {
-      _title = resolvedNext.title;
-      _resolveProvider = resolvedNext.resolveProvider;
-      _resolveRecoveryProvider =
-          resolvedNext.resolveRecoveryProvider ?? resolvedNext.resolveProvider;
-      _resolveFreshRequests = resolvedNext.resolveFreshRequests;
-      _resolveSubtitles = resolvedNext.resolveSubtitles;
-      _limitToFirstQualityPass = resolvedNext.limitToFirstQualityPass;
-      _logoUrl = resolvedNext.logoUrl;
-      _progressItem = resolvedNext.progressItem;
-      _playbackKey = resolvedNext.playbackKey;
-      _requests = _requestsWithVerifiedSource(
-        mobilePrioritizeExplicitLibVlcRequestsByTransport(
-          _prioritizeResolvedFreshRequests(resolvedNext.sources),
-          explicitLibVlc: _manualLibVlcConfigured,
+
+    final result = await navigator.push<String>(
+      AppPageRoute<String>(
+        builder: (_) => NativePlayerPage(
+          title: resolvedNext.title,
+          sources: resolvedNext.sources,
+          resolveProvider: resolvedNext.resolveProvider,
+          resolveRecoveryProvider: resolvedNext.resolveRecoveryProvider,
+          resolveFreshRequests: resolvedNext.resolveFreshRequests,
+          resolveSubtitles: resolvedNext.resolveSubtitles,
+          logoUrl: resolvedNext.logoUrl,
+          progressItem: resolvedNext.progressItem,
+          playbackKey: resolvedNext.playbackKey,
+          progressSubtitle: resolvedNext.progressSubtitle,
+          skipSegmentSeason: resolvedNext.skipSegmentSeason,
+          skipSegmentEpisode: resolvedNext.skipSegmentEpisode,
+          nextEpisodeLabel: resolvedNext.nextEpisodeLabel,
+          onNextEpisode: resolvedNext.onNextEpisode,
+          episodes: resolvedNext.episodes,
+          limitToFirstQualityPass: resolvedNext.limitToFirstQualityPass,
+          preferSavedResume: true,
+          startupStartedAt: DateTime.now(),
+          enableProviderWarmup: resolvedNext.sources.any(
+            (request) => request.sources.isNotEmpty,
+          ),
+          onStartupProven: adoptTarget,
         ),
-        playbackKey: resolvedNext.playbackKey,
-      );
-      _progressSubtitle = resolvedNext.progressSubtitle;
-      _skipSegmentSeason = resolvedNext.skipSegmentSeason;
-      _skipSegmentEpisode = resolvedNext.skipSegmentEpisode;
-      _skipSegments = const <PlaybackSkipSegment>[];
-      _autoSkippedSegmentKeys.clear();
-      _nextEpisodeLabel = resolvedNext.nextEpisodeLabel;
-      _nextEpisodeResolver = resolvedNext.onNextEpisode;
-      _nextEpisodeOpening = false;
-      _resolverBackoffUntil = null;
-      _routeWideFreshRecoveryAttempted = false;
-      _providerResolveFutures.clear();
-      _providerIndex = 0;
-      _sourceIndex = 0;
-      _enginePassIndex = 0;
-      _qualityPassIndex = 0;
-      _libvlcUnavailableForSession = false;
-      _activeSourceHasZeroClockMetadata = false;
-      _activeSourceVerifiedForSession = false;
-      _lastVerifiedConfidenceUrl = null;
-      _verifiedConfidenceMilestone = 0;
-      _skipUnsupportedHighEfficiencyForSession = false;
-      _nativeSourceClassSkipCounts.clear();
-      _nativeProvidersExhausted = false;
-      _activeSources = const <PlaybackSource>[];
-      _activeSource = null;
-      _subtitles = const <PlaybackSubtitle>[];
-      _subtitlesLoadStarted = false;
-      _activeSubtitle = null;
-      _subtitleCues = const <_SubtitleCue>[];
-      _subtitleText = null;
-      _preferredSubtitleId = null;
+      ),
+    );
+    if (!mounted || adopted) return;
+    setState(() {
+      _loading = false;
       _statusMessage = null;
-      _userPaused = false;
-      _pictureInPictureActive = false;
-      _systemPipHandoffActive = false;
-      _restoringFromExternalRoute = false;
-      _shouldRestoreOnResume = false;
-      _restoreShouldResumePlayback = false;
-      _restoreResumePosition = Duration.zero;
-      _resumePromptHandled = false;
-      _resumePromptAccepted = false;
-      _autoNextEpisodeStarted = false;
-      _completionCloseStarted = false;
-      _lastKnownPlaybackPosition = Duration.zero;
-      _lastKnownPlaybackDuration = Duration.zero;
-      _resetCrediblePlaybackAnchor();
-      _skipSegmentLookupDuration = Duration.zero;
-      _resumeProgressAnchorPosition = Duration.zero;
-      _resumeProgressAnchorLogSecond = -1;
-      _resetLibVlcContinuousTsProof();
-      _nativeWallClockStartedAt = null;
-      _sameSourceRecoveryAttempts = 0;
-      _hardPlaybackErrors = 0;
-      _autoSkippedSegmentKeys.clear();
-      _hardRecoveryAttemptsByProvider.clear();
-      _failedSourceAttempts.clear();
-      _media3TerminalFailedUrlsForSession.clear();
-      _resumeRecoveryExcludedQualityRanks.clear();
-      _resumeRecoveryUnrankedDirectHlsFailures = 0;
-      _ignoreSavedQualityForResumeRecovery = false;
-      _lastSavedSecond = -1;
-      _integrityPlaybackKey = null;
-      _credibleWatchMilliseconds = 0;
-      _credibleWatchSecondsAtSourceOpen = 0;
-      _seekAbuseEvents = 0;
-      _resetPlaybackIntegritySample();
+      _controlsVisible = true;
     });
-    _restoreNativePreferences();
-    unawaited(_loadSkipSegments());
-    unawaited(_openNextAvailableSource());
+    if (result?.startsWith('native_error') == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(unavailableMessage)),
+      );
+    }
+    _scheduleControlsHide();
+  }
+
+  Future<void> _showEpisodesSheet() async {
+    if (_locked || _episodes.isEmpty) return;
+    final seasons = mobilePlaybackSeasons(
+      _episodes.map(
+        (episode) => MobilePlaybackEpisodeSlot(
+          season: episode.season,
+          episode: episode.episode,
+        ),
+      ),
+    );
+    if (seasons.isEmpty) return;
+    final wasPlaying = _openOptionSheetWithoutPause();
+    while (mounted) {
+      final season = await showModalBottomSheet<int>(
+        context: context,
+        backgroundColor: Colors.transparent,
+        builder: (context) => _SeasonPickerSheet(
+          seasons: seasons,
+          activeSeason: _skipSegmentSeason,
+          episodeCount: (season) =>
+              _episodes.where((episode) => episode.season == season).length,
+        ),
+      );
+      if (!mounted || season == null) {
+        await _resumeAfterOptionSheet(wasPlaying);
+        return;
+      }
+      final slots = mobilePlaybackEpisodesForSeason(
+        _episodes.map(
+          (episode) => MobilePlaybackEpisodeSlot(
+            season: episode.season,
+            episode: episode.episode,
+          ),
+        ),
+        season,
+      );
+      final episodeByNumber = <int, NativePlayerEpisode>{
+        for (final episode in _episodes)
+          if (episode.season == season) episode.episode: episode,
+      };
+      final selected = await showModalBottomSheet<NativePlayerEpisode>(
+        context: context,
+        backgroundColor: Colors.transparent,
+        builder: (context) => _EpisodePickerSheet(
+          season: season,
+          episodes: [
+            for (final slot in slots)
+              if (episodeByNumber[slot.episode] case final episode?) episode,
+          ],
+          activeSeason: _skipSegmentSeason,
+          activeEpisode: _skipSegmentEpisode,
+        ),
+      );
+      if (!mounted) return;
+      final nextStage = mobileEpisodePickerStageAfterChildResult(
+        hasSelection: selected != null,
+      );
+      if (nextStage == MobileEpisodePickerStage.seasons) continue;
+      await _openSelectedEpisode(selected!);
+      return;
+    }
   }
 
   Future<void> _loadSkipSegments() async {
@@ -20553,10 +21519,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                 _lastKnownPlaybackPosition.inSeconds >= 3))) {
       _saveNativeProgress(force: true);
     }
-    final detachLibVlcRelease = _detachLibVlcControllerForAsyncRelease(
-      'route_close',
-    );
-    if (!detachLibVlcRelease) {
+    final hadPlaybackReplacement = _playbackReplacementTransaction.isRetaining;
+    await _closePlaybackReplacementForRouteClose();
+    final detachLibVlcRelease = !hadPlaybackReplacement &&
+        _detachLibVlcControllerForAsyncRelease('route_close');
+    if (!hadPlaybackReplacement && !detachLibVlcRelease) {
       await _disposeCurrentController(
         awaitLibVlcRelease: true,
         saveProgress: false,
@@ -20766,6 +21733,28 @@ class _NativePlayerPageState extends State<NativePlayerPage>
     if (controller.duration <= Duration.zero) return false;
     if (controller.size == Size.zero) return false;
     return true;
+  }
+
+  Future<bool> _waitForResumePromptReadiness(
+    _NativePlaybackController controller, {
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (mounted &&
+        !_playerClosing &&
+        _controller == controller &&
+        DateTime.now().isBefore(deadline)) {
+      if (controller.hasError) return false;
+      if (_resumePromptCanOpenForController(controller)) {
+        if (controller.isPlaying) {
+          await controller.pause();
+          if (_playerClosing || _controller != controller) return false;
+        }
+        if (!controller.isPlaying) return true;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+    }
+    return false;
   }
 
   Duration _fallbackControlDuration() {
@@ -21045,9 +22034,11 @@ class _NativePlayerPageState extends State<NativePlayerPage>
       final continuousTsPlaybackReady =
           engine == _NativePlaybackEngine.libvlc &&
               _hasSustainedLibVlcContinuousTsPlaybackProof(controller);
+      final audioReady = controller.hasSelectedAudioTrack;
       final visuallyReady = controller.isInitialized &&
           controller.isPlaying &&
           !controller.hasError &&
+          audioReady &&
           (controller.hasRenderedVideoFrame || continuousTsPlaybackReady) &&
           (controller.size != Size.zero || continuousTsPlaybackReady);
       final clockReady = controller.duration > Duration.zero ||
@@ -21137,6 +22128,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         return false;
       }
       final visuallyReady = controller.isPlaying &&
+          _hasActiveMedia3AudioProof(controller) &&
           controller.hasRenderedVideoFrame &&
           controller.duration > Duration.zero &&
           controller.size != Size.zero &&
@@ -22281,6 +23273,14 @@ class _NativePlayerPageState extends State<NativePlayerPage>
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
+    final retainedReplacementController =
+        _playbackReplacementTransaction.isStaging
+            ? _playbackReplacementTransaction.active
+            : null;
+    final stagedReplacementController =
+        _playbackReplacementTransaction.isStaging
+            ? _playbackReplacementTransaction.staged
+            : null;
     final stagedControllers = _stagedMobileLibVlcControllers.entries
         .where(
           (entry) =>
@@ -22290,16 +23290,41 @@ class _NativePlayerPageState extends State<NativePlayerPage>
         .map((entry) => entry.value)
         .toList(growable: false);
     final mountedLibVlcControllers = <_NativePlaybackController>[
+      if (retainedReplacementController != null &&
+          retainedReplacementController.engine == _NativePlaybackEngine.libvlc)
+        retainedReplacementController,
       if (controller != null &&
           controller.engine == _NativePlaybackEngine.libvlc &&
+          !identical(controller, retainedReplacementController) &&
           !stagedControllers.contains(controller))
         controller,
       ...stagedControllers,
     ];
     final visibleLibVlcController =
-        _mobileLibVlcSeekPreparing && stagedControllers.isNotEmpty
-            ? stagedControllers.last
-            : controller;
+        retainedReplacementController?.engine == _NativePlaybackEngine.libvlc
+            ? retainedReplacementController
+            : _mobileLibVlcSeekPreparing && stagedControllers.isNotEmpty
+                ? stagedControllers.last
+                : controller;
+    final mountedNonLibVlcControllers = <_NativePlaybackController>[
+      if (retainedReplacementController != null &&
+          retainedReplacementController.engine != _NativePlaybackEngine.libvlc)
+        retainedReplacementController,
+      if (stagedReplacementController != null &&
+          stagedReplacementController.engine != _NativePlaybackEngine.libvlc &&
+          !identical(
+              stagedReplacementController, retainedReplacementController))
+        stagedReplacementController,
+      if (controller != null &&
+          controller.engine != _NativePlaybackEngine.libvlc &&
+          !identical(controller, retainedReplacementController) &&
+          !identical(controller, stagedReplacementController))
+        controller,
+    ];
+    final visibleNonLibVlcController = retainedReplacementController != null &&
+            retainedReplacementController.engine != _NativePlaybackEngine.libvlc
+        ? retainedReplacementController
+        : controller;
     final initialized = controller?.isInitialized == true;
     final nativeControlsReady = _nativeControlsReady(
       controller,
@@ -22405,6 +23430,7 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                                 ? 1
                                 : 0.01,
                             child: _VideoSurface(
+                              key: surfaceController.platformSurfaceIdentity,
                               controller: surfaceController,
                               fitMode: _fitMode,
                             ),
@@ -22414,10 +23440,37 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                     ),
                   if (_mobileLibVlcSeekNeedsVisibleFallback)
                     const _NativeSeekPreparationSurface(),
-                  if (controller != null &&
-                      controller.engine != _NativePlaybackEngine.libvlc &&
-                      (initialized || controller.requiresPlatformViewWarmup))
-                    _VideoSurface(controller: controller, fitMode: _fitMode),
+                  for (final surfaceController in mountedNonLibVlcControllers)
+                    if (surfaceController.isInitialized ||
+                        surfaceController.requiresPlatformViewWarmup)
+                      KeyedSubtree(
+                        key: ValueKey<int>(identityHashCode(surfaceController)),
+                        child: ExcludeSemantics(
+                          excluding: !identical(
+                            surfaceController,
+                            visibleNonLibVlcController,
+                          ),
+                          child: IgnorePointer(
+                            ignoring: !identical(
+                              surfaceController,
+                              visibleNonLibVlcController,
+                            ),
+                            child: Opacity(
+                              opacity: identical(
+                                surfaceController,
+                                visibleNonLibVlcController,
+                              )
+                                  ? 1
+                                  : 0.01,
+                              child: _VideoSurface(
+                                key: surfaceController.platformSurfaceIdentity,
+                                controller: surfaceController,
+                                fitMode: _fitMode,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                   if (_loading && !initialized)
                     _NativePlayerLoading(
                       title: _title,
@@ -22590,6 +23643,8 @@ class _NativePlayerPageState extends State<NativePlayerPage>
                           onSourcePressed: _showSourceSheet,
                           sourceActionLabel: _sourceActionLabel(),
                           sourceIndicator: _sourceIndicatorLabel(),
+                          episodesAvailable: _episodes.isNotEmpty,
+                          onEpisodesPressed: _showEpisodesSheet,
                           qualityLabel: _qualityControlLabel(
                             _usingGlobalOverrides,
                             _qualityPreferenceMode,
@@ -22858,22 +23913,16 @@ String _fitModeLabel(VideoFitMode mode) {
 }
 
 String _qualityLabel(PlaybackSource? source) {
-  return _displayQualityLabel(playbackQualityLabel(source));
+  return _displayQualityLabel(_qualityDescriptor(source));
+}
+
+String _qualityDescriptor(PlaybackSource? source) {
+  final quality = source?.quality?.trim() ?? '';
+  return quality.isEmpty ? 'Unknown' : quality;
 }
 
 String _displayQualityLabel(String quality) {
-  final trimmed = quality.trim();
-  if (trimmed.isEmpty) return 'Auto';
-  final lower = trimmed.toLowerCase();
-  if (lower == 'auto' || lower == 'unknown') return 'Auto';
-  return trimmed.replaceAllMapped(
-    RegExp(r'(\d+)\s*p\b', caseSensitive: false),
-    (match) {
-      final rawHeight = int.tryParse(match.group(1) ?? '');
-      if (rawHeight == null || rawHeight <= 0) return match.group(0)!;
-      return '${_normalizedPlaybackQualityHeight(rawHeight)}P';
-    },
-  );
+  return mobilePlaybackDisplayQuality(quality);
 }
 
 int _normalizedPlaybackQualityHeight(int height) {
@@ -23280,6 +24329,7 @@ class _StagedHudControlRevealState extends State<_StagedHudControlReveal> {
 
 class _VideoSurface extends StatelessWidget {
   const _VideoSurface({
+    super.key,
     required this.controller,
     required this.fitMode,
   });
@@ -23394,23 +24444,6 @@ class _NativePlaybackSurface extends StatelessWidget {
         aspectRatio: aspectRatio,
         placeholder: const ColoredBox(color: Colors.black),
         virtualDisplay: true,
-        onPlatformViewCreated: (viewId) {
-          DiagnosticLog.add(
-            'native libvlc lifecycle stage=platform_view_callback',
-          );
-          unawaited(
-            vlc.onPlatformViewCreated(viewId).then((_) {
-              DiagnosticLog.add(
-                'native libvlc lifecycle stage=platform_view_bound',
-              );
-            }).catchError((Object error) {
-              DiagnosticLog.add(
-                'native libvlc lifecycle stage=platform_view_bind_failed '
-                'error=${_safeDiagnosticError(error)}',
-              );
-            }),
-          );
-        },
       );
     }
     return const SizedBox.shrink();
@@ -23864,6 +24897,8 @@ class _NativePlayerControls extends StatelessWidget {
     required this.onSourcePressed,
     required this.sourceActionLabel,
     required this.sourceIndicator,
+    required this.episodesAvailable,
+    required this.onEpisodesPressed,
     required this.qualityLabel,
     required this.onQualityPressed,
     required this.speedLabel,
@@ -23911,6 +24946,8 @@ class _NativePlayerControls extends StatelessWidget {
   final VoidCallback onSourcePressed;
   final String sourceActionLabel;
   final String? sourceIndicator;
+  final bool episodesAvailable;
+  final VoidCallback onEpisodesPressed;
   final String qualityLabel;
   final VoidCallback onQualityPressed;
   final String speedLabel;
@@ -24207,6 +25244,20 @@ class _NativePlayerControls extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.center,
                               mainAxisSize: MainAxisSize.min,
                               children: [
+                                if (episodesAvailable) ...[
+                                  _StagedHudControlReveal(
+                                    visible: controlsVisible,
+                                    delay: const Duration(milliseconds: 270),
+                                    hideDelay: Duration.zero,
+                                    beginOffset: const Offset(0, 0.10),
+                                    child: _PlayerLabeledActionButton(
+                                      icon: Icons.video_library_rounded,
+                                      label: 'Episodes',
+                                      onPressed: onEpisodesPressed,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                ],
                                 _StagedHudControlReveal(
                                   visible: controlsVisible,
                                   delay: const Duration(milliseconds: 240),
@@ -24494,6 +25545,36 @@ class _SourceActionButton extends StatelessWidget {
   }
 }
 
+class _PlayerLabeledActionButton extends StatelessWidget {
+  const _PlayerLabeledActionButton({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton.icon(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 20),
+      label: Text(label),
+      style: TextButton.styleFrom(
+        foregroundColor: Colors.white,
+        backgroundColor: Colors.black.withValues(alpha: 0.42),
+        minimumSize: const Size(0, 44),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900),
+        shape: const StadiumBorder(),
+      ),
+    );
+  }
+}
+
 class _NextEpisodeButton extends StatelessWidget {
   const _NextEpisodeButton({required this.label, required this.onPressed});
 
@@ -24716,6 +25797,200 @@ class _SettingsActionButton extends StatelessWidget {
   }
 }
 
+class _SeasonPickerSheet extends StatelessWidget {
+  const _SeasonPickerSheet({
+    required this.seasons,
+    required this.activeSeason,
+    required this.episodeCount,
+  });
+
+  final List<int> seasons;
+  final int? activeSeason;
+  final int Function(int season) episodeCount;
+
+  @override
+  Widget build(BuildContext context) {
+    return _EpisodeSelectionSheetFrame(
+      title: 'Choose season',
+      child: ListView.separated(
+        shrinkWrap: true,
+        itemCount: seasons.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (context, index) {
+          final season = seasons[index];
+          final selected = season == activeSeason;
+          return ListTile(
+            onTap: () => Navigator.of(context).pop(season),
+            selected: selected,
+            selectedColor: _playerAccent(context),
+            selectedTileColor: _playerAccentOverlay(context, 0.15),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            title: Text(
+              'Season $season',
+              style: const TextStyle(fontWeight: FontWeight.w900),
+            ),
+            subtitle: Text('${episodeCount(season)} episodes'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _EpisodePickerSheet extends StatelessWidget {
+  const _EpisodePickerSheet({
+    required this.season,
+    required this.episodes,
+    required this.activeSeason,
+    required this.activeEpisode,
+  });
+
+  final int season;
+  final List<NativePlayerEpisode> episodes;
+  final int? activeSeason;
+  final int? activeEpisode;
+
+  @override
+  Widget build(BuildContext context) {
+    return _EpisodeSelectionSheetFrame(
+      title: 'Season $season episodes',
+      child: ListView.separated(
+        shrinkWrap: true,
+        itemCount: episodes.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (context, index) {
+          final episode = episodes[index];
+          final selected = episode.season == activeSeason &&
+              episode.episode == activeEpisode;
+          final thumbnail = episode.thumbnail?.trim() ?? '';
+          return ListTile(
+            onTap: selected ? null : () => Navigator.of(context).pop(episode),
+            selected: selected,
+            selectedColor: _playerAccent(context),
+            selectedTileColor: _playerAccentOverlay(context, 0.15),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 10,
+              vertical: 6,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            leading: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: SizedBox(
+                width: 88,
+                height: 52,
+                child: thumbnail.isEmpty
+                    ? ColoredBox(
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest,
+                        child: const Icon(Icons.movie_outlined),
+                      )
+                    : Image.network(
+                        thumbnail,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => ColoredBox(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .surfaceContainerHighest,
+                          child: const Icon(Icons.movie_outlined),
+                        ),
+                      ),
+              ),
+            ),
+            title: Text(
+              'E${episode.episode} - ${episode.title}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w900),
+            ),
+            subtitle: episode.description?.trim().isNotEmpty == true
+                ? Text(
+                    episode.description!.trim(),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  )
+                : null,
+            trailing: Icon(
+              selected ? Icons.equalizer_rounded : Icons.play_arrow_rounded,
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _EpisodeSelectionSheetFrame extends StatelessWidget {
+  const _EpisodeSelectionSheetFrame({
+    required this.title,
+    required this.child,
+  });
+
+  final String title;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: ConstrainedBox(
+          constraints: _playerSheetConstraints(
+            context,
+            maxPortrait: 0.82,
+            maxLandscape: 0.84,
+          ),
+          child: Container(
+            margin: const EdgeInsets.all(14),
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+            decoration: BoxDecoration(
+              color: colorScheme.surface,
+              borderRadius: JuicrVisual.bottomSheetFloatingBorderRadius,
+              boxShadow: JuicrVisual.softShadow(
+                colorScheme,
+                alpha: 0.16,
+                blur: 24,
+                y: 10,
+              ),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 42,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 14),
+                  decoration: BoxDecoration(
+                    color: colorScheme.onSurface.withValues(alpha: 0.28),
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    title,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w900,
+                        ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Flexible(child: child),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _QualitySheet extends StatelessWidget {
   const _QualitySheet({
     required this.sources,
@@ -24730,28 +26005,22 @@ class _QualitySheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final selectedQuality = preferredQuality ?? 'Auto';
-    final hasAutoSource = sources.any(
-      (source) => _qualityLabel(source) == 'Auto',
+    final hasAutoSource = mobilePlaybackHasAutomaticCandidate(
+      [for (final source in sources) _qualityDescriptor(source)],
     );
+    final selectedQuality = preferredQuality ??
+        (hasAutoSource ? 'Auto' : _qualityLabel(activeSource));
     final rankedSources = rankedNativePlaybackSources(
       sources,
       sourceClassAllowed: AppState.playbackSourceClassAllowedForNative,
       p2pConfig: _p2pPriorityConfigFromSettings(),
     );
-    final qualitySourceByLabel = <String, PlaybackSource>{};
-    for (final source in rankedSources) {
-      final label = _qualityLabel(source);
-      if (label == 'Auto') continue;
-      final existing = qualitySourceByLabel[label];
-      if (existing == null ||
-          (!_nativeSourceClassIsPlayable(existing) &&
-              _nativeSourceClassIsPlayable(source))) {
-        qualitySourceByLabel[label] = source;
-      }
-    }
-    final qualitySources = qualitySourceByLabel.entries.toList()
-      ..sort((a, b) => _qualityRank(b.key).compareTo(_qualityRank(a.key)));
+    final qualityLabels = mobilePlaybackAvailableQualityLabels(
+      [
+        for (final source in rankedSources)
+          if (_nativeSourceClassIsPlayable(source)) _qualityDescriptor(source),
+      ],
+    );
     return SafeArea(
       child: Align(
         alignment: Alignment.bottomCenter,
@@ -24793,8 +26062,12 @@ class _QualitySheet extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  _QualityAutoOption(selected: selectedQuality == 'Auto'),
-                  if (qualitySources.isEmpty && !hasAutoSource) ...[
+                  if (hasAutoSource)
+                    _QualityOption(
+                      label: 'Auto',
+                      selected: selectedQuality == 'Auto',
+                    ),
+                  if (qualityLabels.isEmpty && !hasAutoSource) ...[
                     Padding(
                       padding: const EdgeInsets.only(top: 8, bottom: 10),
                       child: Text(
@@ -24807,10 +26080,10 @@ class _QualitySheet extends StatelessWidget {
                       ),
                     ),
                   ] else ...[
-                    for (final entry in qualitySources)
+                    for (final label in qualityLabels)
                       _QualityOption(
-                        source: entry.value,
-                        selected: selectedQuality == entry.key,
+                        label: label,
+                        selected: selectedQuality == label,
                       ),
                   ],
                 ],
@@ -24823,8 +26096,10 @@ class _QualitySheet extends StatelessWidget {
   }
 }
 
-class _QualityAutoSelection {
-  const _QualityAutoSelection();
+class _QualitySelection {
+  const _QualitySelection(this.label);
+
+  final String label;
 }
 
 class _PlayerSkipSegment {
@@ -24832,22 +26107,6 @@ class _PlayerSkipSegment {
 
   final String label;
   final Duration target;
-}
-
-class _QualityAutoOption extends StatelessWidget {
-  const _QualityAutoOption({required this.selected});
-
-  final bool selected;
-
-  @override
-  Widget build(BuildContext context) {
-    return JuicrSheetOptionTile(
-      padding: const EdgeInsets.only(top: 8),
-      label: 'Auto',
-      selected: selected,
-      onTap: () => Navigator.of(context).pop(const _QualityAutoSelection()),
-    );
-  }
 }
 
 class _SourceSheet extends StatelessWidget {
@@ -25005,22 +26264,18 @@ class _SpeedSheet extends StatelessWidget {
 }
 
 class _QualityOption extends StatelessWidget {
-  const _QualityOption({required this.source, required this.selected});
+  const _QualityOption({required this.label, required this.selected});
 
-  final PlaybackSource source;
+  final String label;
   final bool selected;
 
   @override
   Widget build(BuildContext context) {
-    final label = _qualityLabel(source);
-    final enabled = _nativeSourceClassIsPlayable(source);
     return JuicrSheetOptionTile(
       padding: const EdgeInsets.only(top: 8),
       label: label,
-      subtitle: enabled ? null : _sourceClassDisabledReason(source),
       selected: selected,
-      enabled: enabled,
-      onTap: enabled ? () => Navigator.of(context).pop(source) : null,
+      onTap: () => Navigator.of(context).pop(_QualitySelection(label)),
     );
   }
 }

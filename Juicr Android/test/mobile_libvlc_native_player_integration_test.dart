@@ -38,6 +38,7 @@ void main() {
   late String saveNativeProgress;
   late String showQualitySheet;
   late String showSourceSheet;
+  late String restorePreviousSourceAfterSelectionFailure;
   late String build;
 
   setUpAll(() {
@@ -140,6 +141,10 @@ void main() {
       '_showQualitySheet',
     );
     showSourceSheet = _methodBody(nativePlayerState, '_showSourceSheet');
+    restorePreviousSourceAfterSelectionFailure = _methodBody(
+      nativePlayerState,
+      '_restorePreviousSourceAfterSelectionFailure',
+    );
     build = _methodBody(nativePlayerState, 'build');
   });
 
@@ -213,17 +218,12 @@ void main() {
       nativePlayerState,
       '_tryFreshRouteResolve',
     );
-    final openNextEpisodeInPlace = _methodBody(
-      nativePlayerState,
-      '_openNextEpisodeInPlace',
-    );
     final normalizedNativePlayerState = _normalizeCode(nativePlayerState);
 
     for (final entryPath in <String>[
       initState,
       openLibVlcSourceWithCoordinator,
       tryFreshRouteResolve,
-      openNextEpisodeInPlace,
     ]) {
       expect(
         entryPath,
@@ -347,6 +347,25 @@ void main() {
     );
     expect(adapter, contains('libVlcProfile: _mobileLibVlcDriverProfile'));
     expect(adapter, contains('libVlcContinuousTsMode: false'));
+  });
+
+  test('direct MP4 uses the TV libVLC decoding mode while HLS stays automatic',
+      () {
+    final normalizedController = _normalizeCode(
+      _classBody(source, '_NativePlaybackController'),
+    );
+    expect(
+      normalizedController,
+      contains('hwAcc: _mobileLibVlcHardwareAcceleration('),
+    );
+    expect(
+      source,
+      contains('HwAcc _mobileLibVlcHardwareAcceleration('),
+    );
+    expect(
+      source,
+      contains('return directMp4 ? HwAcc.decoding : profile.hwAcc;'),
+    );
   });
 
   test('relay drivers own timeline translation for seeks and lead telemetry',
@@ -790,12 +809,22 @@ void main() {
       'non-libVLC controller creation rechecks terminal ownership after source await',
       () {
     final open = _normalizeCode(_methodBody(nativePlayerState, '_openSource'));
-    expect(
-      open,
-      contains(
-        'final controllerSource = await _controllerSourceFor( source, attemptedEngine, resumePosition: relayResumePosition, ); if (_playerClosing || !mounted || openingToken != _openingSourceToken) { _openingSource = false; return false; } final libVlcContinuousTsMode',
-      ),
+    final sourceAwait = open.indexOf(
+      'final controllerSource = await _controllerSourceFor(',
     );
+    final ownershipCheck = open.indexOf(
+      'if (_playerClosing || !mounted || openingToken != _openingSourceToken)',
+      sourceAwait,
+    );
+    final staleReturn = open.indexOf('return false;', ownershipCheck);
+    final controllerCreation = open.indexOf(
+      'final controller = _NativePlaybackController.network(',
+      ownershipCheck,
+    );
+    expect(sourceAwait, greaterThanOrEqualTo(0));
+    expect(ownershipCheck, greaterThan(sourceAwait));
+    expect(staleReturn, greaterThan(ownershipCheck));
+    expect(controllerCreation, greaterThan(staleReturn));
   });
 
   test(
@@ -968,7 +997,7 @@ void main() {
       normalized,
       contains(
         'final publishControllerImmediately = '
-        'coordinator.currentDriver == null;',
+        'coordinator.currentDriver == null && !retainActivePlayback;',
       ),
     );
     expect(
@@ -994,7 +1023,7 @@ void main() {
       'for (final surfaceController in mountedLibVlcControllers)',
     );
     final nonLibVlcSurface = normalizedBuild.indexOf(
-      'controller.engine != _NativePlaybackEngine.libvlc',
+      'for (final surfaceController in mountedNonLibVlcControllers)',
     );
     expect(stagedSurface, greaterThanOrEqualTo(0));
     expect(nonLibVlcSurface, greaterThan(stagedSurface));
@@ -1004,6 +1033,7 @@ void main() {
       normalizedBuild,
       contains('if (controller != null && '
           'controller.engine == _NativePlaybackEngine.libvlc && '
+          '!identical(controller, retainedReplacementController) && '
           '!stagedControllers.contains(controller)) controller'),
     );
     expect(
@@ -1124,7 +1154,7 @@ void main() {
       'for (final surfaceController in mountedLibVlcControllers)',
     );
     final nonLibVlcSurface = normalizedBuild.indexOf(
-      'controller.engine != _NativePlaybackEngine.libvlc',
+      'for (final surfaceController in mountedNonLibVlcControllers)',
     );
     expect(stagedSurface, greaterThanOrEqualTo(0));
     expect(nonLibVlcSurface, greaterThan(stagedSurface));
@@ -1151,6 +1181,22 @@ void main() {
     final normalizedBuild = _normalizeCode(build);
     final normalizedSurface = _normalizeCode(
       _classBody(source, '_NativePlaybackSurface'),
+    );
+    final normalizedController = _normalizeCode(
+      _classBody(source, '_NativePlaybackController'),
+    );
+    expect(
+      normalizedController,
+      contains('final GlobalKey platformSurfaceIdentity = GlobalKey();'),
+    );
+    expect(
+      normalizedBuild,
+      contains('key: surfaceController.platformSurfaceIdentity'),
+    );
+    expect(
+      normalizedSurface,
+      isNot(contains('vlc.onPlatformViewCreated(')),
+      reason: 'VlcPlayer owns its platform-view binding exactly once.',
     );
     expect(
       normalizedBuild,
@@ -1920,6 +1966,58 @@ void main() {
     );
   });
 
+  test('retained libVLC callbacks are quarantined during staged replacement',
+      () {
+    final recovered = _normalizeCode(handleMobileLibVlcCoordinatorRecovered);
+    final failed = _normalizeCode(handleMobileLibVlcCoordinatorFailure);
+    const quarantine =
+        '_playbackReplacementTransaction.quarantinesRetainedOwnerCallback( '
+        'callbackOwner: coordinator, retainedOwner: '
+        '_retainedPlaybackReplacementLibVlcCoordinator, )';
+
+    expect(recovered, contains(quarantine));
+    expect(failed, contains(quarantine));
+    expect(
+      _normalizeCode(source),
+      contains(
+        '_retainedPlaybackReplacementLibVlcCoordinator = '
+        'retainedLibVlcCoordinator;',
+      ),
+    );
+  });
+
+  test('Media3 replacement reserves retained libVLC ownership before awaits',
+      () {
+    final normalized =
+        _normalizeCode(_methodBody(nativePlayerState, '_openSource'));
+    final reserve = normalized.indexOf(
+      '_playbackReplacementTransaction.reserve( active: retainedPlaybackController, )',
+    );
+    final sourcePreparation = normalized.indexOf(
+      'final controllerSource = await _controllerSourceFor(',
+    );
+    final targetStage = normalized.indexOf(
+      '_playbackReplacementTransaction.stagePrepared(',
+    );
+
+    expect(reserve, greaterThanOrEqualTo(0));
+    expect(sourcePreparation, greaterThan(reserve));
+    expect(targetStage, greaterThan(sourcePreparation));
+  });
+
+  test('route close settles replacement ownership before libVLC detach', () {
+    final normalized = _normalizeCode(_methodBody(nativePlayerState, '_close'));
+    final settle = normalized.indexOf(
+      'await _closePlaybackReplacementForRouteClose();',
+    );
+    final detach = normalized.indexOf(
+      '_detachLibVlcControllerForAsyncRelease(',
+    );
+
+    expect(settle, greaterThanOrEqualTo(0));
+    expect(detach, greaterThan(settle));
+  });
+
   test('resume prompt remains after proof with coordinated start-over', () {
     final awaitOpen = openLibVlcSourceWithCoordinator.indexOf(
       'final result = await coordinator.open(',
@@ -1934,6 +2032,39 @@ void main() {
         'return _openLibVlcSourceWithCoordinator( provedSource, '
         'resumePosition: Duration.zero,',
       ),
+    );
+  });
+
+  test('resume prompt waits for bounded prepared and paused proof', () {
+    final readiness = _methodBody(
+      nativePlayerState,
+      '_waitForResumePromptReadiness',
+    );
+    final compactReadiness = _normalizeCode(readiness);
+    final compactMedia3Open = _normalizeCode(openSource);
+    final compactLibVlcOpen = _normalizeCode(openLibVlcSourceWithCoordinator);
+
+    expect(readiness, isNotEmpty);
+    expect(compactReadiness, contains('DateTime.now().add(timeout)'));
+    expect(compactReadiness, contains('await controller.pause()'));
+    expect(compactReadiness, contains('!controller.isPlaying'));
+    expect(
+      compactMedia3Open,
+      contains('await _waitForResumePromptReadiness(controller)'),
+    );
+    expect(
+      compactLibVlcOpen,
+      contains('await _waitForResumePromptReadiness(controller)'),
+    );
+  });
+
+  test('libVLC adapter does not demand audio before playback starts', () {
+    final controller = _classBody(source, '_NativePlaybackController');
+    final adapterInitialize = _methodBody(adapter, 'initialize');
+    expect(controller, contains('ensureSelectedAudioTrack'));
+    expect(
+      adapterInitialize,
+      isNot(contains('await _controller.ensureSelectedAudioTrack()')),
     );
   });
 
@@ -1992,7 +2123,7 @@ void main() {
       openLibVlcSourceWithCoordinator,
     );
     final ownershipGate = normalizedHelper.indexOf(
-      'if (!stillOwnsOpen) return false;',
+      'if (!stillOwnsOpen) { await settleStaleReplacement(); return false; }',
     );
     final terminalFailure = normalizedHelper.indexOf(
       'if (error is MobileLibVlcTerminalFailure) {',
@@ -2199,8 +2330,8 @@ void main() {
     expect(
       _normalizeCode(pageDispose),
       contains(
-        'final coordinatorSessionActive = '
-        '_mobileLibVlcCoordinator != null;',
+        'final currentCoordinator = _mobileLibVlcCoordinator; '
+        'final coordinatorSessionActive = currentCoordinator != null;',
       ),
     );
     expect(
@@ -2312,7 +2443,7 @@ void main() {
         showQualitySheet,
         '_restorePendingSourceSelectionRollback(',
       ),
-      2,
+      1,
     );
     expect(
       _occurrences(
@@ -2329,6 +2460,251 @@ void main() {
       showSourceSheet,
       isNot(contains('_restorePreviousSourceAfterSelectionFailure(')),
     );
+  });
+
+  test(
+      'failed Media3 replacement settles its staged target before retained-source recovery',
+      () {
+    final settle = restorePreviousSourceAfterSelectionFailure.indexOf(
+      '_settleStagedReplacementBeforePreviousSourceRecovery(',
+    );
+    final retainedCheck = restorePreviousSourceAfterSelectionFailure.indexOf(
+      '_retainedSourceAlreadyActiveAfterReplacementFailure(',
+    );
+    final reopen = restorePreviousSourceAfterSelectionFailure.indexOf(
+      'final opened = await _openSource(',
+    );
+
+    expect(settle, greaterThanOrEqualTo(0));
+    expect(retainedCheck, greaterThan(settle));
+    expect(reopen, greaterThan(retainedCheck));
+  });
+
+  test(
+      'Media3 to libVLC replacement retains active playback until startup proof',
+      () {
+    final normalizedOpen = _normalizeCode(openLibVlcSourceWithCoordinator);
+    expect(
+      normalizedOpen,
+      contains(
+        'final retainActivePlayback = retainedController != null && '
+        'retainedSource != null;',
+      ),
+    );
+    expect(
+      normalizedOpen,
+      contains(
+        'if (!retainActivePlayback) { await _disposeCurrentController(',
+      ),
+    );
+    expect(
+      normalizedOpen,
+      contains(
+        'final publishControllerImmediately = '
+        'coordinator.currentDriver == null && !retainActivePlayback;',
+      ),
+    );
+    expect(
+      normalizedOpen,
+      contains(
+        'await _promoteStagedPlaybackReplacement( '
+        'generation: replacementGeneration, target: stagedController, '
+        'targetSource: provedSource, makeTargetCurrent: true,',
+      ),
+    );
+    expect(
+      normalizedOpen,
+      contains(
+        'await _rollbackStagedPlaybackReplacement( '
+        'generation: replacementGeneration, target: stagedController, '
+        'reason: \'libvlc_open_failed\', disposeRejected: false,',
+      ),
+    );
+  });
+
+  test('replacement proves silence before promotion and retires exact owner',
+      () {
+    final normalizedPromotion = _normalizeCode(source);
+    final silence = normalizedPromotion.indexOf(
+      'silenceActive: () async { await retired.pause().timeout(',
+    );
+    final promote = normalizedPromotion.indexOf(
+      'promoteTarget: () async { final promoted = '
+      '_playbackReplacementTransaction.promote(generation);',
+    );
+    final activate = normalizedPromotion.indexOf(
+      'activateTarget: () => target.setVolume(_volumePreview),',
+    );
+
+    expect(silence, greaterThanOrEqualTo(0));
+    expect(activate, greaterThan(silence));
+    expect(promote, greaterThan(silence));
+    expect(promote, greaterThan(activate));
+    expect(
+      normalizedPromotion,
+      contains(
+        'final retainedLibVlcCoordinator = retainActivePlayback && '
+        'retainedController.engine == _NativePlaybackEngine.libvlc '
+        '? _mobileLibVlcCoordinator : null;',
+      ),
+    );
+    expect(
+      normalizedPromotion,
+      contains(
+        'await _closeRetiredMobileLibVlcCoordinator( '
+        'retiredLibVlcCoordinator,',
+      ),
+    );
+  });
+
+  test('promotion detaches the retired libVLC callback owner synchronously',
+      () {
+    final normalizedPromotion = _normalizeCode(
+      _methodBody(nativePlayerState, '_promoteStagedPlaybackReplacement'),
+    );
+    final promote = normalizedPromotion.indexOf(
+      'final promoted = _playbackReplacementTransaction.promote(generation);',
+    );
+    final detachGuard = normalizedPromotion.indexOf(
+      'identical( _mobileLibVlcCoordinator, retiredLibVlcCoordinator, )',
+    );
+    final detachRetiredOwner = normalizedPromotion.indexOf(
+      '_mobileLibVlcCoordinator = null;',
+      detachGuard,
+    );
+    final releaseQuarantine = normalizedPromotion.indexOf(
+      '_retainedPlaybackReplacementLibVlcCoordinator = null;',
+    );
+
+    expect(promote, greaterThanOrEqualTo(0));
+    expect(detachGuard, greaterThan(promote));
+    expect(detachRetiredOwner, greaterThan(promote));
+    expect(releaseQuarantine, greaterThan(detachRetiredOwner));
+  });
+
+  test('Media3 promotion retires the exact retained libVLC coordinator', () {
+    final normalizedOpen = _normalizeCode(openSource);
+    expect(
+      normalizedOpen,
+      contains(
+        'final retainedLibVlcCoordinator = stagePlaybackReplacement && '
+        'retainedPlaybackController?.engine == _NativePlaybackEngine.libvlc '
+        '? _mobileLibVlcCoordinator : null;',
+      ),
+    );
+    expect(
+      normalizedOpen,
+      contains(
+        'await _promoteStagedPlaybackReplacement( '
+        'generation: replacementGeneration, target: controller, '
+        'targetSource: source, '
+        'retiredLibVlcCoordinator: retainedLibVlcCoordinator,',
+      ),
+    );
+  });
+
+  test('failed audio transfer rolls staged replacement back before returning',
+      () {
+    final normalized = _normalizeCode(source);
+    expect(
+      normalized,
+      contains(
+        'if (!audioTransferred) { final rolledBack = '
+        'await _rollbackStagedPlaybackReplacement( '
+        'generation: generation, target: target, '
+        'reason: \'audio_transfer_rejected\', );',
+      ),
+    );
+    expect(normalized, contains('if (!rolledBack) return false;'));
+    expect(
+      normalized,
+      contains(
+          'await retired.play().timeout(const Duration(milliseconds: 700));'),
+    );
+  });
+
+  test('replacement rollback bounds rejected target disposal', () {
+    final normalized = _normalizeCode(source);
+    expect(
+      normalized,
+      contains(
+        'await rejected.dispose().timeout( '
+        'const Duration(milliseconds: 700), );',
+      ),
+    );
+  });
+
+  test('stale resume proof cannot dispose a controller restored by rollback',
+      () {
+    final normalized = _normalizeCode(source);
+    final proofWait = normalized.indexOf(
+      'final resumeSeekProof = await _waitForDeferredResumeSeekProof(',
+    );
+    final staleGuard = normalized.indexOf(
+      'if (_controller != controller) { DiagnosticLog.add( '
+      "'native recovery resume barrier ignored reason=stale_replacement', ); "
+      'return false; }',
+      proofWait,
+    );
+    final rejectedCandidate = normalized.indexOf(
+      "reason: 'media3_resume_barrier_rejected',",
+      proofWait,
+    );
+
+    expect(proofWait, greaterThanOrEqualTo(0));
+    expect(staleGuard, greaterThan(proofWait));
+    expect(rejectedCandidate, greaterThan(staleGuard));
+  });
+
+  test('libVLC stale open settles the retained replacement in one path', () {
+    final normalized = _normalizeCode(openLibVlcSourceWithCoordinator);
+    expect(
+      normalized,
+      contains(
+        'if (!stillOwnsOpen) { await settleStaleReplacement(); return false; }',
+      ),
+    );
+    expect(
+      normalized,
+      contains(
+        'if (identical(_mobileLibVlcCoordinator, coordinator)) { '
+        '_mobileLibVlcCoordinator = retainedLibVlcCoordinator; }',
+      ),
+    );
+    expect(
+      normalized,
+      contains(
+        'await _rollbackStagedPlaybackReplacement( '
+        'generation: openingStagedReplacementGeneration!, '
+        'target: openingStagedReplacementController!, '
+        'reason: \'libvlc_open_stale\', disposeRejected: false, );',
+      ),
+    );
+    expect(
+      normalized,
+      contains(
+        'openingStagedReplacementGeneration = replacementGeneration; '
+        'openingStagedReplacementController = controller;',
+      ),
+    );
+  });
+
+  test(
+      'stale promoted libVLC opening preserves a coordinator retained by a newer replacement',
+      () {
+    final normalized = _normalizeCode(openLibVlcSourceWithCoordinator);
+    final retainedGuard = normalized.indexOf(
+      'if (openingStagedReplacementController != null && '
+      '_playbackReplacementTransaction.retainsActive( '
+      'openingStagedReplacementController!, )) { return; }',
+    );
+    final fallbackClose = normalized.indexOf(
+      'if (identical(_mobileLibVlcCoordinator, coordinator)) { '
+      '_mobileLibVlcCoordinator = null; } await coordinator.close();',
+    );
+
+    expect(retainedGuard, greaterThanOrEqualTo(0));
+    expect(fallbackClose, greaterThan(retainedGuard));
   });
 
   test('libVLC switch failure cannot enter page fallback ladders', () {
@@ -2352,13 +2728,9 @@ void main() {
     final normalized = _normalizeCode(showQualitySheet);
     expect(
       _occurrences(showQualitySheet, 'await _switchMobileLibVlcSelection('),
-      2,
+      1,
     );
-    expect(normalized, contains('selectedQuality: \'Auto\''));
-    expect(
-      normalized,
-      contains('selectedQuality: _qualityLabel(selected)'),
-    );
+    expect(normalized, contains('selectedQuality: selectedQuality'));
   });
 
   test('libVLC switch verifies coordinator generation before page publication',
@@ -2721,6 +3093,100 @@ void main() {
     );
   });
 
+  test('P2P replacement ownership follows native startup proof', () {
+    final source = File('lib/src/native_player_page.dart').readAsStringSync();
+    final page = _classBody(source, '_NativePlayerPageState');
+    final controllerSource = _methodBody(page, '_controllerSourceFor');
+    final openSource = _methodBody(page, '_openSource');
+    final openLibVlc = _methodBody(page, '_openLibVlcSourceWithCoordinator');
+    final stopPolicy = _methodBody(page, '_stopP2pBridgeForPolicy');
+    final compactOpenSource = _normalizeCode(openSource);
+    final compactOpenLibVlc = _normalizeCode(openLibVlc);
+
+    expect(page, contains('P2pPlaybackOwner _p2pPlaybackOwner'));
+    expect(page, contains('_p2pPreparedGenerationByRouteKey'));
+    expect(page, contains('_p2pActiveGenerationByRouteKey'));
+    expect(
+      controllerSource,
+      contains('_p2pPlaybackOwner.prepare('),
+    );
+    expect(
+      controllerSource,
+      isNot(contains('P2pLocalStreamBridge.instance.open(descriptor)')),
+    );
+    expect(compactOpenSource, contains('_commitPreparedP2pGeneration(source)'));
+    expect(
+        compactOpenSource, contains('_rollbackPreparedP2pGeneration( source,'));
+    expect(
+      compactOpenLibVlc,
+      contains('_commitPreparedP2pGeneration(provedSource)'),
+    );
+    expect(
+      compactOpenLibVlc,
+      contains('_rollbackPreparedP2pGeneration( source,'),
+    );
+    expect(
+      openSource,
+      isNot(contains("_stopP2pBridgeForPolicy('p2p_readiness_failed')")),
+    );
+    expect(stopPolicy, contains('_p2pPlaybackOwner.closeThrough('));
+  });
+
+  test('direct replacement retires P2P only after startup promotion', () {
+    final commit = _methodBody(
+      nativePlayerState,
+      '_commitPreparedP2pGeneration',
+    );
+    final openSource = _methodBody(nativePlayerState, '_openSource');
+    final normalizedOpen = _normalizeCode(openSource);
+
+    expect(commit, contains('_p2pPlaybackOwner.closeActive()'));
+    expect(
+      normalizedOpen.indexOf('_promoteStagedPlaybackReplacement('),
+      lessThan(normalizedOpen.indexOf('_commitPreparedP2pGeneration(source)')),
+    );
+  });
+
+  test('P2P timeout diagnostics never expose source identity', () {
+    final controllerSource = _methodBody(
+      nativePlayerState,
+      '_controllerSourceFor',
+    );
+    final timeoutStart = controllerSource.indexOf('on TimeoutException');
+    expect(timeoutStart, greaterThanOrEqualTo(0));
+    final timeoutBlock = controllerSource.substring(
+      timeoutStart,
+      controllerSource.indexOf('on PlatformException', timeoutStart),
+    );
+
+    expect(timeoutBlock, isNot(contains('source.providerId')));
+    expect(timeoutBlock, contains('family=p2p'));
+  });
+
+  test('P2P readiness expiry yields budget to another candidate', () {
+    final controllerSource = _methodBody(
+      nativePlayerState,
+      '_controllerSourceFor',
+    );
+    final normalizedState = _normalizeCode(nativePlayerState);
+    expect(
+      normalizedState,
+      allOf(
+        contains('MethodChannelP2pLocalStreamBridge('),
+        contains('readinessTimeout: Duration(seconds: 24)'),
+      ),
+    );
+    expect(controllerSource, contains('on TimeoutException catch'));
+    expect(
+      controllerSource,
+      contains("reason=candidate_readiness_timeout"),
+    );
+    expect(
+      controllerSource.indexOf('on TimeoutException catch'),
+      lessThan(controllerSource.indexOf('on PlatformException catch')),
+    );
+  });
+
   test(
       'Media3 avoids the emulator goldfish AVC decoder without changing devices',
       () {
@@ -2754,42 +3220,54 @@ void main() {
     );
   });
 
-  test('next episode cancellation restores retained playback UI', () {
+  test('episode transition retains playback until target startup proof', () {
     final source = File('lib/src/native_player_page.dart').readAsStringSync();
     final start = source.indexOf('Future<void> _openNextEpisodeInPlace()');
-    final end = source.indexOf('\n  Future<', start + 20);
+    final end = source.indexOf('\n  Future<void> _loadSkipSegments()', start);
     expect(start, greaterThanOrEqualTo(0));
     expect(end, greaterThan(start));
     final method = source.substring(start, end);
-    final catchStart = method.indexOf('} catch (error) {');
-    final finallyStart = method.indexOf('} finally {', catchStart);
-    expect(catchStart, greaterThanOrEqualTo(0));
-    expect(finallyStart, greaterThan(catchStart));
-    final failureBranch = method.substring(catchStart, finallyStart);
 
+    final adoptionStart = method.indexOf('Future<void> adoptTarget() async {');
+    final push = method.indexOf('navigator.push<String>');
+    expect(adoptionStart, greaterThanOrEqualTo(0));
+    expect(push, greaterThan(adoptionStart));
     expect(
-        failureBranch, contains('_routeStartupOwner.completeSuccessfully()'));
-    expect(failureBranch, contains('_loading = false'));
-    expect(failureBranch, contains('_statusMessage = null'));
-    expect(failureBranch, isNot(contains('rethrow;')));
+      method.substring(0, adoptionStart),
+      isNot(contains('currentController!.pause()')),
+    );
+    final adoption = method.substring(adoptionStart, push);
+    expect(adoption, contains('currentController!.pause()'));
+    expect(adoption, contains('navigator.removeRoute(retainedRoute)'));
+    expect(method, contains('onStartupProven: adoptTarget'));
+    expect(
+      method,
+      contains(
+        '_episodeTransitionResolver.resolve<NativePlayerNextEpisode?>',
+      ),
+      reason: 'Episode requests must not borrow the original route deadline.',
+    );
+    expect(
+      method,
+      isNot(contains('_routeStartupOwner.remainingWorkBudget')),
+    );
+    expect(method, contains("result?.startsWith('native_error')"));
   });
 
-  test('next episode null result restores UI before retained playback', () {
+  test('episode resolver failure does not pause or dispose retained playback',
+      () {
     final page = File('lib/src/native_player_page.dart').readAsStringSync();
-    final start = page.indexOf('if (next == null) {');
-    final end = page.indexOf('\n    final resolvedNext = next;', start);
+    final methodStart = page.indexOf('Future<void> _openEpisodeRoute(');
+    final start = page.indexOf('} catch (error) {', methodStart);
+    final end = page.indexOf('} finally {', start);
     expect(start, greaterThanOrEqualTo(0));
     expect(end, greaterThan(start));
-    final nullBranch = page.substring(start, end);
+    final failureBranch = page.substring(start, end);
 
-    expect(
-      nullBranch,
-      contains('restoreRetainedPlaybackAfterRouteFailure('),
-    );
-    expect(
-      nullBranch.indexOf('publishRestoredUi:'),
-      lessThan(nullBranch.indexOf('resumePlayback:')),
-    );
+    expect(failureBranch, contains('_loading = false'));
+    expect(failureBranch, contains('_statusMessage = null'));
+    expect(failureBranch, isNot(contains('currentController!.pause()')));
+    expect(failureBranch, isNot(contains('_disposeCurrentController')));
   });
 }
 

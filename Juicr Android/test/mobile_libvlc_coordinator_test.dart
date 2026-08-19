@@ -1004,6 +1004,73 @@ void main() {
       await coordinator.close();
     });
 
+    test('repairs audio only after direct MP4 startup is proved', () async {
+      final driver = _FakeDriver(
+        afterPlay: const [
+          MobileLibVlcDriverSnapshot(
+            position: Duration(seconds: 1),
+            duration: Duration(hours: 1, minutes: 53),
+            isPlaying: true,
+            isBuffering: false,
+            hasError: false,
+            videoWidth: 1920,
+            videoHeight: 1080,
+            isInitialized: true,
+            hasUsableVideoFrame: true,
+          ),
+          MobileLibVlcDriverSnapshot(
+            position: Duration(seconds: 2),
+            duration: Duration(hours: 1, minutes: 53),
+            isPlaying: true,
+            isBuffering: false,
+            hasError: false,
+            videoWidth: 1920,
+            videoHeight: 1080,
+            isInitialized: true,
+            hasUsableVideoFrame: true,
+          ),
+          MobileLibVlcDriverSnapshot(
+            position: Duration(seconds: 3),
+            duration: Duration(hours: 1, minutes: 53),
+            isPlaying: true,
+            isBuffering: false,
+            hasError: false,
+            videoWidth: 1920,
+            videoHeight: 1080,
+            isInitialized: true,
+            hasUsableVideoFrame: true,
+          ),
+        ],
+      );
+      final coordinator = MobileLibVlcCoordinator(
+        driverFactory: (candidate, playbackUri) async {
+          driver.markCreated();
+          return driver;
+        },
+        transportFactory: (candidate, anchor) async => null,
+        freshResolver: () async => const [],
+        startupTimeout: const Duration(milliseconds: 100),
+      );
+
+      await coordinator.open(
+        candidates: [
+          MobileLibVlcSourceCandidate(
+            id: 'direct-mp4-audio',
+            mirrorGroup: '1080p',
+            qualityLabel: '1080P',
+            uri: Uri.parse('https://example.invalid/movie.mp4'),
+          ),
+        ],
+        anchor: Duration.zero,
+        reason: MobileLibVlcOpenReason.initial,
+      );
+
+      expect(driver.playCount, 1);
+      expect(driver.ensureAudioCount, 1);
+      expect(driver.audioEnsuredAfterPlay, isTrue);
+      await coordinator.close();
+    });
+
     test('direct MP4 rejects sustained clock proof without video geometry',
         () async {
       const anchor = Duration(minutes: 24, seconds: 52);
@@ -3957,10 +4024,12 @@ final class _FakeDriver implements MobileLibVlcDriver {
       const MobileLibVlcDriverSnapshot.idle();
   int initializeCount = 0;
   int playCount = 0;
+  int ensureAudioCount = 0;
   int pauseCount = 0;
   int disposeCount = 0;
   bool _disposed = false;
   bool _playStarted = false;
+  bool audioEnsuredAfterPlay = false;
   final List<Duration> seekPositions = <Duration>[];
 
   Future<void> get created => _created.future;
@@ -4006,6 +4075,12 @@ final class _FakeDriver implements MobileLibVlcDriver {
       await Future<void>.delayed(const Duration(milliseconds: 1));
       emit(value);
     }
+  }
+
+  @override
+  Future<void> ensureSelectedAudioTrack() async {
+    ensureAudioCount += 1;
+    audioEnsuredAfterPlay = _playStarted;
   }
 
   @override

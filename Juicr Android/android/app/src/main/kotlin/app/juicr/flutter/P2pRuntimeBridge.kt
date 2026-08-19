@@ -18,6 +18,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 import kotlin.math.min
 
@@ -25,6 +26,8 @@ class P2pRuntimeBridge(private val context: Context) {
     private val executor = Executors.newCachedThreadPool()
     private val sessions = ConcurrentHashMap<String, P2pSession>()
     private val sessionTokensByKey = ConcurrentHashMap<String, String>()
+    private val sessionOwnership = P2pGenerationOwnership()
+    private val generationCounter = AtomicLong(0L)
     private var serverSocket: ServerSocket? = null
     private var sessionManager: Any? = null
     private var lastAvailabilityError: String? = null
@@ -90,7 +93,8 @@ class P2pRuntimeBridge(private val context: Context) {
         fileIdx: Int?,
         trackers: List<String>,
         displayName: String?,
-        quality: String?
+        quality: String?,
+        generation: Long? = null
     ): String {
         if (!isAvailable()) {
             throw IllegalStateException(
@@ -98,11 +102,14 @@ class P2pRuntimeBridge(private val context: Context) {
             )
         }
         val safeInfoHash = normalizeInfoHash(infoHash)
+        val ownedGeneration = generation?.takeIf { it > 0L }
+            ?: generationCounter.incrementAndGet()
         ensureServer()
         ensureSessionManager()
         val sessionKey = p2pSessionKey(safeInfoHash, fileIdx)
         val existingToken = sessionTokensByKey[sessionKey]
         if (existingToken != null && sessions.containsKey(existingToken)) {
+            sessionOwnership.register(existingToken, ownedGeneration)
             return "http://127.0.0.1:$port/stream/$existingToken"
         }
         val token = UUID.randomUUID().toString()
@@ -120,14 +127,77 @@ class P2pRuntimeBridge(private val context: Context) {
         )
         sessions[token] = session
         sessionTokensByKey[sessionKey] = token
+        sessionOwnership.register(token, ownedGeneration)
         startDownload(session)
         pruneP2pCache(keepInfoHash = safeInfoHash)
         return "http://127.0.0.1:$port/stream/$token"
     }
 
     @Synchronized
-    fun stopAll() {
-        sessions.clear()
+    fun isReady(generation: Long?): Boolean {
+        if (generation == null || generation <= 0L) return false
+        return sessions.entries.any { (token, session) ->
+            sessionOwnership.owns(token, generation) &&
+                isLocalStreamReadable(session, session.file)
+        }
+    }
+
+    @Synchronized
+    fun readinessStatus(generation: Long?): Map<String, Any> {
+        if (generation == null || generation <= 0L) {
+            return mapOf("stage" to "unknown")
+        }
+        val session = sessions.entries.firstOrNull { (token, _) ->
+            sessionOwnership.owns(token, generation)
+        }?.value ?: return mapOf("stage" to "unknown")
+        val stage = when {
+            session.error != null -> "failed"
+            isLocalStreamReadable(session, session.file) -> "readable"
+            session.firstPiecesReady > 0 -> "pieces"
+            maxOf(
+                session.peerCount,
+                session.seedCount,
+                session.connectCandidates,
+                session.listPeers
+            ) > 0 -> "peers"
+            session.file != null && session.selectedFileIndex >= 0 -> "file"
+            session.metadataKnown -> "metadata"
+            session.handleSeen -> "handle"
+            else -> "starting"
+        }
+        return mapOf("stage" to stage)
+    }
+
+    @Synchronized
+    fun stopAll(generation: Long? = null) {
+        val removedTokens = if (generation == null) {
+            sessionOwnership.removeAll()
+        } else {
+            sessionOwnership.removeThrough(generation)
+        }
+        stopTokens(removedTokens)
+    }
+
+    @Synchronized
+    fun stopGeneration(generation: Long?) {
+        if (generation == null || generation <= 0L) return
+        stopTokens(sessionOwnership.removeGeneration(generation))
+    }
+
+    private fun stopTokens(removedTokens: Set<String>) {
+        for (token in removedTokens) {
+            val session = sessions.remove(token) ?: continue
+            session.cancelled = true
+            sessionTokensByKey.remove(
+                p2pSessionKey(session.infoHash, session.requestedFileIdx),
+                token
+            )
+            val handle = session.handle
+            if (handle != null) {
+                tryInvoke(sessionManager, "remove", handle)
+            }
+        }
+        if (!sessionOwnership.isEmpty() || sessions.isNotEmpty()) return
         sessionTokensByKey.clear()
         try {
             serverSocket?.close()
@@ -705,7 +775,7 @@ class P2pRuntimeBridge(private val context: Context) {
             val token = parts[1].substringAfter("/stream/", "").substringBefore("?")
             val decodedToken = URLDecoder.decode(token, StandardCharsets.UTF_8.name())
             val session = sessions[decodedToken]
-            if (session == null) {
+            if (session == null || session.cancelled) {
                 writeStatus(client.getOutputStream(), 404, "Not Found")
                 return
             }
@@ -726,6 +796,7 @@ class P2pRuntimeBridge(private val context: Context) {
     }
 
     private fun isLocalStreamReadable(session: P2pSession, file: File?): Boolean {
+        if (session.cancelled) return false
         refreshSelectedFileReadiness(session)
         if (!session.metadataKnown || !session.streamingConfigured) return false
         if (file == null || !file.exists() || file.length() <= 0L) return false
@@ -851,6 +922,10 @@ class P2pRuntimeBridge(private val context: Context) {
         session: P2pSession,
         headOnly: Boolean
     ) {
+        if (session.cancelled) {
+            writeStatus(output, 410, "Gone")
+            return
+        }
         refreshSelectedFileReadiness(session)
         val totalLength = (session.selectedFileSize.takeIf { it > 0L } ?: file.length())
             .coerceAtLeast(1L)
@@ -917,7 +992,7 @@ class P2pRuntimeBridge(private val context: Context) {
             input.skip(start)
             val buffer = ByteArray(64 * 1024)
             var remaining = contentLength
-            while (remaining > 0) {
+            while (remaining > 0 && !session.cancelled) {
                 val read = input.read(buffer, 0, min(buffer.size.toLong(), remaining).toInt())
                 if (read <= 0) break
                 output.write(buffer, 0, read)
@@ -1106,7 +1181,8 @@ private data class P2pSession(
     @Volatile var selectedFileParentExists: Boolean = false,
     @Volatile var torrentState: String = "unknown",
     @Volatile var missingFileFlushRequests: Int = 0,
-    @Volatile var lastMissingFileFlushAtMs: Long = 0L
+    @Volatile var lastMissingFileFlushAtMs: Long = 0L,
+    @Volatile var cancelled: Boolean = false
 )
 
 private data class ResolvedP2pFile(

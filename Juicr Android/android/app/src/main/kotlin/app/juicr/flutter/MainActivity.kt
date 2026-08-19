@@ -37,6 +37,7 @@ import com.google.android.play.core.integrity.StandardIntegrityManager.StandardI
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import app.juicr.flutter.update.UpdateBridge
 import java.security.MessageDigest
 import java.io.File
 
@@ -68,6 +69,7 @@ class MainActivity : FlutterActivity() {
     private var catalogBuilderPickerResult: MethodChannel.Result? = null
     private val pipEnterHandler = Handler(Looper.getMainLooper())
     private val p2pRuntimeBridge by lazy { P2pRuntimeBridge(applicationContext) }
+    private var appUpdateBridge: UpdateBridge? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,6 +80,12 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         cleanStartupCaches()
         registerPipActionReceiver()
+        appUpdateBridge?.dispose()
+        appUpdateBridge = UpdateBridge(
+            applicationContext,
+            flutterEngine.dartExecutor.binaryMessenger,
+            "android",
+        )
         flutterEngine
             .platformViewsController
             .registry
@@ -310,15 +318,38 @@ class MainActivity : FlutterActivity() {
                             fileIdx = fileIdx,
                             trackers = trackers,
                             displayName = call.argument<String>("displayName"),
-                            quality = call.argument<String>("quality")
+                            quality = call.argument<String>("quality"),
+                            generation = call.argument<Number>("generation")?.toLong()
                         )
                         result.success(localUrl)
                     } catch (error: Throwable) {
-                        result.error("p2p_open_failed", error.message ?: error.javaClass.simpleName, null)
+                        result.error(
+                            "p2p_open_failed",
+                            "Advanced playback could not start.",
+                            null
+                        )
                     }
                 }
+                "isReady" -> result.success(
+                    p2pRuntimeBridge.isReady(
+                        call.argument<Number>("generation")?.toLong()
+                    )
+                )
+                "readinessStatus" -> result.success(
+                    p2pRuntimeBridge.readinessStatus(
+                        call.argument<Number>("generation")?.toLong()
+                    )
+                )
                 "stopAll" -> {
-                    p2pRuntimeBridge.stopAll()
+                    p2pRuntimeBridge.stopAll(
+                        call.argument<Number>("generation")?.toLong()
+                    )
+                    result.success(true)
+                }
+                "stopGeneration" -> {
+                    p2pRuntimeBridge.stopGeneration(
+                        call.argument<Number>("generation")?.toLong()
+                    )
                     result.success(true)
                 }
                 "networkBucket" -> result.success(networkBucket())
@@ -326,6 +357,11 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+    }
+
+    override fun onResume() {
+        super.onResume()
+        appUpdateBridge?.onHostResume()
     }
 
     private fun networkBucket(): String {
@@ -418,6 +454,8 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         pipEnterHandler.removeCallbacksAndMessages(null)
         unregisterPipActionReceiver()
+        appUpdateBridge?.dispose()
+        appUpdateBridge = null
         if (isFinishing) {
             p2pRuntimeBridge.stopAll()
         }

@@ -102,7 +102,7 @@ class _AppManualDialogState extends State<AppManualDialog> {
       icon: Icons.update_rounded,
       title: 'Updates',
       body:
-          'Updates checks the current release channel, shows the latest changelog, and can open the release page when an update is available. Stable builds follow stable releases; nightly builds follow nightly releases.',
+          'Updates checks the current release channel, shows the latest changelog, and can download a verified APK inside Juicr. Downloads can be paused or resumed, and installation begins only after you choose Install. The release page remains available when an in-app download is unavailable.',
     ),
     _ManualSection(
       icon: Icons.bug_report_outlined,

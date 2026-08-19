@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -176,7 +178,7 @@ class P2pBridgeApprovalChecklist {
         ),
         P2pBridgeApprovalRequirement(
           id: 'rollbackDrill',
-        label: 'Rollback drill, cache cleanup, direct/account restoration',
+          label: 'Rollback drill, cache cleanup, direct/account restoration',
           status: 'missing',
         ),
         P2pBridgeApprovalRequirement(
@@ -345,19 +347,60 @@ abstract class P2pLocalStreamBridge {
 
   String get unavailableReason;
 
-  Future<Uri> open(P2pStreamDescriptor descriptor);
+  Future<Uri> open(
+    P2pStreamDescriptor descriptor, {
+    int? generation,
+  });
 
   Future<String> networkBucket();
 
+  Future<String> readinessStage(int generation) async => 'unknown';
+
   Future<void> stopAll();
+
+  Future<void> stopThrough(int generation) => stopAll();
+
+  Future<void> stopGeneration(int generation) => stopAll();
 }
 
 class MethodChannelP2pLocalStreamBridge extends P2pLocalStreamBridge {
-  const MethodChannelP2pLocalStreamBridge();
+  const MethodChannelP2pLocalStreamBridge({
+    this.channel = const MethodChannel('app.juicr.flutter/p2p_bridge'),
+    this.readinessTimeout = const Duration(seconds: 60),
+    this.readinessPollInterval = const Duration(seconds: 1),
+  });
 
-  static const MethodChannel _channel = MethodChannel(
-    'app.juicr.flutter/p2p_bridge',
-  );
+  final MethodChannel channel;
+  final Duration readinessTimeout;
+  final Duration readinessPollInterval;
+  static final Map<MethodChannel, Map<int, Completer<void>>>
+      _generationCancellations = <MethodChannel, Map<int, Completer<void>>>{};
+
+  Map<int, Completer<void>> get _cancellations {
+    return _generationCancellations.putIfAbsent(
+      channel,
+      () => <int, Completer<void>>{},
+    );
+  }
+
+  Future<T> _awaitGeneration<T>(
+    Future<T> operation,
+    Completer<void> cancellation,
+    DateTime deadline,
+  ) {
+    final remaining = deadline.difference(DateTime.now());
+    if (remaining <= Duration.zero) {
+      return Future<T>.error(
+        TimeoutException('P2P local playback deadline expired.'),
+      );
+    }
+    return Future.any<T>(<Future<T>>[
+      operation,
+      cancellation.future.then<T>(
+        (_) => throw StateError('P2P playback generation was cancelled.'),
+      ),
+    ]).timeout(remaining);
+  }
 
   @override
   bool get isAvailable => defaultTargetPlatform == TargetPlatform.android;
@@ -367,33 +410,133 @@ class MethodChannelP2pLocalStreamBridge extends P2pLocalStreamBridge {
       'Advanced P2P playback support is only available in Android builds that include the Beta runtime.';
 
   @override
-  Future<Uri> open(P2pStreamDescriptor descriptor) async {
-    if (!descriptor.isUsable) {
+  Future<Uri> open(
+    P2pStreamDescriptor descriptor, {
+    int? generation,
+  }) async {
+    if (!descriptor.isUsable || generation == null || generation <= 0) {
       throw ArgumentError('Missing P2P info hash.');
     }
-    final localUrl = await _channel.invokeMethod<String>('open', {
-      'infoHash': descriptor.infoHash,
-      'fileIdx': descriptor.fileIdx,
-      'trackers': descriptor.trackers,
-      'displayName': descriptor.displayName,
-      'quality': descriptor.quality,
-    });
-    final uri = Uri.tryParse(localUrl ?? '');
-    if (uri == null || uri.host != '127.0.0.1') {
-      throw StateError('P2P bridge did not return a local playback URL.');
+    final deadline = DateTime.now().add(readinessTimeout);
+    final cancellation = Completer<void>();
+    _cancellations[generation] = cancellation;
+    try {
+      final localUrl = await _awaitGeneration<String?>(
+        channel.invokeMethod<String>('open', <String, Object?>{
+          'infoHash': descriptor.infoHash,
+          'fileIdx': descriptor.fileIdx,
+          'trackers': descriptor.trackers,
+          'displayName': descriptor.displayName,
+          'quality': descriptor.quality,
+          'generation': generation,
+        }),
+        cancellation,
+        deadline,
+      );
+      final uri = Uri.tryParse(localUrl ?? '');
+      if (uri == null ||
+          uri.scheme != 'http' ||
+          uri.host != '127.0.0.1' ||
+          !uri.hasPort ||
+          uri.port <= 0 ||
+          uri.port > 65535 ||
+          uri.userInfo.isNotEmpty ||
+          uri.hasFragment) {
+        throw StateError('P2P bridge did not return a local playback URL.');
+      }
+      while (DateTime.now().isBefore(deadline)) {
+        final ready = await _awaitGeneration<bool?>(
+          channel.invokeMethod<bool>(
+            'isReady',
+            <String, Object>{'generation': generation},
+          ),
+          cancellation,
+          deadline,
+        );
+        if (ready == true) return uri;
+        final delayRemaining = deadline.difference(DateTime.now());
+        if (delayRemaining <= Duration.zero) break;
+        await _awaitGeneration<void>(
+          Future<void>.delayed(
+            delayRemaining < readinessPollInterval
+                ? delayRemaining
+                : readinessPollInterval,
+          ),
+          cancellation,
+          deadline,
+        );
+      }
+      throw TimeoutException('P2P local playback did not become readable.');
+    } catch (error, stackTrace) {
+      try {
+        await channel.invokeMethod<void>(
+          'stopGeneration',
+          <String, Object>{'generation': generation},
+        ).timeout(const Duration(seconds: 2));
+      } catch (_) {
+        // Preserve the original open/readiness failure.
+      }
+      Error.throwWithStackTrace(error, stackTrace);
+    } finally {
+      _cancellations.remove(generation);
+      if (_cancellations.isEmpty) {
+        _generationCancellations.remove(channel);
+      }
     }
-    return uri;
   }
 
   @override
   Future<String> networkBucket() async {
-    final bucket = await _channel.invokeMethod<String>('networkBucket');
+    final bucket = await channel.invokeMethod<String>('networkBucket');
     return _safeNetworkBucket(bucket);
   }
 
   @override
+  Future<String> readinessStage(int generation) async {
+    if (generation <= 0) return 'unknown';
+    try {
+      final status = await channel.invokeMapMethod<String, Object?>(
+        'readinessStatus',
+        <String, Object>{'generation': generation},
+      );
+      return _safeReadinessStage(status?['stage']);
+    } on PlatformException {
+      return 'unknown';
+    } on MissingPluginException {
+      return 'unknown';
+    }
+  }
+
+  @override
   Future<void> stopAll() async {
-    await _channel.invokeMethod<void>('stopAll');
+    await channel.invokeMethod<void>('stopAll');
+  }
+
+  @override
+  Future<void> stopThrough(int generation) async {
+    if (generation <= 0) return;
+    for (final entry in _cancellations.entries.toList()) {
+      if (entry.key <= generation && !entry.value.isCompleted) {
+        entry.value.complete();
+      }
+    }
+    await channel.invokeMethod<void>(
+      'stopAll',
+      <String, Object>{'generation': generation},
+    );
+  }
+
+  @override
+  Future<void> stopGeneration(int generation) async {
+    if (generation <= 0) return;
+    final cancellation = _cancellations[generation];
+    if (cancellation != null && !cancellation.isCompleted) {
+      cancellation.complete();
+    }
+    await channel.invokeMethod<void>(
+      'stopGeneration',
+      <String, Object>{'generation': generation},
+    );
   }
 }
 
@@ -408,7 +551,10 @@ class DisabledP2pLocalStreamBridge extends P2pLocalStreamBridge {
       'Advanced P2P playback support is not installed in this build.';
 
   @override
-  Future<Uri> open(P2pStreamDescriptor descriptor) {
+  Future<Uri> open(
+    P2pStreamDescriptor descriptor, {
+    int? generation,
+  }) {
     throw UnsupportedError(unavailableReason);
   }
 
@@ -417,6 +563,90 @@ class DisabledP2pLocalStreamBridge extends P2pLocalStreamBridge {
 
   @override
   Future<void> stopAll() async {}
+}
+
+class P2pPlaybackOwner {
+  P2pPlaybackOwner({required this.bridge});
+
+  final P2pLocalStreamBridge bridge;
+  int? _activeGeneration;
+  int _finalizedThroughGeneration = 0;
+  final Set<int> _preparedGenerations = <int>{};
+
+  int? get activeGeneration => _activeGeneration;
+  bool get hasActiveTransport => _activeGeneration != null;
+
+  bool _isFinalized(int generation) {
+    return generation <= _finalizedThroughGeneration;
+  }
+
+  Future<Uri> prepare(
+    P2pStreamDescriptor descriptor, {
+    required int generation,
+  }) async {
+    if (generation <= 0) {
+      throw ArgumentError('P2P playback generation must be positive.');
+    }
+    if (_isFinalized(generation)) {
+      throw StateError('P2P playback generation is already closed.');
+    }
+    if (!bridge.isAvailable) {
+      throw StateError('Advanced playback is unavailable.');
+    }
+    final uri = await bridge.open(descriptor, generation: generation);
+    if (_isFinalized(generation)) {
+      await bridge.stopGeneration(generation);
+      throw StateError('P2P playback generation closed during preparation.');
+    }
+    _preparedGenerations.add(generation);
+    return uri;
+  }
+
+  Future<void> commit(int generation) async {
+    if (!_preparedGenerations.remove(generation)) {
+      throw StateError('P2P playback generation was not prepared.');
+    }
+    await bridge.stopThrough(generation - 1);
+    final activeGeneration = _activeGeneration;
+    if (_isFinalized(generation) ||
+        (activeGeneration != null && activeGeneration > generation)) {
+      await bridge.stopGeneration(generation);
+      return;
+    }
+    _activeGeneration = generation;
+  }
+
+  Future<void> rollback(int generation) async {
+    _preparedGenerations.remove(generation);
+    if (generation > _finalizedThroughGeneration) {
+      _finalizedThroughGeneration = generation;
+    }
+    if (_activeGeneration == generation) {
+      _activeGeneration = null;
+    }
+    await bridge.stopGeneration(generation);
+  }
+
+  Future<void> closeActive() async {
+    final generation = _activeGeneration;
+    if (generation == null) return;
+    _activeGeneration = null;
+    if (generation > _finalizedThroughGeneration) {
+      _finalizedThroughGeneration = generation;
+    }
+    await bridge.stopGeneration(generation);
+  }
+
+  Future<void> closeThrough(int generation) async {
+    _preparedGenerations.removeWhere((value) => value <= generation);
+    if (generation > _finalizedThroughGeneration) {
+      _finalizedThroughGeneration = generation;
+    }
+    if ((_activeGeneration ?? 0) <= generation) {
+      _activeGeneration = null;
+    }
+    await bridge.stopThrough(generation);
+  }
 }
 
 String _safeNetworkBucket(String? value) {
@@ -428,6 +658,20 @@ String _safeNetworkBucket(String? value) {
     'offline' => 'offline',
     'other' => 'other',
     _ => 'unavailable',
+  };
+}
+
+String _safeReadinessStage(Object? value) {
+  return switch ((value ?? '').toString().trim().toLowerCase()) {
+    'starting' => 'starting',
+    'handle' => 'handle',
+    'metadata' => 'metadata',
+    'file' => 'file',
+    'peers' => 'peers',
+    'pieces' => 'pieces',
+    'readable' => 'readable',
+    'failed' => 'failed',
+    _ => 'unknown',
   };
 }
 

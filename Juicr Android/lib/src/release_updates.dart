@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'release_update_assets.dart';
+
 enum ReleaseUpdateChannel { stable, nightly }
 
 class ReleaseUpdateInfo {
@@ -13,6 +15,7 @@ class ReleaseUpdateInfo {
     required this.publishedAt,
     required this.checkedAt,
     required this.fromFallback,
+    this.apkAssets = const [],
     this.releaseUrl,
   });
 
@@ -23,6 +26,7 @@ class ReleaseUpdateInfo {
   final DateTime? publishedAt;
   final DateTime checkedAt;
   final bool fromFallback;
+  final List<ReleaseApkAsset> apkAssets;
   final Uri? releaseUrl;
 
   String get displayVersion {
@@ -87,7 +91,7 @@ class ReleaseUpdatesClient {
       if (release == null) {
         throw const FormatException('No matching release found.');
       }
-      return _fromReleaseJson(release, channel, checkedAt);
+      return await _fromReleaseJson(release, channel, checkedAt, client);
     } catch (_) {
       return fallbackReleaseInfo(channel, checkedAt: checkedAt);
     } finally {
@@ -95,11 +99,12 @@ class ReleaseUpdatesClient {
     }
   }
 
-  ReleaseUpdateInfo _fromReleaseJson(
+  Future<ReleaseUpdateInfo> _fromReleaseJson(
     Map<String, dynamic> json,
     ReleaseUpdateChannel channel,
     DateTime checkedAt,
-  ) {
+    http.Client client,
+  ) async {
     final tag = (json['tag_name'] ?? '').toString().trim();
     final name = (json['name'] ?? tag).toString().trim();
     final body = (json['body'] ?? '').toString().trim();
@@ -107,6 +112,11 @@ class ReleaseUpdatesClient {
       (json['published_at'] ?? '').toString(),
     )?.toLocal();
     final releaseUrl = _safeExternalUri((json['html_url'] ?? '').toString());
+    final apkAssets = await _verifiedApkAssets(
+      releaseJson: json,
+      releaseTag: tag,
+      client: client,
+    );
     return ReleaseUpdateInfo(
       channel: channel,
       name: name.isEmpty ? tag : name,
@@ -115,8 +125,64 @@ class ReleaseUpdatesClient {
       publishedAt: publishedAt,
       checkedAt: checkedAt,
       fromFallback: false,
+      apkAssets: apkAssets,
       releaseUrl: releaseUrl,
     );
+  }
+
+  Future<List<ReleaseApkAsset>> _verifiedApkAssets({
+    required Map<String, dynamic> releaseJson,
+    required String releaseTag,
+    required http.Client client,
+  }) async {
+    try {
+      if (releaseTag.isEmpty) return const [];
+      final rawAssets = releaseJson['assets'];
+      if (rawAssets is! List || rawAssets.length > 17) return const [];
+      final expectedManifestName = 'juicr-$releaseTag-checksums.json';
+      final manifests = <Uri>[];
+      final apkAssets = <GithubReleaseAsset>[];
+      for (final raw in rawAssets) {
+        if (raw is! Map) return const [];
+        final asset = Map<String, dynamic>.from(raw);
+        final name = (asset['name'] ?? '').toString().trim();
+        final size = asset['size'];
+        final uri = _safeReleaseAssetUri(
+          (asset['browser_download_url'] ?? '').toString(),
+          releaseTag: releaseTag,
+          assetName: name,
+        );
+        if (uri == null) return const [];
+        if (name == expectedManifestName) {
+          manifests.add(uri);
+        } else if (name.endsWith('.apk')) {
+          if (size is! int || size <= 0) return const [];
+          apkAssets.add(
+            GithubReleaseAsset(name: name, size: size, downloadUri: uri),
+          );
+        }
+      }
+      if (manifests.length != 1 || apkAssets.isEmpty) return const [];
+      final response = await client.get(
+        manifests.single,
+        headers: const {
+          'Accept': 'application/json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      ).timeout(const Duration(seconds: 8));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return const [];
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map) return const [];
+      return parseReleaseApkAssets(
+        releaseTag: releaseTag,
+        githubAssets: apkAssets,
+        manifestJson: Map<String, Object?>.from(decoded),
+      );
+    } catch (_) {
+      return const [];
+    }
   }
 }
 
@@ -131,6 +197,34 @@ Uri? _safeExternalUri(String value) {
       segments[2] != 'releases' ||
       segments[3] != 'tag' ||
       segments[4].trim().isEmpty) {
+    return null;
+  }
+  return uri;
+}
+
+Uri? _safeReleaseAssetUri(
+  String value, {
+  required String releaseTag,
+  required String assetName,
+}) {
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null ||
+      uri.scheme != 'https' ||
+      uri.host.toLowerCase() != 'github.com' ||
+      uri.hasPort ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasQuery ||
+      uri.hasFragment) {
+    return null;
+  }
+  final segments = uri.pathSegments;
+  if (segments.length != 6 ||
+      segments[0] != 'Team-Juicr' ||
+      segments[1] != 'Juicr' ||
+      segments[2] != 'releases' ||
+      segments[3] != 'download' ||
+      segments[4] != releaseTag ||
+      segments[5] != assetName) {
     return null;
   }
   return uri;

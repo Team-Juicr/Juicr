@@ -232,26 +232,28 @@ class HomeEditorialEdition {
     required this.movie,
     required this.series,
     required this.animation,
+    this.orderedRails = const <HomeEditorialRail>[],
   });
 
   factory HomeEditorialEdition.fromJson(Map<String, dynamic> json) {
-    final rails = _homeEditorialRailsById(json['rails']);
+    final orderedRails = _homeEditorialRails(json['rails']);
+    final rails = {for (final rail in orderedRails) rail.id: rail};
     return HomeEditorialEdition(
       editionId: (json['editionId'] ?? '').toString(),
       editionDate: (json['editionDate'] ?? '').toString(),
       hero: HomeEditorialRail.fromJson(json['hero']),
-      topSignal: HomeEditorialRail.fromJson(rails['topSignal']),
-      todaySignal: HomeEditorialRail.fromJson(rails['todaySignal']),
-      juicrTopSignal: HomeEditorialRail.fromJson(rails['juicrTopSignal']),
-      movie: HomeEditorialRail.fromJson(
-        rails['movieEditorial'] ?? rails['movie'],
-      ),
-      series: HomeEditorialRail.fromJson(
-        rails['seriesEditorial'] ?? rails['series'],
-      ),
-      animation: HomeEditorialRail.fromJson(
-        rails['animationEditorial'] ?? rails['animation'],
-      ),
+      topSignal: rails['topSignal'] ?? HomeEditorialRail.empty,
+      todaySignal: rails['todaySignal'] ?? HomeEditorialRail.empty,
+      juicrTopSignal: rails['juicrTopSignal'] ?? HomeEditorialRail.empty,
+      movie:
+          rails['movieEditorial'] ?? rails['movie'] ?? HomeEditorialRail.empty,
+      series: rails['seriesEditorial'] ??
+          rails['series'] ??
+          HomeEditorialRail.empty,
+      animation: rails['animationEditorial'] ??
+          rails['animation'] ??
+          HomeEditorialRail.empty,
+      orderedRails: orderedRails,
     );
   }
 
@@ -264,6 +266,7 @@ class HomeEditorialEdition {
   final HomeEditorialRail movie;
   final HomeEditorialRail series;
   final HomeEditorialRail animation;
+  final List<HomeEditorialRail> orderedRails;
 
   bool get hasUsableRails =>
       hero.title.isNotEmpty ||
@@ -274,19 +277,61 @@ class HomeEditorialEdition {
       series.title.isNotEmpty ||
       animation.title.isNotEmpty;
 
+  bool get hasCompleteHomeContract {
+    const requiredIds = <String>[
+      'todaySignal',
+      'topSignal',
+      'juicrTopSignal',
+      'savedEditorial',
+      'upcomingEditorial',
+    ];
+    if (editionId.trim().isEmpty ||
+        !RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(editionDate.trim()) ||
+        hero.title.trim().isEmpty ||
+        orderedRails.length != requiredIds.length) {
+      return false;
+    }
+    for (var index = 0; index < requiredIds.length; index += 1) {
+      final rail = orderedRails[index];
+      if (rail.id != requiredIds[index] || rail.title.trim().isEmpty) {
+        return false;
+      }
+    }
+    final saved = orderedRails[3];
+    final upcoming = orderedRails[4];
+    final rankedRails = orderedRails.take(3);
+    final rankedRolesAreExact = rankedRails.every((rail) {
+      if (rail.kind != 'ranked' || rail.items.isEmpty) return false;
+      for (var index = 0; index < rail.items.length; index += 1) {
+        final item = rail.items[index];
+        if (!item.isUsable || item.rank != index + 1) return false;
+      }
+      return true;
+    });
+    return rankedRolesAreExact &&
+        saved.kind == 'library' &&
+        saved.intent == 'saved_library' &&
+        upcoming.kind == 'catalog' &&
+        upcoming.intent == 'upcoming' &&
+        upcoming.sort == CatalogSort.upcoming &&
+        RegExp(r'^\d{4}$').hasMatch(upcoming.year);
+  }
+
   Map<String, dynamic> toJson() {
     return {
       'editionId': editionId,
       'editionDate': editionDate,
       'hero': hero.toJson(),
-      'rails': [
-        topSignal.toJson(idOverride: 'topSignal'),
-        todaySignal.toJson(idOverride: 'todaySignal'),
-        juicrTopSignal.toJson(idOverride: 'juicrTopSignal'),
-        movie.toJson(idOverride: 'movieEditorial'),
-        series.toJson(idOverride: 'seriesEditorial'),
-        animation.toJson(idOverride: 'animationEditorial'),
-      ],
+      'rails': orderedRails.isNotEmpty
+          ? orderedRails.map((rail) => rail.toJson()).toList(growable: false)
+          : [
+              topSignal.toJson(idOverride: 'topSignal'),
+              todaySignal.toJson(idOverride: 'todaySignal'),
+              juicrTopSignal.toJson(idOverride: 'juicrTopSignal'),
+              movie.toJson(idOverride: 'movieEditorial'),
+              series.toJson(idOverride: 'seriesEditorial'),
+              animation.toJson(idOverride: 'animationEditorial'),
+            ],
     };
   }
 }
@@ -304,6 +349,7 @@ class HomeEditorialRail {
     this.requireGenreMatch = false,
     this.intent = '',
     this.releaseWindow = '',
+    this.year = '',
     this.theme = '',
     this.seasonalWindow = '',
     this.query = '',
@@ -333,10 +379,7 @@ class HomeEditorialRail {
       id: (json['id'] ?? '').toString().trim(),
       kind: (json['kind'] ?? '').toString().trim(),
       title: title,
-      subtitle: juicrCopyWithoutRepeatedTitlePhrase(
-        title: title,
-        subtitle: subtitle,
-      ),
+      subtitle: subtitle,
       genres: genres.isNotEmpty
           ? genres
           : routeGenre.isNotEmpty && routeGenre.toLowerCase() != 'all genres'
@@ -354,6 +397,7 @@ class HomeEditorialRail {
       requireGenreMatch: json['requireGenreMatch'] == true,
       intent: (json['intent'] ?? '').toString().trim(),
       releaseWindow: (json['releaseWindow'] ?? '').toString().trim(),
+      year: (json['year'] ?? route['year'] ?? '').toString().trim(),
       theme: (json['theme'] ?? '').toString().trim(),
       seasonalWindow: (json['seasonalWindow'] ?? '').toString().trim(),
       query: query,
@@ -389,6 +433,7 @@ class HomeEditorialRail {
   final bool requireGenreMatch;
   final String intent;
   final String releaseWindow;
+  final String year;
   final String theme;
   final String seasonalWindow;
   final String query;
@@ -413,6 +458,7 @@ class HomeEditorialRail {
       'requireGenreMatch': requireGenreMatch,
       if (intent.isNotEmpty) 'intent': intent,
       if (releaseWindow.isNotEmpty) 'releaseWindow': releaseWindow,
+      if (year.isNotEmpty) 'year': year,
       if (theme.isNotEmpty) 'theme': theme,
       if (seasonalWindow.isNotEmpty) 'seasonalWindow': seasonalWindow,
       if (query.isNotEmpty) 'query': query,
@@ -429,6 +475,7 @@ class HomeEditorialRail {
         if (genres.isNotEmpty) 'genre': genres.first,
         'sort': sort.id,
         if (query.isNotEmpty) 'query': query,
+        if (year.isNotEmpty) 'year': year,
       },
     };
   }
@@ -628,18 +675,16 @@ class NotificationControls {
   }
 }
 
-Map<String, dynamic> _homeEditorialRailsById(dynamic value) {
-  if (value is Map) return Map<String, dynamic>.from(value);
-  if (value is! List) return const <String, dynamic>{};
-  final rails = <String, dynamic>{};
-  for (final item in value) {
-    if (item is! Map) continue;
-    final rail = Map<String, dynamic>.from(item);
-    final id = (rail['id'] ?? '').toString().trim();
-    if (id.isEmpty) continue;
-    rails[id] = rail;
-  }
-  return rails;
+List<HomeEditorialRail> _homeEditorialRails(dynamic value) {
+  final rawRails = value is List
+      ? value
+      : value is Map
+          ? value.values.toList(growable: false)
+          : const <dynamic>[];
+  return rawRails
+      .map(HomeEditorialRail.fromJson)
+      .where((rail) => rail.id.isNotEmpty && rail.title.isNotEmpty)
+      .toList(growable: false);
 }
 
 List<HomeEditorialTrendItem> _homeEditorialTrendItems(dynamic value) {
@@ -647,7 +692,6 @@ List<HomeEditorialTrendItem> _homeEditorialTrendItems(dynamic value) {
   return value
       .map(HomeEditorialTrendItem.fromJson)
       .where((item) => item.isUsable)
-      .take(20)
       .toList(growable: false);
 }
 
@@ -1620,8 +1664,8 @@ class StreamApi {
         return null;
       }
       final editorial = HomeEditorialEdition.fromJson(decoded);
-      if (!editorial.hasUsableRails) {
-        DiagnosticLog.add('home editorial skipped reason=empty_rails');
+      if (!editorial.hasCompleteHomeContract) {
+        DiagnosticLog.add('home editorial skipped reason=incomplete_contract');
         return null;
       }
       return editorial;
